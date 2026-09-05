@@ -23,6 +23,12 @@ track hits a hard wall.
 
 Full detail in [docs/00-host-baseline.md](docs/00-host-baseline.md).
 
+### After a reboot
+
+The host needs two manual steps at the console before it is reachable: the **LUKS passphrase**
+for `/var/home`, and **starting `sshd`**, which does not auto-start. Expect several minutes of
+`Connection refused` after a reboot; that is normal, not a fault.
+
 ### Running commands on the host
 
 Plain `ssh` and `rsync` work normally. There was a period where non-PTY sessions hung; a
@@ -57,7 +63,8 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    enumeration, and V4L2 streaming all work. Waydroid's minigbm `gbm_mesa` gralloc cannot
    CPU-map the YV12 buffer the camera HAL writes into, so every frame fails conversion and the
    preview stays black. No configuration fixes it; both alternative gralloc settings were tested.
-   See [docs/01-camera-investigation.md](docs/01-camera-investigation.md).
+   See [docs/01-camera-investigation.md](docs/01-camera-investigation.md) and
+   [docs/04-phase0-gbm-map.md](docs/04-phase0-gbm-map.md).
 2. **Accelerometer and vibration** — expose these to Waydroid.
 3. **Power** — make Waydroid report correct battery statistics and AC adapter state.
 4. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.

@@ -11,6 +11,27 @@
 >
 > The original investigation is preserved below.
 
+## After a reboot: two manual steps
+
+bigtab01 does not come back on its own. Both of these need someone at the console:
+
+1. **LUKS passphrase.** `/var/home` is on `luks-7c160738-7ed1-4477-b13c-e56489f95487`. A cold
+   boot halts at the unlock prompt until the passphrase is entered, so the machine is invisible
+   on the network — SSH shows `Connection refused`, not a timeout.
+2. **`sshd` does not auto-start.** Even once booted, the service must be started manually.
+
+Practical consequence: after asking for a reboot, expect several minutes of `Connection refused`
+and do not diagnose it as a fault. Observed 2026-09-05: ~6 minutes from reboot to SSH answering.
+
+Poll for it rather than guessing:
+
+```bash
+for i in $(seq 1 60); do
+  timeout 5 bash -c 'cat </dev/null >/dev/tcp/10.42.0.137/22' 2>/dev/null && { echo UP; break; }
+  sleep 15
+done
+```
+
 ## Symptom
 
 Interactive `ssh 10.42.0.137` works normally. Anything that does **not** allocate a PTY hangs
