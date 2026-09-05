@@ -1,0 +1,84 @@
+<!--
+ MODIFIED FOR bigtab01 (HP Envy x2 13-j012dx, HP TrueVision Full HD @ /dev/video0).
+
+ Problem this solves:
+   The stock config advertises resolutions up to 2592x1944. The external camera HAL
+   picked 1920x1080@30fps (MJPG - the only format on this camera that reaches 30fps at
+   1080p), started the V4L2 stream, and then failed in conversion:
+
+       ExtCamDevSsn@3.4: start V4L2 streaming 1920x1080@30.000000fps
+       ExtCamDevSsn@3.4: threadLoop: format coversion failed!
+
+   Visible symptom: camera LED lights up, preview stays black.
+
+ Change:
+   All Limit entries above 1280x720 removed, so the HAL selects at most 1280x720 -
+   a mode this camera supports at 30fps in MJPG. 2592x1944 and 1600x1200 are not
+   supported by this hardware at all and were pure noise.
+
+ Camera's actual capabilities (bin/v4l2-formats.py /dev/video0):
+   YUYV: 1920x1080@5 1280x720@10 640x480@30 640x360@30 352x288@30 320x240@30 176x144@30
+   MJPG: 1920x1080@30 1280x720@30 640x480@30 640x360@30 352x288@30 320x240@30 176x144@30
+
+ Revert: delete /var/lib/waydroid/overlay/vendor/etc/external_camera_config.xml
+-->
+<!--
+ Source:
+ https://github.com/BlissOS/device_generic_common/blob/7096d60e36653744f9f55fd2f02ff115f0b49774/external_camera_config.xml
+-->
+
+<ExternalCamera>
+    <Provider>
+        <ignore> <!-- Internal video devices to be ignored by external camera HAL -->
+            <!-- <id>0</id> -->
+            <!-- <id>1</id> -->
+        </ignore>
+    </Provider>
+    <!-- See ExternalCameraUtils.cpp for default values of Device configurations below -->
+    <Device>
+        <!-- Max JPEG buffer size in bytes-->
+        <MaxJpegBufferSize bytes="3145728"/> <!-- 3MB (~= 1080p YUV420) -->
+        <!-- Size of v4l2 buffer queue when streaming >= 30fps -->
+        <!-- Larger value: more request can be cached pipeline (less janky)  -->
+        <!-- Smaller value: use less memory -->
+        <NumVideoBuffers count="4"/>
+        <!-- Size of v4l2 buffer queue when streaming < 30fps -->
+        <NumStillBuffers count="2"/>
+
+        <!-- List of maximum fps for various output sizes -->
+        <!-- Any image size smaller than the size listed in Limit row will report
+            fps (as minimum frame duration) up to the fpsBound value. -->
+        <FpsList>
+            <!-- width/height must be increasing, fpsBound must be decreasing-->
+            <Limit  width="176" height="144" fpsBound="60.0" />
+            <Limit  width="176" height="144" fpsBound="30.0" />
+            <Limit  width="176" height="144" fpsBound="20.0" />
+            <Limit  width="176" height="144" fpsBound="15.0" />
+            <Limit  width="320" height="240" fpsBound="60.0" />
+            <Limit  width="320" height="240" fpsBound="30.0" />
+            <Limit  width="320" height="240" fpsBound="20.0" />
+            <Limit  width="320" height="240" fpsBound="15.0" />
+            <Limit  width="352" height="288" fpsBound="30.0" />
+            <Limit  width="352" height="288" fpsBound="20.0" />
+            <Limit  width="352" height="288" fpsBound="15.0" />
+            <Limit  width="640" height="480" fpsBound="60.0" />
+            <Limit  width="640" height="480" fpsBound="30.0" />
+            <Limit  width="640" height="480" fpsBound="20.0" />
+            <Limit  width="640" height="480" fpsBound="15.0" />
+            <Limit  width="640" height="480" fpsBound="10.0" />
+            <Limit  width="800" height="600" fpsBound="30.0" />
+            <Limit  width="800" height="600" fpsBound="20.0" />
+            <Limit  width="800" height="600" fpsBound="15.0" />
+            <Limit  width="1024" height="768" fpsBound="30.0" />
+            <Limit  width="1024" height="768" fpsBound="20.0" />
+            <Limit  width="1024" height="768" fpsBound="15.0" />
+            <Limit  width="1024" height="768" fpsBound="10.0" />
+            <Limit  width="1280" height="720" fpsBound="60.0" />
+            <Limit  width="1280" height="720" fpsBound="30.0" />
+            <Limit  width="1280" height="720" fpsBound="20.0" />
+            <Limit  width="1280" height="720" fpsBound="15.0" />
+            <Limit  width="1280" height="720" fpsBound="10.0" />
+            <!-- image size larger than the last entry will not be supported-->
+        </FpsList>
+    </Device>
+</ExternalCamera>

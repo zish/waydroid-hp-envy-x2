@@ -1,0 +1,6 @@
+#!/bin/bash
+# Run a command on bigtab01 via forced-PTY ssh.
+# Non-PTY ssh sessions hang on this host; see docs/02-ssh-access.md.
+# Usage: bin/rsh 'uptime; free -h'
+timeout "${RSH_TIMEOUT:-60}" ssh -tt -o BatchMode=yes "${BIGTAB_HOST:-10.42.0.137}" "$@" < /dev/null 2>&1 \
+  | tr -d '\r' | sed '/^Connection to .* closed\.$/d'
