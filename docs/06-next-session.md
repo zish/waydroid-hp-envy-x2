@@ -36,16 +36,16 @@ Outcome decides everything:
 
 ## State left on bigtab01
 
-Verified during the session; the host became unreachable before a final re-check, so confirm
-before relying on it.
+Re-verified on the host 2026-09-05 after a power cycle; all rows below are confirmed, not
+remembered.
 
 | Item | State |
 |---|---|
 | `waydroid_base.prop` | **restored to original**, verified byte-identical. Backup at `waydroid_base.prop.orig` |
 | `ro.hardware.gralloc` | back to `gbm` (note: overridden to `minigbm_gbm_mesa` at runtime regardless) |
 | Vendor overlay | `overlay/vendor/etc/external_camera_config.xml` — resolution capped at 720p. **Not a fix**, harmless; delete to revert |
-| Waydroid session | left RUNNING |
-| Toolbox container | `fedora-toolbox-44` created but **never used**; safe to delete (`toolbox rm fedora-toolbox-44`) |
+| Waydroid session | `Session: RUNNING`, `Container: FROZEN` — freeze is the normal idle state (`suspend_action = freeze`), not a fault |
+| Toolbox container | `fedora-toolbox-44` present but **never used** — the GBM probes ran natively via `dlopen`. Safe to delete (`toolbox rm fedora-toolbox-44`), or keep for an NDK build |
 | `/tmp` probes | probe binaries and scripts copied there; `/tmp` clears on reboot, re-copy as needed |
 
 Nothing destructive was done. No packages were layered onto the immutable OS.
