@@ -66,7 +66,10 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    dropping it into the vendor overlay for **both** ABIs. See
    [docs/08-camera-fixed.md](docs/08-camera-fixed.md); the investigation is in
    [docs/01](docs/01-camera-investigation.md), [04](docs/04-phase0-gbm-map.md) and
-   [07](docs/07-phase1-android-mesa.md). Not yet reported upstream.
+   [07](docs/07-phase1-android-mesa.md). Reported upstream as
+   [minigbm#3](https://github.com/waydroid/android_external_minigbm/issues/3), cross-linked from
+   [waydroid#2339](https://github.com/waydroid/waydroid/issues/2339) — see
+   [docs/09-upstream-report.md](docs/09-upstream-report.md).
 2. **Accelerometer and vibration** — expose these to Waydroid.
 3. **Power** — make Waydroid report correct battery statistics and AC adapter state.
 4. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.

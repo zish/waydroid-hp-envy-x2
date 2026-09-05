@@ -39,7 +39,10 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 - resolutions other than 1280x720 (the 720p overlay cap is still in place)
 - stills and video capture — only the preview path was tested
 - whether the overlay survives a host reboot (it lives in `/var`, so it should)
-- **reporting the bug upstream** — it will hit any GPU whose Mesa lacks YUV allocation
+- ~~reporting the bug upstream~~ — done 2026-09-05:
+  [minigbm#3](https://github.com/waydroid/android_external_minigbm/issues/3) plus a comment on
+  [waydroid#2339](https://github.com/waydroid/waydroid/issues/2339#issuecomment-5554520688).
+  Awaiting a maintainer reply; see [docs/09](09-upstream-report.md)
 
 ## State left on bigtab01
 

@@ -141,12 +141,23 @@ still failed on the device.** What resolved it was compiling in argument tracing
 Exact bytes as deployed are kept in [artifacts/phase2/](../artifacts/phase2/). Revert by deleting
 the two `.so` files and restarting the session; nothing in the images was modified.
 
+## Reported upstream
+
+Filed 2026-09-05. This is a real bug in `waydroid/android_external_minigbm` that will hit any GPU
+whose Mesa lacks YUV allocation — which, per
+[mesa3d#4](https://github.com/waydroid/android_external_mesa3d/issues/4), is all of them. The
+`meta.total_size`-is-zero half is a plain bug regardless of GPU.
+
+| | |
+|---|---|
+| [android_external_minigbm#3](https://github.com/waydroid/android_external_minigbm/issues/3) | the defect itself, with the fix |
+| [waydroid#2339 (comment)](https://github.com/waydroid/waydroid/issues/2339#issuecomment-5554520688) | same symptom reported from an Intel UHD 620 host; why the patch there will not fix it |
+
+Text as posted, and the reasoning behind the split, are in
+[09-upstream-report.md](09-upstream-report.md).
+
 ## Not yet done
 
-- **Not reported upstream.** This is a real bug in `waydroid/android_external_minigbm` that will
-  hit any GPU whose Mesa lacks YUV allocation — which, per
-  [mesa3d#4](https://github.com/waydroid/android_external_mesa3d/issues/4), is all of them. The
-  `meta.total_size`-is-zero half is a plain bug regardless of GPU. Worth filing.
 - **Resolutions other than 1280x720 untested.** The overlay still caps the external camera at
   720p. The fix is resolution-independent by construction (it reads the dmabuf size), but that is
   reasoning, not measurement.
