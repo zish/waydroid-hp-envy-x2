@@ -1,0 +1,28 @@
+Captured from the --debug build of the fixed 32-bit wrapper, in the camera
+provider (pid 79), while Open Camera was streaming. This is the evidence that
+corrected the fix: the width arriving at gbm_import is 0, not bo->meta.total_size,
+because minigbm fills meta.total_size in only after calling the backend's
+bo_import hook.
+
+--- BEFORE the lseek fix: import width is 0, so the bo is 4096x0 and the map fails
+E GBM-MESA-WRAPPER: TRACE import in : fd=14 0x1 fmt=0x20203852 stride=1280 mod=0x0
+E GBM-MESA-WRAPPER: TRACE import fix: -> 4096x0 stride=4096
+E GBM-MESA-WRAPPER: TRACE import out: bo=0xf790cc20
+E GBM-MESA-WRAPPER: TRACE map in : req 2097152x1  bo 4096x0 fmt=0x20203852 mod=0x0 planes=1 stride=4096
+E GBM-MESA-WRAPPER: TRACE map fix: -> 4096x0
+E GBM-MESA-WRAPPER: TRACE map out: addr=0x0 map_stride=0
+E GBM-MESA-WRAPPER: Failed to map the buffer at .../gbm_mesa_wrapper.cpp:305
+E ExtCamUtils@3.4: formatConvert: unsupported flexible yuv layout y 0x0 cb 0x0 cr 0x0 y_str 0 c_str 0 c_step 0
+E ExtCamDevSsn@3.4: threadLoop: format coversion failed!
+
+--- AFTER: the dmabuf reports 2097152 bytes, so the bo is 4096x512 and the map succeeds
+E GBM-MESA-WRAPPER: TRACE map in : req 2097152x1  bo 4096x512 fmt=0x20203852 mod=0x0 planes=1 stride=4096
+E GBM-MESA-WRAPPER: TRACE map fix: -> 4096x512
+E GBM-MESA-WRAPPER: TRACE map out: addr=0xea000000 map_stride=4096
+E GBM-MESA-WRAPPER: TRACE map in : req 2097152x1  bo 4096x512 fmt=0x20203852 mod=0x0 planes=1 stride=4096
+E GBM-MESA-WRAPPER: TRACE map fix: -> 4096x512
+E GBM-MESA-WRAPPER: TRACE map out: addr=0xea000000 map_stride=4096
+
+Note 4096 x 512 = 2097152, not the 4096 x 338 (=1384448) the allocator asked for:
+the kernel rounded the allocation up. A hardcoded 338 would have been wrong, which
+is why the fix sizes the dmabuf with lseek(SEEK_END) instead of recomputing it.

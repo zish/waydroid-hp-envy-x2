@@ -1,0 +1,14 @@
+/*
+ * The shipped libgbm_mesa_wrapper.so exports exactly one symbol: get_gbm_ops,
+ * which the minigbm gralloc modules dlsym after dlopen'ing it. Static libc++
+ * would otherwise dump hundreds of std:: symbols into the dynamic table, which
+ * both differs from the shipped binary and risks interposing on other libraries
+ * in the process. Pin the interface.
+ */
+{
+	global:
+		get_gbm_ops;
+		gbm_ops;      /* the shipped .so exports the struct itself too */
+	local:
+		*;
+};

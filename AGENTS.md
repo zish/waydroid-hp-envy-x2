@@ -59,15 +59,14 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
 
 ## Goals, in priority order
 
-1. **Camera** — **root cause pinned to one function; needs a rebuilt library.** The camera,
-   driver, HAL, enumeration, and V4L2 streaming all work. Waydroid's minigbm `gbm_mesa` gralloc
-   allocates the camera buffer as a 4096x338 R8 fallback but then *imports* it as
-   `total_size x 1` with the YV12 luma stride — a shape Mesa rejects, so the map returns NULL and
-   the camera HAL gets an all-zero plane layout. No configuration fixes it. The upstream `yuv`
-   fix does **not** apply here: it needs YUV allocation that neither the host's nor Android's
-   Mesa has. See [docs/07-phase1-android-mesa.md](docs/07-phase1-android-mesa.md), then
-   [docs/01-camera-investigation.md](docs/01-camera-investigation.md) and
-   [docs/04-phase0-gbm-map.md](docs/04-phase0-gbm-map.md).
+1. **Camera** — **DONE.** Live preview works. Waydroid's minigbm `gbm_mesa` wrapper imported
+   the camera's fallback buffer with a width of 0 (minigbm fills `meta.total_size` in only after
+   calling the backend's `bo_import` hook), so the map returned NULL and the HAL got an all-zero
+   plane layout. Fixed by rebuilding `libgbm_mesa_wrapper.so` with the NDK — no AOSP tree — and
+   dropping it into the vendor overlay for **both** ABIs. See
+   [docs/08-camera-fixed.md](docs/08-camera-fixed.md); the investigation is in
+   [docs/01](docs/01-camera-investigation.md), [04](docs/04-phase0-gbm-map.md) and
+   [07](docs/07-phase1-android-mesa.md). Not yet reported upstream.
 2. **Accelerometer and vibration** — expose these to Waydroid.
 3. **Power** — make Waydroid report correct battery statistics and AC adapter state.
 4. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.

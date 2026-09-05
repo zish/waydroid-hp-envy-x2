@@ -1,0 +1,28 @@
+phase2/wrapper-harness, 32-bit, run inside the container. Three wrappers driven
+through the same call sequence the gralloc modules make.
+
+NOTE: this harness feeds gbm_import the geometry the shipped code *intends* to
+pass (width = total_size). In the real cross-process path the width is 0 -- see
+trace-debug.log. The harness is therefore a useful A/B for "does the rebuild match
+the shipped binary", but it did NOT reproduce the true failure, and an earlier
+version of the fix passed here while still failing on the device.
+
+#################### 32-bit: /vendor/lib/libgbm_mesa_wrapper.so (shipped) ####
+  alloc 4096x338 R8: ok  out_fd=8 out_stride=4096 map_stride=4096 modifier=0x0
+  import as gralloc does: w=1384448 h=1 R8 stride=1280 (YV12 luma stride)
+    import FAILED  <-- the bug: gralloc then maps a NULL bo
+  control XRGB8888: alloc ok, import ok, map OK
+
+#################### 32-bit: wrapper32_rebuilt.so (faithful rebuild) #########
+  alloc 4096x338 R8: ok  out_fd=8 out_stride=4096 map_stride=4096 modifier=0x0
+  import as gralloc does: w=1384448 h=1 R8 stride=1280 (YV12 luma stride)
+    import FAILED  <-- identical to shipped, as required
+  control XRGB8888: alloc ok, import ok, map OK
+
+#################### 32-bit: wrapper32_fixed.so ##############################
+  alloc 4096x338 R8: ok  out_fd=8 out_stride=4096 map_stride=4096 modifier=0x0
+  import as gralloc does: w=1384448 h=1 R8 stride=1280 (YV12 luma stride)
+    import ok
+    map at s_width x 1                     OK
+    map at camera dims 1280x720            OK
+  control XRGB8888: alloc ok, import ok, map OK

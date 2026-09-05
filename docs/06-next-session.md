@@ -1,112 +1,95 @@
 # Resume brief
 
-Rewritten 2026-09-05 after phase 1. Read this first, then
-[07-phase1-android-mesa.md](07-phase1-android-mesa.md), then [05-the-fix.md](05-the-fix.md)
-(which is partly superseded — read 07 first or you will act on two corrected claims).
+Rewritten 2026-09-05 after goal 1 was completed. Read this first, then
+[08-camera-fixed.md](08-camera-fixed.md) for what was actually wrong and what is deployed.
 
 ## One-paragraph state
 
-Goal 1 (camera) is diagnosed down to a single function. The camera, driver, HAL, enumeration and
-V4L2 streaming all work. **The upstream fix is dead for this hardware**: phase 1 cross-compiled a
-probe with the NDK, ran it in the container, and measured that Android's own bundled Mesa refuses
-to allocate `GBM_FORMAT_YVU420` exactly as the host's does — and `a41dbe7` deletes the 1D fallback
-and depends on that allocation succeeding, so applying it would replace the black preview with an
-outright allocation failure. **In exchange the real defect is now pinned and is much smaller:**
-`gbm_mesa_bo_import` reconstructs the fallback buffer as `total_size × 1` with the YV12 luma
-stride, a shape the allocator never used and Mesa rejects. Importing with the shape actually
-allocated (4096×338 R8, stride 4096) works and maps at every geometry the code asks for. Nothing
-has been built yet.
+**Goal 1 (camera) is done.** Open Camera shows a live preview; `format coversion failed` and
+`Failed to map the buffer` are both zero, confirmed by a `screencap` of the real scene rather than
+by absence of errors alone. The bug was in Waydroid's minigbm `gbm_mesa` wrapper: for a format
+Mesa cannot allocate it falls back to a linear R8 buffer, but the importer passed
+`bo->meta.total_size` as the width when minigbm has not filled that in yet — so the width was
+always **0**, the import failed, and the map returned NULL. Fixed by rebuilding
+`libgbm_mesa_wrapper.so` with the NDK alone and deploying it through the vendor overlay for both
+ABIs. **No AOSP tree was needed**, and the upstream `yuv` fix turned out to be unusable here (it
+needs YUV allocation no Mesa has). **Goal 2 has not been started.**
 
 ## The immediate next task
 
-**Rebuild `libgbm_mesa_wrapper.so` with a corrected `gbm_import`, using the NDK only, and deploy
-it through the vendor overlay.**
+**Goal 2: expose the accelerometer and vibration to Waydroid.** Nothing has been done on it.
 
-This is a new idea that phase 1 made possible, and it is *much* cheaper than the AOSP route —
-if it holds, goal 1 needs no 250 GB tree at all.
+What is already known, and it is not much:
 
-The reasoning: the geometry correction can be applied inside the wrapper instead of inside the
-gralloc module. `gbm_mesa_bo_import` hands `wr->import()` exactly the broken shape
-(`width = total_size`, `height = 1`, `format = R8`, `stride = 1280`). That pattern is
-recognisable, and `gbm_import` can rewrite it to the allocator's real shape before calling
-`gbm_bo_import`:
+- `vibrator.default.so` exists in the vendor image, but `.default` HALs are stubs, so vibration
+  will likely need real work rather than configuration.
+- The host is an HP Envy x2 convertible, so an accelerometer is present at the hardware level.
+  Whether Linux exposes it as IIO and whether Waydroid's sensor HAL can be pointed at it is
+  unexamined.
 
-```c
-/* inside gbm_import(), before building gbm_import_fd_modifier_data */
-if (drm_format == DRM_FORMAT_R8 && height == 1) {
-        /* mirror gbm_mesa_bo_create's second rewrite, which the importer never applied */
-        height = DIV_ROUND_UP(width, 4096);
-        width  = 4096;
-        stride = 4096;
-}
-```
+Start by finding out what the host exposes (`/sys/bus/iio/devices/`) and what the container's
+sensor HAL expects. Waydroid has a `waydroid-sensord`/`libsensors` story that is worth reading up
+on before touching anything.
 
-Why this is attractive:
+## Camera: what is left, if you want to close it out fully
 
-- `libgbm_mesa_wrapper.so` links only `libcutils`, `libdrm`, `libgbm_mesa`, `liblog`, `libc++` —
-  **NDK-buildable**, unlike the gralloc HAL modules.
-- **No ABI change.** `gbm_ops`, `alloc_args` and the `import` signature are untouched, so the
-  rebuilt wrapper drops in against the shipped gralloc modules.
-- **Overlay-deployable and reversible**, exactly as `external_camera_config.xml` already was:
-  `/var/lib/waydroid/overlay/vendor/lib64/libgbm_mesa_wrapper.so`, delete to revert.
-- Variant C in phase 1 already proved the resulting bo maps at `(total_size, 1)`, which is what
-  `gbm_mesa_bo_map` will still ask for. No second change needed.
+Goal 1 is complete for the stated purpose, but these were never exercised
+([docs/08](08-camera-fixed.md) lists them):
 
-Steps:
-
-1. Build the wrapper from `a9367e8` (the exact shipped commit) unmodified first, deploy it, and
-   confirm the camera still fails *identically*. This proves the build and the overlay drop-in are
-   sound before any behaviour change — do not skip it.
-2. Apply the `gbm_import` rewrite, redeploy, retest with Open Camera.
-3. If it works, report it upstream — the same bug will hit any GPU whose Mesa lacks YUV.
-
-Traps for step 1, already known:
-
-- **Build from `a9367e8`, but keep the `gbm_map` null check the shipped binary actually has.**
-  The `a9367e8` source says `if (addr == NULL)` where `addr` is the `void **` parameter — a dead
-  branch. The shipped binary tests the return value instead. Write `if (*addr == NULL)`, or the
-  rebuild will regress: `*addr` would be left NULL rather than set to `MAP_FAILED`, which is what
-  minigbm checks for.
-- Headers (`gbm.h`, `drm_fourcc.h`, `log/log.h`, `cutils/properties.h`) are not in the NDK. Either
-  vendor them in, or declare the handful of things used locally the way the phase 0/1 probes do.
-- Link against the real `/vendor/lib64/*.so` pulled from the device; Android has no symbol
-  versioning, so linking directly against those files works.
-
-If the wrapper build turns out not to be feasible, the fallback is the AOSP route for the gralloc
-modules. Disk is no longer a blocker: **`/home/coder/extra_space` on the dev box has 460+ GB free.**
+- resolutions other than 1280x720 (the 720p overlay cap is still in place)
+- stills and video capture — only the preview path was tested
+- whether the overlay survives a host reboot (it lives in `/var`, so it should)
+- **reporting the bug upstream** — it will hit any GPU whose Mesa lacks YUV allocation
 
 ## State left on bigtab01
 
 | Item | State |
 |---|---|
+| **`overlay/vendor/lib/libgbm_mesa_wrapper.so`** | **fixed 32-bit wrapper — this is the camera fix.** Delete to revert |
+| **`overlay/vendor/lib64/libgbm_mesa_wrapper.so`** | fixed 64-bit wrapper. Delete to revert |
+| `overlay/vendor/etc/external_camera_config.xml` | pre-existing 720p cap, unrelated to the fix |
 | `waydroid_base.prop` | original, byte-identical. Backup at `waydroid_base.prop.orig` |
-| Vendor overlay | `overlay/vendor/etc/external_camera_config.xml` — 720p cap. **Not a fix**, harmless; delete to revert |
-| Phase 1 probes | `gbm-android-test`, `gbm-import-android` left in `/data/local/tmp` inside the container (host path `/home/jmelanso/.local/share/waydroid/data/local/tmp/`, owner `2000:2000`). Harmless; delete anytime |
-| `/tmp` on host | probe copies; cleared on reboot |
-| Waydroid session | `RUNNING`, container `FROZEN` when idle — normal, not a fault |
-| Toolbox container | `fedora-toolbox-44` present, still never used. Safe to delete |
+| Probes in the container | `gbm-android-test`, `gbm-import-android`, `wrapper-harness`, `wrapper-harness32` in `/data/local/tmp` (host path `/home/jmelanso/.local/share/waydroid/data/local/tmp/`, owner `2000:2000`). Harmless; delete anytime |
+| `/tmp/camera-test.sh` on host | copy of `bin/camera-test.sh`; `/tmp` clears on reboot |
+| Waydroid session | `RUNNING`; container `FROZEN` when idle — normal, not a fault |
+| Toolbox container | `fedora-toolbox-44`, still never used. Safe to delete |
 
-Nothing destructive was done. No packages layered onto the immutable OS.
+Nothing destructive was done. No packages layered onto the immutable OS. The vendor and system
+images were never modified — everything is overlay files.
+
+Exact deployed bytes are kept in [artifacts/phase2/](../artifacts/phase2/), so the fix can be
+re-deployed without rebuilding.
 
 ## Dev box
 
 | | |
 |---|---|
-| NDK | r27c at `~/ndk-dl/android-ndk-r27c` (clang + x86_64 sysroot extracted, 1.7 GB) |
+| NDK | r27c at `~/ndk-dl/android-ndk-r27c` (clang + x86_64 **and** i686 sysroots extracted) |
 | minigbm source | `yuv` branch cloned to `/home/coder/extra_space/minigbm-yuv` |
-| Big disk | `/home/coder/extra_space`, 460+ GB free — use it for any AOSP work |
-| Note | no `python3`, no `rsync`, no `clang` on the dev box; `gcc`, `readelf`, `objdump`, `nm`, `unzip` are present |
+| Wrapper build tree | `/home/coder/extra_space/wrapper-build/{32,64}` |
+| Big disk | `/home/coder/extra_space`, 460+ GB free |
+| Note | no `python3`, no `rsync`, no `clang` on the dev box; `gcc`, `readelf`, `objdump`, `nm`, `unzip`, `curl`, `patch`, `perl` are present |
+
+Rebuild the fix with `phase2/build.sh --abi 32 --fix` and `--abi 64 --fix`; add `--debug` for
+argument tracing.
 
 ## Traps already hit — do not repeat
 
 - **`waydroid shell -- /path/to/binary` returns `Permission denied` even when the file is fine.**
   It is `lxc-attach`'s `execvp`, not permissions, and there is **no AVC** behind it. Wrap it:
   `waydroid shell -- sh -c "/path/to/binary"`. Do not go hunting SELinux for this.
+- **Check the ABI before deploying a vendor library.** The camera provider is 32-bit
+  (`/vendor/lib/`) while the gralloc allocator, cameraserver and apps are 64-bit
+  (`/vendor/lib64/`). A 64-bit-only deployment changed nothing and cost a full test cycle. Confirm
+  with `grep libfoo /proc/<pid>/maps`.
+- **Reconstructing a caller's arguments from its source is a hypothesis, not an observation.** A
+  harness built on the intended values passed cleanly while the device still failed; the real
+  width was 0. Where a value crosses a process boundary, compile in tracing and measure it.
 - **Unbuffer stdout in any probe** (`setvbuf(stdout, NULL, _IONBF, 0)`) — a segfault otherwise
   discards everything printed into the ssh pipe.
-- **A diff's context lines are not the parent file.** The `a41dbe7` diff appears to show
-  `data->format` passed to `wr->import`; the parent actually passes `s_format`. Check with
-  `git show <commit>^:<path>`.
+- **Confirm your library is actually live.** `__FILE__` in the log is the giveaway: the shipped
+  builds say `external/minigbm/...`, a local rebuild says its own path.
+- **A diff's context lines are not the parent file.** Check with `git show <commit>^:<path>`.
 - **`readelf` is not installed on bigtab01.** Pull libraries and inspect them on the dev box.
 - **The vendor image is unmounted while the container is stopped.** `/vendor/...` then reads as
   missing. Verify only with the container running.
@@ -115,9 +98,10 @@ Nothing destructive was done. No packages layered onto the immutable OS.
   `ERROR: [Errno 13] Permission denied: 1` is cosmetic.
 - **`waydroid session start` over SSH needs both** `XDG_RUNTIME_DIR=/run/user/1000` and
   `WAYLAND_DISPLAY=wayland-1`.
-- **Absence of errors is not success.** Confirm positively — app running, camera client active.
+- **Absence of errors is not success.** `bin/camera-test.sh` now confirms positively — app pid and
+  active camera client — before reporting counters.
 
-## Hypotheses already disproven
+## Hypotheses disproven along the way
 
 | Hypothesis | Verdict |
 |---|---|
@@ -127,19 +111,16 @@ Nothing destructive was done. No packages layered onto the immutable OS.
 | App incompatibility (`EXTERNAL` level) | Open Camera opens the device fine |
 | `ro.hardware.camera=v4l2` | inert leftover, not a bug |
 | Provider crash-looping | one deliberate init restart, no tombstone |
-| SELinux | no AVC denials — including for the exec failure in phase 1 |
+| SELinux | no AVC denials, including for the exec failure in phase 1 |
 | Alternative gralloc modules | `default` breaks Android; `minigbm_gbm_mesa` identical failure |
-| Buffer geometry mismatch (host Mesa) | host Mesa does not bounds-check; map succeeds |
-| Imported dmabuf unmappable | imports map fine — *when the geometry is self-consistent* |
-| **Mesa cannot map the R8 fallback buffer** | **wrong — it maps fine on Android's Mesa too** |
-| **The upstream fix `a41dbe7` will fix this** | **wrong — it needs YUV allocation Mesa does not have** |
-| **The image predates both fix commits** | **wrong — `a9367e8` is already in; only `a41dbe7` is missing** |
-| **`gbm_map`'s error branch is dead, log untrustworthy** | **wrong in the shipped binary — it tests the return value and fires correctly** |
-| Fixing only the import *stride* would help | no — variant B, a self-consistent 1384448×1, is still rejected |
-| Multi-plane YUV import is a way around | imports (planes=3) but `gbm_bo_map` **segfaults** |
+| Mesa cannot map the R8 fallback buffer | wrong — it maps fine, once imported with a valid shape |
+| The upstream fix `a41dbe7` will fix this | wrong — it needs YUV allocation no Mesa has, and it deletes the fallback the code depends on |
+| The image predates both fix commits | wrong — `a9367e8` is already in; only `a41dbe7` is missing |
+| `gbm_map`'s error branch is dead, log untrustworthy | wrong in the shipped binaries — they test the return value |
+| Multi-plane YUV import is a way around | imports (planes=3) but `gbm_bo_map` segfaults |
+| The import width is `total_size` | **wrong — it is 0**, and that was the actual bug |
+| The 1D buffer is 4096x338, so the fix can recompute it | wrong — the kernel returned 4096x512; size the dmabuf with `lseek` |
 
-## Goals 2-4
+## Goals 3-4
 
-Untouched, and per [AGENTS.md](../AGENTS.md) should not start until goal 1 is done or explicitly
-parked. One incidental observation for goal 2: `vibrator.default.so` exists in the vendor image,
-but `.default` HALs are stubs, so vibration will likely need real work.
+Untouched. Per [AGENTS.md](../AGENTS.md), work them in order after goal 2.

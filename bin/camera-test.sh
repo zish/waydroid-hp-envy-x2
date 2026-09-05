@@ -23,6 +23,13 @@ sudo -n waydroid shell -- sh -c "logcat -c" >/dev/null 2>&1
 sudo -n waydroid shell -- sh -c "am start -n net.sourceforge.opencamera/.MainActivity" >/dev/null 2>&1
 sleep 18
 
+echo "  --- did the test actually run? ---"
+# Absence of errors is not success: a previous test reported zero failures only
+# because the app never launched. Confirm positively before reading the counters.
+echo "  opencamera pid  : $(sudo -n waydroid shell -- sh -c 'pidof net.sourceforge.opencamera' 2>/dev/null | tr -dc 0-9 || true)"
+echo "  camera clients  :"
+sudo -n waydroid shell -- sh -c "dumpsys media.camera 2>/dev/null | grep -A3 -i 'active camera clients'" 2>/dev/null | sed 's/^/    /'
+
 echo "  --- verdict ---"
 FAILS=$(sudo -n waydroid shell -- sh -c "logcat -d 2>/dev/null | grep -c 'coversion failed'" | tr -dc 0-9)
 MAPF=$(sudo -n waydroid shell -- sh -c "logcat -d 2>/dev/null | grep -c 'Failed to map the buffer'" | tr -dc 0-9)
