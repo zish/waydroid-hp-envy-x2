@@ -73,6 +73,11 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
 Work the list in order. Don't start a later item until the one before it is either done or
 explicitly parked.
 
+## Picking this up again
+
+Start with [docs/06-next-session.md](docs/06-next-session.md) — current state, the immediate next
+task, traps already hit, and hypotheses already disproven.
+
 ## Repository conventions
 
 This repo is the record of the work. It should contain detailed documentation and artifacts
