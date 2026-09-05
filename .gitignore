@@ -1,0 +1,6 @@
+# Compiled probes — rebuild with the one-liner in each source file's header comment,
+# e.g. gcc -O1 -Wall -o phase0/gbm-map-test-dl phase0/gbm-map-test-dl.c -ldl
+phase0/gbm-map-test-dl
+phase0/gbm-fallback-test
+phase0/gbm-import-test
+phase0/gbm-map-test
