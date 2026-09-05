@@ -1,0 +1,81 @@
+dlopen libgbm_mesa.so                   OK
+
+device : /dev/dri/renderD128
+backend: drm
+
+=== YVU420 (YV12)   (0x32315659)  supported(LINEAR)=NO ===
+  create LINEAR|SWR|SWW  FAILED
+  create LINEAR          FAILED
+  create RENDERING       FAILED
+  create RENDER|LINEAR   FAILED
+  create MODIFIER:LINEAR FAILED
+
+=== NV12            (0x3231564e)  supported(LINEAR)=NO ===
+  create LINEAR|SWR|SWW  FAILED
+  create LINEAR          FAILED
+  create RENDERING       FAILED
+  create RENDER|LINEAR   FAILED
+  create MODIFIER:LINEAR FAILED
+
+=== YUYV            (0x56595559)  supported(LINEAR)=NO ===
+  create LINEAR|SWR|SWW  FAILED
+  create LINEAR          FAILED
+  create RENDERING       FAILED
+  create RENDER|LINEAR   FAILED
+  create MODIFIER:LINEAR FAILED
+
+=== FLEX_YCbCr_420  (0x37393939)  supported(LINEAR)=NO ===
+  create LINEAR|SWR|SWW  FAILED
+  create LINEAR          FAILED
+  create RENDERING       FAILED
+  create RENDER|LINEAR   FAILED
+  create MODIFIER:LINEAR FAILED
+
+=== XRGB8888        (0x34325258)  supported(LINEAR)=yes ===
+  create LINEAR|SWR|SWW  ok
+      planes=1 stride=5120 modifier=0x0
+      plane 0: stride=5120   offset=0         fd=8
+      map(1280x720) OK map_stride=5120
+  create LINEAR          ok
+      planes=1 stride=5120 modifier=0x0
+      plane 0: stride=5120   offset=0         fd=8
+      map(1280x720) OK map_stride=5120
+  create RENDERING       ok
+      planes=1 stride=5120 modifier=0x100000000000002
+      plane 0: stride=5120   offset=0         fd=8
+      map(1280x720) OK map_stride=5120
+  create RENDER|LINEAR   ok
+      planes=1 stride=5120 modifier=0x0
+      plane 0: stride=5120   offset=0         fd=8
+      map(1280x720) OK map_stride=5120
+  create MODIFIER:LINEAR FAILED
+
+=== R8              (0x20203852)  supported(LINEAR)=yes ===
+  create LINEAR|SWR|SWW  ok
+      planes=1 stride=1280 modifier=0x0
+      plane 0: stride=1280   offset=0         fd=8
+      map(1280x720) OK map_stride=1280
+  create LINEAR          ok
+      planes=1 stride=1280 modifier=0x0
+      plane 0: stride=1280   offset=0         fd=8
+      map(1280x720) OK map_stride=1280
+  create RENDERING       ok
+      planes=1 stride=1280 modifier=0x100000000000002
+      plane 0: stride=1280   offset=0         fd=8
+      map(1280x720) OK map_stride=1280
+  create RENDER|LINEAR   ok
+      planes=1 stride=1280 modifier=0x0
+      plane 0: stride=1280   offset=0         fd=8
+      map(1280x720) OK map_stride=1280
+  create MODIFIER:LINEAR FAILED
+
+=== R8 1D fallback, exactly as minigbm allocates it today ===
+  create 4096x338 R8 ok
+    as allocated extent:
+      planes=1 stride=4096 modifier=0x0
+      plane 0: stride=4096   offset=0         fd=8
+      map(4096x338) OK map_stride=4096
+    as logical camera dims (what the wrapper maps with):
+      planes=1 stride=4096 modifier=0x0
+      plane 0: stride=4096   offset=0         fd=8
+      map(1280x720) OK map_stride=4096

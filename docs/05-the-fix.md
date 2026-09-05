@@ -1,5 +1,11 @@
 # The fix — upstream already has it
 
+> **SUPERSEDED IN PART BY [07-phase1-android-mesa.md](07-phase1-android-mesa.md).** Phase 1 measured
+> Android's own Mesa and found it cannot allocate `GBM_FORMAT_YVU420` either. Because `a41dbe7`
+> **deletes** the 1D fallback and depends on that allocation succeeding, applying it here would turn
+> the black preview into an outright gralloc allocation failure. Two specific claims below are also
+> wrong and are corrected inline. The description of what the commit *does* is still accurate.
+
 **An upstream fix for this exact bug exists**, written by the same person who builds the Waydroid
 images we are running. Our image predates or excludes it.
 
@@ -9,6 +15,11 @@ branch  yuv
 commit  a41dbe7  "gbm_mesa: Fix mapping YUV"   Alessandro Astone, 2025-07-20
 also    a9367e8  "gbm_mesa: Fix detecting gbm_bo_map failure"
 ```
+
+> **Correction (phase 1).** The image does not exclude both. `libgbm_mesa_wrapper.so` fingerprints
+> to `a9367e8` exactly — the two `"Failed to map the buffer"` call sites compile to lines 183 and
+> 228, matching that commit and no other. The image is the `yuv` branch tip **minus one commit**;
+> only `a41dbe7` is missing.
 
 Our image is built by `eng.aleast` — the same author.
 
@@ -76,6 +87,11 @@ so failures were silently missed and callers received a NULL pointer.
 > `if (addr == NULL)` tests the `void **` parameter, which is never NULL, instead of `*addr`.
 > The error branch therefore never fires. Worth reporting upstream — it does not block us, but it
 > means a future map failure would again go unlogged.
+>
+> **Correction (phase 1): this does not apply to the binary we are running.** Disassembly shows the
+> shipped guard tests the *return value* of `gbm_bo_map` (`test %rax,%rax`), not the parameter, so it
+> fires correctly. The `:228` log line is trustworthy evidence that `gbm_bo_map` returned NULL. The
+> source-level bug may still be real on the `yuv` branch; it is not real in our build.
 
 ## Good news: no Mesa rebuild needed
 
@@ -141,12 +157,22 @@ Revert by deleting the files. `/var` has ~197 GB free, so space is not a constra
    refuses that format on this Broadwell GPU. Android's Mesa is a different build and may have
    YUV support patched in, but this is **untested and is the single biggest risk**. Cheapest check
    is an NDK-built probe run inside the container, before committing to a full build.
+
+   > **Answered (phase 1): no.** The NDK probe ran; Android's Mesa refuses YVU420 exactly as the
+   > host's does. This risk fired, and it kills the upstream fix for this hardware.
 2. **Branch/version mismatch.** The repo has only `lineage-18.1` and `yuv` branches, while our
    image is Android 13 / LineageOS 20. How the `yuv` work maps onto the tree that built our image
    needs resolving once we have a checkout.
+
+   > **Resolved (phase 1):** the image is built from `a9367e8` on the `yuv` branch itself, so there
+   > is no cross-branch porting problem — but the fix on top of it is the one that cannot work here.
 3. **Build environment.** These are Soong/Make targets needing AOSP-internal headers (gralloc4,
    HIDL, libhardware), so a full LineageOS/Waydroid tree is realistically required — roughly
    250 GB. An NDK-only build is plausible for the small wrapper but not for the gralloc HAL libs.
+
+   > **Still true, but disk is no longer scarce:** `/home/coder/extra_space` on the dev box has
+   > 460+ GB free. Phase 1 also shrinks the target list — the repair now needed is inside
+   > `gbm_mesa_bo_import`, so only the gralloc modules need rebuilding, not the wrapper.
 
 ## Background
 

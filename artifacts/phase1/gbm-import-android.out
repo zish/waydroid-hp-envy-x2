@@ -1,0 +1,50 @@
+########## variant A ##########
+source buffer: 4096x338 R8  stride=4096 modifier=0x0 fd=8
+
+  A  SHIPPED: w=total_size h=1 R8, stride = YV12 luma stride 1280
+      request: 1384448x1 fmt=0x20203852 num_fds=1 stride0=1280 offset0=0 mod=0x0
+      import *** FAILED ***
+
+---- exit 0 ----
+########## variant A2 ##########
+source buffer: 4096x338 R8  stride=4096 modifier=0x0 fd=8
+
+  A' SHIPPED variant: unaligned total_size, stride 1280
+      request: 1382400x1 fmt=0x20203852 num_fds=1 stride0=1280 offset0=0 mod=0x0
+      import *** FAILED ***
+
+---- exit 0 ----
+########## variant B ##########
+source buffer: 4096x338 R8  stride=4096 modifier=0x0 fd=8
+
+  B  1D self-consistent: stride = width
+      request: 1384448x1 fmt=0x20203852 num_fds=1 stride0=1384448 offset0=0 mod=0x0
+      import *** FAILED ***
+
+---- exit 0 ----
+########## variant C ##########
+source buffer: 4096x338 R8  stride=4096 modifier=0x0 fd=8
+
+  C  as allocated: 4096x338 R8, stride 4096
+      request: 4096x338 fmt=0x20203852 num_fds=1 stride0=4096 offset0=0 mod=0x0
+      import OK  planes=1 stride=4096
+      map at import dims               OK  map_stride=4096
+      map at camera dims 1280x720      OK  map_stride=4096
+      map at s_width x 1 (gbm_mesa_bo_map) OK  map_stride=4096
+
+---- exit 0 ----
+########## variant D ##########
+source buffer: 4096x338 R8  stride=4096 modifier=0x0 fd=8
+
+  D  YVU420 3-plane from the single dmabuf (num_fds=3)
+      request: 1280x720 fmt=0x32315659 num_fds=3 stride0=1280 offset0=0 mod=0x0
+      import OK  planes=3 stride=1280
+---- exit 139 ----
+########## variant D2 ##########
+source buffer: 4096x338 R8  stride=4096 modifier=0x0 fd=8
+
+  D' YVU420 3-plane, num_fds=1
+      request: 1280x720 fmt=0x32315659 num_fds=1 stride0=1280 offset0=0 mod=0x0
+      import *** FAILED ***
+
+---- exit 0 ----

@@ -4,3 +4,5 @@ phase0/gbm-map-test-dl
 phase0/gbm-fallback-test
 phase0/gbm-import-test
 phase0/gbm-map-test
+phase1/gbm-android-test
+phase1/gbm-import-android

@@ -59,11 +59,14 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
 
 ## Goals, in priority order
 
-1. **Camera** — **root cause found, blocked on a Waydroid bug.** The camera, driver, HAL,
-   enumeration, and V4L2 streaming all work. Waydroid's minigbm `gbm_mesa` gralloc cannot
-   CPU-map the YV12 buffer the camera HAL writes into, so every frame fails conversion and the
-   preview stays black. No configuration fixes it; both alternative gralloc settings were tested.
-   See [docs/01-camera-investigation.md](docs/01-camera-investigation.md) and
+1. **Camera** — **root cause pinned to one function; needs a rebuilt library.** The camera,
+   driver, HAL, enumeration, and V4L2 streaming all work. Waydroid's minigbm `gbm_mesa` gralloc
+   allocates the camera buffer as a 4096x338 R8 fallback but then *imports* it as
+   `total_size x 1` with the YV12 luma stride — a shape Mesa rejects, so the map returns NULL and
+   the camera HAL gets an all-zero plane layout. No configuration fixes it. The upstream `yuv`
+   fix does **not** apply here: it needs YUV allocation that neither the host's nor Android's
+   Mesa has. See [docs/07-phase1-android-mesa.md](docs/07-phase1-android-mesa.md), then
+   [docs/01-camera-investigation.md](docs/01-camera-investigation.md) and
    [docs/04-phase0-gbm-map.md](docs/04-phase0-gbm-map.md).
 2. **Accelerometer and vibration** — expose these to Waydroid.
 3. **Power** — make Waydroid report correct battery statistics and AC adapter state.
