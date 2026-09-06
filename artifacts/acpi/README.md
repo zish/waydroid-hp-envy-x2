@@ -40,3 +40,38 @@ So it is a **GPS module on a UART**, and everything else in the DSDT is stock In
 Worth noting for a different reason: bigtab01 has a GPS receiver, reported present and functioning.
 Android has a location HAL, so this is a plausible future capability well beyond the current goal
 list — recorded here so it is not forgotten.
+
+## The GPS is wired to a UART the firmware has disabled
+
+Followed up 2026-09-06. The blocker is **not** a missing driver — this kernel ships everything
+needed:
+
+| Component | State |
+|---|---|
+| GNSS subsystem | `gnss.ko`, `gnss-serial.ko`, `gnss-sirf.ko`, `gnss-ubx.ko`, `gnss-mtk.ko`, `gnss-usb.ko` all present |
+| LPSS UART driver | `/sys/bus/platform/drivers/dw-apb-uart` exists |
+| `GPS0` (`HPQC4752:00`) | `status=15` — present, enabled, functioning. `driver=NONE`, `physical_node=none` |
+| **`INT3434:00`, `INT3435:00`** (the two Broadwell LPSS UARTs) | **`status=0`** |
+
+`_STA` = 0 means **not present**. The firmware is reporting both LPSS UARTs as absent, so no driver
+binds, no serial port is created, and `GPS0`'s `_CRS` — which points at `\_SB.PCI0.UA00` — refers to
+a UART that does not exist as far as Linux is concerned.
+
+Every `/dev/ttyS0`…`ttyS17` node is a legacy static `serial8250` platform placeholder with no
+hardware behind it (`/sys/class/tty/ttySN/device` → `serial8250:0.N`). `dmesg` registers the 8250
+core's 32 ports and never enumerates a real one. So the GPS has no tty to talk on.
+
+### The likely cause, and how to test it
+
+This pattern — vendor devices present but their LPSS bus disabled — is usually an **`_OSI` gate**
+in the DSDT: the firmware only enables LPSS UARTs when the OS identifies as a particular Windows
+version, and returns 0 from `_STA` otherwise. It is common on HP and Lenovo machines of this era.
+
+Confirm by decompiling the DSDT (`iasl -d DSDT.aml`) and reading the `_STA` method for `INT3434`/
+`INT3435` to see whether it branches on `_OSI`. If it does, the standard workaround is an
+`acpi_osi=` kernel parameter (e.g. `acpi_osi="Windows 2013"`), which on an rpm-ostree host means
+`rpm-ostree kargs --append=...`.
+
+**This is out of scope for goals 1-4** and is recorded only so the finding is not lost. Note also
+that even with NMEA flowing on the host, exposing it to Android would need a GPS HAL in Waydroid —
+a separate project again.
