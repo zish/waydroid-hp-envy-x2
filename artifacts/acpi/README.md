@@ -18,6 +18,25 @@ A raw AML scan of **all seven tables** for four-character ACPI NameSegs `VIBR`, 
 `MOTR`, `BUZZ`, `HPTC`, `RUMB`, `VIBE`, `HPTM`, `PWM0`, `PWM1` returned **zero hits**.
 
 That is a weak negative and does **not** rule ACPI out — a method can be named anything, and
-control is just as likely to sit inside a `_DSM` behind a UUID. The unexamined lead is
-**`HPQC4752`**, the one HP-vendor `_HID` in the DSDT (everything else is stock Intel `INT33xx`/
-`INT34xx` LPSS, plus `ITE8350`). Decompile and read that device first.
+control is just as likely to sit inside a `_DSM` behind a UUID. **21 `_DSM` methods in the DSDT and
+3 in SSDT6** remain unread, and reading them needs `iasl`.
+
+### `HPQC4752` is a GPS receiver — not haptics
+
+The one HP-vendor `_HID` in the DSDT looked like the obvious lead. It is not. Decoding the AML by
+hand at byte offset `22032` (`0x5610`) resolves it:
+
+```
+5b 82 4b 08  GPS0                       <- DeviceOp, device name GPS0
+   _HID  0d "HPQC4752" 00               <- 0x0D = StringPrefix
+   _HRV
+   _CRS  ... \_SB.PCI0.UA00 ... \_SB.PCI0.GPI0    <- a UART and a GPIO
+   _STA  -> 0x0F                        <- present, enabled, functioning
+```
+
+So it is a **GPS module on a UART**, and everything else in the DSDT is stock Intel `INT33xx`/
+`INT34xx` LPSS plus `ITE8350`. **Do not re-chase this device for the vibrator.**
+
+Worth noting for a different reason: bigtab01 has a GPS receiver, reported present and functioning.
+Android has a location HAL, so this is a plausible future capability well beyond the current goal
+list — recorded here so it is not forgotten.
