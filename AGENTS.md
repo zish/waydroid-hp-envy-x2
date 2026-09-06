@@ -72,6 +72,9 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [docs/09-upstream-report.md](docs/09-upstream-report.md).
    A separate camera fix — reporting `LENS_FACING_BACK` instead of `EXTERNAL`, so apps that
    require a rear camera will open it — is in [docs/11-camera-facing.md](docs/11-camera-facing.md).
+   Two intermittent camera faults remain unreproduced and unexplained — errored V4L2 buffers and
+   spurious device removal; [docs/12-v4l2-frame-errors.md](docs/12-v4l2-frame-errors.md) rules out
+   the hardware, USB, the driver and CPU load, and ships `bin/camera-watch.sh` to catch the next one.
 2. **Accelerometer and vibration** — expose these to Waydroid.
 3. **Power** — **DONE.** Battery level, voltage, charge status and AC adapter state now come from
    the host. The container could always read the host's `/sys/class/power_supply` and the health HAL

@@ -4,6 +4,8 @@ Rewritten 2026-09-05 after goals 1 and 3 were completed. Read this first, then
 [08-camera-fixed.md](08-camera-fixed.md) and [10-battery-fixed.md](10-battery-fixed.md) for what was
 actually wrong in each and what is deployed. [11-camera-facing.md](11-camera-facing.md) covers a
 second, separate camera fix (lens facing) plus the `Fence::waitForever` stall.
+[12-camera](12-v4l2-frame-errors.md) records two intermittent camera faults that could NOT be
+reproduced, and the long list of causes they rule out.
 
 ## One-paragraph state
 
@@ -60,6 +62,7 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | **`overlay/vendor/lib/libgbm_mesa_wrapper.so`** | **fixed 32-bit wrapper — this is the camera fix.** Delete to revert |
 | **`overlay/vendor/lib64/libgbm_mesa_wrapper.so`** | fixed 64-bit wrapper. Delete to revert |
 | **`overlay/vendor/lib/camera.device@3.4-external-impl.so`** | **facing patch, `EXTERNAL`->`BACK`**, mode `0644`. Delete to revert. See [11](11-camera-facing.md) |
+| `/etc/udev/rules.d/99-uvc-no-autosuspend.rules` | pins the webcam at `power/control=on`. Not a proven fix; see [12](12-v4l2-frame-errors.md) |
 | `overlay/vendor/etc/external_camera_config.xml` | pre-existing 720p cap, unrelated to the fix |
 | `waydroid_base.prop` | original, byte-identical. Backup at `waydroid_base.prop.orig` |
 | Probes in the container | `gbm-android-test`, `gbm-import-android`, `wrapper-harness`, `wrapper-harness32` in `/data/local/tmp` (host path `/home/jmelanso/.local/share/waydroid/data/local/tmp/`, owner `2000:2000`). Harmless; delete anytime |
@@ -144,6 +147,10 @@ argument tracing.
 
 A second set — ARM translation, a phantom camera, USB autosuspend, the `uvcvideo quirks` value —
 was disproven during the lens-facing work; see [11-camera-facing.md](11-camera-facing.md).
+
+A third set — bad hardware, USB bandwidth, CPU starvation, buffer-queue depth and uevent-driven
+node churn — was disproven while chasing the intermittent V4L2 frame errors; see
+[12-v4l2-frame-errors.md](12-v4l2-frame-errors.md).
 
 ## Goals 3-4
 
