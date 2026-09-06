@@ -357,6 +357,20 @@ And a fourth, already in AGENTS.md but easy to forget: `waydroid shell` always e
 cosmetic `ERROR: [Errno 13] Permission denied: 1`, so a remote install script must **not** use
 `set -e` — it silently skipped the cleanup the first time.
 
+**A fifth, found the hard way: reinstalling does not reliably kill a process that is spinning.**
+`pm install -r` normally force-stops the old package (`Killing …: stop … due to installPackageLI`
+appears in logcat), but one instance pegged at 96% of a core survived a reinstall and kept running,
+orphaned, for another twelve minutes — contributing a full core of load to a box that was already
+struggling. Two processes with the same name then existed at once, which also makes any measurement
+by name pick the wrong one. After an install, check:
+
+```bash
+ps -eo pid,stat,etime,comm --no-headers | grep -i sensorinfo
+```
+
+More than one row, or an `etime` older than the install, means an orphan is still running; `kill -9`
+it. Verify a CPU measurement is of the process you think it is before believing the number.
+
 ### An app can starve itself of the sensors it is watching
 
 First run showed every sensor at **0.3–0.4 Hz** while `dumpsys sensorservice` showed the
@@ -374,6 +388,33 @@ from the same timer, which now ticks every 66 ms and refreshes the text rows onl
 so the cards still update at the 3 Hz that was measured to be safe. Two custom views drawing a few
 dozen primitives cost far less than a pass over 40 `TextView`s: the measured event rate with the
 panel running is **180 events/s**, unchanged.
+
+### …and the event rate was the wrong thing to watch
+
+The event rate stayed at 180/s, so the panel looked free. It was not. Measured properly — sampling
+`utime + stime` out of `/proc/PID/stat` over ten seconds — the app was burning **96% of one core**
+on a 2-core machine, and it was doing it while sitting perfectly still on a desk.
+
+Two causes, both mine:
+
+- **The world-fixed furniture was re-projected every frame.** The ring, its 24 ticks and its four
+  cardinal labels are fixed to the *world*, not to the device, so their projection cannot change
+  unless the view is resized — yet every frame re-ran about 150 `project()` calls and stroked ~150
+  individual antialiased `drawLine`s to produce an identical picture. Baking them into six `Path`s
+  at size-change time cut the per-frame work to the slab, one wedge and four labels. The dial had
+  the same shape of bug: its ticks are fixed in the *card's* frame, so they are now one path drawn
+  under a single `canvas.rotate`.
+- **Nothing checked whether the picture had changed.** `AttitudeView` invalidated on every tick
+  regardless. It now compares the summed absolute element delta of the rotation matrix against
+  0.005 — about a sixth of a degree, well under a pixel of movement here — and the dial ignores
+  heading changes below 0.3°. A machine at rest is below both thresholds essentially always, so an
+  idle panel now does no work at all.
+
+Result: **96% of a core → 1%**, at rest, with the event rate still 180/s and `dumpsys gfxinfo`
+reporting a 5 ms median frame, 8 ms at the 90th percentile, 0.55% janky and zero missed vsyncs.
+
+The lesson worth keeping is the first one: *this app's own throughput metric said everything was
+fine.* 180 events/s was true and meaningless. Cost has to be measured as cost.
 
 ## Traps hit — do not repeat
 

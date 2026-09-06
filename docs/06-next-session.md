@@ -313,3 +313,53 @@ goal. Goal 3 also has one unverified behaviour: the battery sat at 100% on AC th
 *tracking a changing value* was never exercised. Unplug the charger and re-run `bin/battery-test.sh`.
 
 Goal 4 (removable media) is untouched, and is now the cheapest remaining item.
+
+## Loose ends unrelated to the goals
+
+Two things surfaced on 2026-09-06 that are not part of any goal but should not be lost.
+
+### MacroDroid crash-loops on the WebView data-directory lock
+
+`com.arlosoft.macrodroid` was respawning and dying every 4-6 seconds with:
+
+```
+FATAL EXCEPTION: main
+java.lang.RuntimeException: Using WebView from more than one process at once with
+the same data directory is not supported. https://crbug.com/558377 :
+Current process com.arlosoft.macrodroid (pid 13026), lock owner ... (pid 2136)
+```
+
+A long-lived MacroDroid process held the WebView data-directory lock, so every process the app
+started afterwards died on startup and was restarted, forever. The loop drove the 1-minute load
+average from 1.35 to over 11 on a 2-core Core M and took the box into memory pressure, which is
+what then killed Firefox, Netflix, NordVPN and GMS — those were casualties, not separate faults.
+
+**It has been uninstalled**, so the loop is stopped. What is *not* known is why two MacroDroid
+processes wanted WebView at once: normally the app runs a single process, and the second one
+implies a separate process declared for a component (a service or a widget provider). If it goes
+back on, check `dumpsys package com.arlosoft.macrodroid` for `processName=` entries that differ
+from the package name before assuming it will behave.
+
+### The launcher pins the display to portrait
+
+Only `org.fossify.home` shows the wrong orientation; every other app is fine. It is not the
+sensors — `settings get system accelerometer_rotation` returns `0`, so Android is not rotating
+anything from sensor data. The launcher requests `SCREEN_ORIENTATION_PORTRAIT`, and with the
+Waydroid output at `base=1916x1027` the display honours it and rotates to `cur=1027x1916`
+`ROTATION_270`, which is taller than the physical screen. `dumpsys window displays` names the
+culprit directly:
+
+```
+mCurrentAppOrientation=SCREEN_ORIENTATION_PORTRAIT
+deepestLastOrientationSource=ActivityRecord{... org.fossify.home/.activities.MainActivity}
+```
+
+This build has the large-screen override that exists for exactly this case:
+
+```bash
+sudo waydroid shell -- sh -c 'wm set-ignore-orientation-request true'
+```
+
+It makes the display ignore per-app orientation requests. It is per-display and does not survive a
+container restart, so if it works it belongs in a startup hook rather than typed once. Not applied
+yet — it changes device behaviour for every app, not just the launcher.

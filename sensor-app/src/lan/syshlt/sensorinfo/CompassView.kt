@@ -9,6 +9,10 @@
  *
  * Heading comes from the same rotation matrix that drives AttitudeView, so the
  * two always agree; disagreement would mean a bug here, not in the HAL.
+ *
+ * Everything on the card is fixed in the CARD's frame, so the ticks, needles
+ * and label positions are built once per size and then drawn under a single
+ * canvas rotation. See AttitudeView for why that mattered.
  */
 package lan.syshlt.sensorinfo
 
@@ -19,12 +23,15 @@ import android.graphics.Path
 import android.graphics.Typeface
 import android.view.View
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
 private val NEEDLE_N = 0xFFE05252.toInt()
 private val NEEDLE_S = 0xFF8A9099.toInt()
+
+private val CARD = arrayOf("N", "E", "S", "W")
 
 class CompassView(context: Context) : View(context) {
 
@@ -50,26 +57,103 @@ class CompassView(context: Context) : View(context) {
         textAlign = Paint.Align.CENTER
         typeface = Typeface.MONOSPACE
     }
-    private val path = Path()
+
+    // Built once per size, drawn under one canvas.rotate().
+    private val tickMinor = Path()
+    private val tickMedium = Path()
+    private val tickMajor = Path()
+    private val tickNorth = Path()
+    private val needleNorth = Path()
+    private val needleSouth = Path()
+    private val lubber = Path()
+    private val lab = arrayOfNulls<String>(12)
+    private val labX = FloatArray(12)
+    private val labY = FloatArray(12)
+    private val labSize = FloatArray(12)
+    private val labColor = IntArray(12)
+    private var labN = 0
+    private var cx = 0f
+    private var cy = 0f
+    private var r = 0f
+    private var dp = 1f
+    private var sizeW = 0
+    private var sizeH = 0
 
     fun setHeading(az: Double, ok: Boolean, compassPoint: String) {
-        // A tenth of a degree is below what the dial can show; skipping those
-        // keeps the invalidate rate down when the machine is sitting still.
-        if (live == ok && point == compassPoint && kotlin.math.abs(az - azimuth) < 0.1) return
+        // A third of a degree is under a pixel of movement at the rim and below
+        // what the dial can show, so skipping those keeps the view from
+        // redrawing on sensor noise alone while the machine sits still.
+        if (live == ok && point == compassPoint && abs(az - azimuth) < 0.3) return
         azimuth = az
         live = ok
         point = compassPoint
         invalidate()
     }
 
+    private fun buildDial() {
+        dp = resources.displayMetrics.density
+        cx = sizeW / 2f
+        cy = sizeH / 2f
+        r = min(sizeW, sizeH) / 2f - 7f * dp
+
+        tickMinor.reset(); tickMedium.reset(); tickMajor.reset(); tickNorth.reset()
+        labN = 0
+
+        for (deg in 0 until 360 step 15) {
+            val b = deg * PI / 180.0
+            val sb = sin(b).toFloat()
+            val cb = cos(b).toFloat()
+            val major = deg % 90 == 0
+            val medium = deg % 30 == 0
+            val inner = if (major) 0.80f else if (medium) 0.85f else 0.89f
+            val target = when {
+                deg == 0 -> tickNorth
+                major -> tickMajor
+                medium -> tickMedium
+                else -> tickMinor
+            }
+            target.moveTo(cx + r * inner * sb, cy - r * inner * cb)
+            target.lineTo(cx + r * 0.98f * sb, cy - r * 0.98f * cb)
+
+            if (major || medium) {
+                val size = if (major) r * 0.21f else r * 0.14f
+                val rad = if (major) r * 0.66f else r * 0.68f
+                cardText.textSize = size
+                lab[labN] = if (major) CARD[deg / 90] else "${deg / 10}"
+                labX[labN] = cx + rad * sb
+                labY[labN] = cy - rad * cb - (cardText.descent() + cardText.ascent()) / 2f
+                labSize[labN] = size
+                labColor[labN] = if (deg == 0) NEEDLE_N else if (major) dim else faint
+                labN++
+            }
+        }
+
+        needle(needleNorth, 1f)
+        needle(needleSouth, -1f)
+
+        lubber.reset()
+        lubber.moveTo(cx, cy - r * 0.86f)
+        lubber.lineTo(cx - r * 0.09f, cy - r * 1.04f)
+        lubber.lineTo(cx + r * 0.09f, cy - r * 1.04f)
+        lubber.close()
+    }
+
+    /** Drawn in the outer band only, so it never fights the centre readout. */
+    private fun needle(p: Path, dir: Float) {
+        p.reset()
+        p.moveTo(cx, cy - dir * r * 0.74f)
+        p.lineTo(cx - r * 0.055f, cy - dir * r * 0.40f)
+        p.lineTo(cx + r * 0.055f, cy - dir * r * 0.40f)
+        p.close()
+    }
+
     override fun onDraw(canvas: Canvas) {
-        val w = width.toFloat()
-        val h = height.toFloat()
-        if (w < 16f || h < 16f) return
-        val dp = resources.displayMetrics.density
-        val cx = w / 2f
-        val cy = h / 2f
-        val r = min(w, h) / 2f - 7f * dp
+        if (width < 16 || height < 16) return
+        if (width != sizeW || height != sizeH) {
+            sizeW = width
+            sizeH = height
+            buildDial()
+        }
 
         stroke.color = faint
         stroke.strokeWidth = 1.5f * dp
@@ -80,77 +164,44 @@ class CompassView(context: Context) : View(context) {
         // bearing the device is pointing at up to the lubber index.
         canvas.rotate(-azimuth.toFloat(), cx, cy)
 
-        cardText.textSize = r * 0.19f
-        for (deg in 0 until 360 step 15) {
-            val b = deg * PI / 180.0
-            val sb = sin(b).toFloat()
-            val cb = cos(b).toFloat()
-            val major = deg % 90 == 0
-            val medium = deg % 30 == 0
-            val inner = if (major) 0.80f else if (medium) 0.85f else 0.89f
-            stroke.color = if (deg == 0) NEEDLE_N else dim
-            stroke.strokeWidth = if (major) 2.6f * dp else if (medium) 1.5f * dp else 1f * dp
-            canvas.drawLine(cx + r * inner * sb, cy - r * inner * cb,
-                cx + r * 0.98f * sb, cy - r * 0.98f * cb, stroke)
+        stroke.color = dim
+        stroke.strokeWidth = 1f * dp
+        canvas.drawPath(tickMinor, stroke)
+        stroke.strokeWidth = 1.5f * dp
+        canvas.drawPath(tickMedium, stroke)
+        stroke.strokeWidth = 2.6f * dp
+        canvas.drawPath(tickMajor, stroke)
+        stroke.color = NEEDLE_N
+        canvas.drawPath(tickNorth, stroke)
 
-            if (major) {
-                cardText.color = if (deg == 0) NEEDLE_N else dim
-                cardText.textSize = r * 0.21f
-                drawAt(canvas, CARD[deg / 90], cx, cy, r * 0.66f, sb, cb, cardText)
-            } else if (medium) {
-                cardText.color = faint
-                cardText.textSize = r * 0.14f
-                drawAt(canvas, "${deg / 10}", cx, cy, r * 0.68f, sb, cb, cardText)
-            }
+        for (i in 0 until labN) {
+            cardText.textSize = labSize[i]
+            cardText.color = labColor[i]
+            canvas.drawText(lab[i]!!, labX[i], labY[i], cardText)
         }
 
-        // North needle, drawn in the outer band so it never fights the readout.
-        needle(canvas, cx, cy, r, 0f, NEEDLE_N)
-        needle(canvas, cx, cy, r, 180f, NEEDLE_S)
+        fill.color = NEEDLE_N
+        canvas.drawPath(needleNorth, fill)
+        fill.color = NEEDLE_S
+        canvas.drawPath(needleSouth, fill)
         canvas.restore()
 
-        // Fixed lubber index: a wedge biting into the dial from the top.
         fill.color = if (live) NEEDLE_N else faint
-        path.reset()
-        path.moveTo(cx, cy - r * 0.86f)
-        path.lineTo(cx - r * 0.09f, cy - r * 1.04f)
-        path.lineTo(cx + r * 0.09f, cy - r * 1.04f)
-        path.close()
-        canvas.drawPath(path, fill)
+        canvas.drawPath(lubber, fill)
 
         bigText.color = ink
         bigText.textSize = r * 0.34f
-        smallText.color = dim
         smallText.textSize = r * 0.16f
         if (live) {
+            smallText.color = dim
             canvas.drawText("%.0f°".format(azimuth), cx, cy + bigText.textSize * 0.20f, bigText)
-            canvas.drawText(point, cx, cy + bigText.textSize * 0.20f + smallText.textSize * 1.5f,
-                smallText)
+            canvas.drawText(
+                point, cx,
+                cy + bigText.textSize * 0.20f + smallText.textSize * 1.5f, smallText
+            )
         } else {
             smallText.color = faint
             canvas.drawText("no heading", cx, cy + smallText.textSize * 0.4f, smallText)
         }
-    }
-
-    private fun needle(c: Canvas, cx: Float, cy: Float, r: Float, deg: Float, color: Int) {
-        c.save()
-        c.rotate(deg, cx, cy)
-        path.reset()
-        path.moveTo(cx, cy - r * 0.74f)
-        path.lineTo(cx - r * 0.055f, cy - r * 0.40f)
-        path.lineTo(cx + r * 0.055f, cy - r * 0.40f)
-        path.close()
-        fill.color = color
-        c.drawPath(path, fill)
-        c.restore()
-    }
-
-    private fun drawAt(c: Canvas, s: String, cx: Float, cy: Float, rad: Float,
-                       sb: Float, cb: Float, p: Paint) {
-        c.drawText(s, cx + rad * sb, cy - rad * cb - (p.descent() + p.ascent()) / 2f, p)
-    }
-
-    private companion object {
-        val CARD = arrayOf("N", "E", "S", "W")
     }
 }

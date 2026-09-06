@@ -37,6 +37,7 @@ import android.graphics.Typeface
 import android.hardware.SensorManager
 import android.view.View
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.sin
@@ -210,9 +211,28 @@ class AttitudeView(context: Context) : View(context) {
     private val textMatrix = Matrix()
     private val srcPoly = FloatArray(6)
     private val dstPoly = FloatArray(6)
-    private val ringSx = FloatArray(RING_SEG + 1)
-    private val ringSy = FloatArray(RING_SEG + 1)
-    private val ringZc = FloatArray(RING_SEG + 1)
+    /*
+     * The ring, its ticks and its cardinal labels are fixed to the WORLD, not
+     * to the device -- so their projection never changes unless the view is
+     * resized. The first cut re-projected and re-stroked about 150 line
+     * segments on every frame for a picture that was identical each time;
+     * baking them into paths once takes the per-frame work down to the slab,
+     * the heading wedge and four labels.
+     */
+    private val ringFar = Path()
+    private val ringNear = Path()
+    private val tickMinorFar = Path()
+    private val tickMinorNear = Path()
+    private val tickMajorFar = Path()
+    private val tickMajorNear = Path()
+    private val northTick = Path()
+    private var northFar = true
+    private val cardX = FloatArray(4)
+    private val cardY = FloatArray(4)
+    private val cardFar = BooleanArray(4)
+    private var sceneW = 0
+    private var sceneH = 0
+
     private val vx = FloatArray(4)
     private val vy = FloatArray(4)
     private val wp = DoubleArray(3)
@@ -228,13 +248,20 @@ class AttitudeView(context: Context) : View(context) {
     // ------------------------------------------------------------------- input
 
     fun setAttitude(r: FloatArray, az: Double, pitch: Double, roll: Double, label: String) {
+        var delta = 0f
+        for (i in 0 until 9) delta += abs(r[i] - rot[i])
+        val changed = delta > 0.005f || source != label || !live
         System.arraycopy(r, 0, rot, 0, 9)
         azimuth = az
         pitchDeg = pitch
         rollDeg = roll
         source = label
         live = true
-        if (demo < 0) invalidate()
+        // Summed absolute element delta; 0.005 is roughly a sixth of a degree,
+        // which moves the slab by well under a pixel here. Redrawing below that
+        // is pure cost, and a machine sitting on a desk is below it almost
+        // always -- which is what takes an idle panel down to no work at all.
+        if (demo < 0 && changed) invalidate()
     }
 
     fun setUnavailable(label: String) {
@@ -270,11 +297,12 @@ class AttitudeView(context: Context) : View(context) {
     // ------------------------------------------------------------------ drawing
 
     override fun onDraw(canvas: Canvas) {
-        val w = width.toFloat()
-        val h = height.toFloat()
-        if (w < 16f || h < 16f) return
-
-        dpv = resources.displayMetrics.density
+        if (width < 16 || height < 16) return
+        if (width != sceneW || height != sceneH) {
+            sceneW = width
+            sceneH = height
+            buildScene()
+        }
 
         val d = demo
         if (d >= 0) {
@@ -293,10 +321,31 @@ class AttitudeView(context: Context) : View(context) {
             curLabel = source
         }
 
+        // Far half of the world plane, then the slab, then the near half: the
+        // ring reads as a hoop the object sits inside rather than a flat decal.
+        drawStatic(canvas, far = true)
+        drawHeading(canvas, far = true)
+
+        drawSlab(canvas)
+
+        drawStatic(canvas, far = false)
+        drawHeading(canvas, far = false)
+
+        drawHud(canvas)
+    }
+
+    /** Project the world-fixed furniture once and keep it as stroked paths. */
+    private fun buildScene() {
+        dpv = resources.displayMetrics.density
+        val w = sceneW.toFloat()
+        val h = sceneH.toFloat()
+
         // Reserve a strip along the bottom for the HUD and fit the scene into
         // what is left, so chrome and geometry never share pixels: without it
         // the S label lands in the middle of the az readout.
         hudPaint.textSize = 10f * dpv
+        labelPaint.textSize = 12f * dpv
+        edge.strokeWidth = 1.1f * dpv
         val hs = h - (hudPaint.textSize * 1.35f * 3f + 6f * dpv)
 
         // Fit to whichever axis is tighter. The widest feature is the ring's
@@ -312,67 +361,75 @@ class AttitudeView(context: Context) : View(context) {
         // the centre than the far side, so lift the horizon to balance it.
         cy = (hs / 2.0 - 0.019 * focal).toFloat()
 
-        labelPaint.textSize = 12f * dpv
-        edge.strokeWidth = 1.1f * dpv
+        ringFar.reset(); ringNear.reset()
+        tickMinorFar.reset(); tickMinorNear.reset()
+        tickMajorFar.reset(); tickMajorNear.reset()
+        northTick.reset()
 
+        var px = 0f
+        var py = 0f
+        var pz = 0f
         for (i in 0..RING_SEG) {
             val b = 2.0 * PI * i / RING_SEG
             project(RING_R * sin(b), RING_R * cos(b), 0.0, sp)
-            ringSx[i] = sp[0].toFloat()
-            ringSy[i] = sp[1].toFloat()
-            ringZc[i] = sp[2].toFloat()
+            val x = sp[0].toFloat()
+            val y = sp[1].toFloat()
+            val z = sp[2].toFloat()
+            if (i > 0) {
+                val target = if ((pz + z) * 0.5f >= 0f) ringFar else ringNear
+                target.moveTo(px, py)
+                target.lineTo(x, y)
+            }
+            px = x; py = y; pz = z
         }
 
-        // Far half of the world plane, then the slab, then the near half: the
-        // ring reads as a hoop the object sits inside rather than a flat decal.
-        drawRingHalf(canvas, far = true)
-        drawTicks(canvas, far = true)
-        drawHeading(canvas, far = true)
-        drawCardinals(canvas, far = true)
-
-        drawSlab(canvas)
-
-        drawRingHalf(canvas, far = false)
-        drawTicks(canvas, far = false)
-        drawHeading(canvas, far = false)
-        drawCardinals(canvas, far = false)
-
-        drawHud(canvas)
-    }
-
-    private fun drawRingHalf(c: Canvas, far: Boolean) {
-        stroke.color = dim
-        stroke.strokeWidth = 1.5f * dpv
-        for (i in 0 until RING_SEG) {
-            if (((ringZc[i] + ringZc[i + 1]) * 0.5f >= 0f) != far) continue
-            c.drawLine(ringSx[i], ringSy[i], ringSx[i + 1], ringSy[i + 1], stroke)
-        }
-    }
-
-    private fun drawTicks(c: Canvas, far: Boolean) {
         for (deg in 0 until 360 step 15) {
             val b = deg * PI / 180.0
             val major = deg % 90 == 0
             project(RING_R * sin(b), RING_R * cos(b), 0.0, sp)
-            if ((sp[2] >= 0.0) != far) continue
+            val far = sp[2] >= 0.0
             val x0 = sp[0].toFloat()
             val y0 = sp[1].toFloat()
             val r1 = if (major) RING_R * 1.15 else RING_R * 1.07
             project(r1 * sin(b), r1 * cos(b), 0.0, sp)
-            stroke.color = if (major && deg == 0) NORTH_INK else dim
-            stroke.strokeWidth = if (major) 2.4f * dpv else 1.2f * dpv
-            c.drawLine(x0, y0, sp[0].toFloat(), sp[1].toFloat(), stroke)
+            // North is stroked separately, in red, so keep it out of the grey
+            // major path rather than drawing it twice in two colours.
+            val target = when {
+                deg == 0 -> { northFar = far; northTick }
+                major && far -> tickMajorFar
+                major -> tickMajorNear
+                far -> tickMinorFar
+                else -> tickMinorNear
+            }
+            target.moveTo(x0, y0)
+            target.lineTo(sp[0].toFloat(), sp[1].toFloat())
         }
-    }
 
-    private fun drawCardinals(c: Canvas, far: Boolean) {
         for (k in 0..3) {
             val b = k * PI / 2.0
             project(RING_R * 1.31 * sin(b), RING_R * 1.31 * cos(b), 0.0, sp)
-            if ((sp[2] >= 0.0) != far) continue
+            cardX[k] = sp[0].toFloat()
+            cardY[k] = sp[1].toFloat() + labelPaint.textSize * 0.36f
+            cardFar[k] = sp[2] >= 0.0
+        }
+    }
+
+    private fun drawStatic(c: Canvas, far: Boolean) {
+        stroke.color = dim
+        stroke.strokeWidth = 1.5f * dpv
+        c.drawPath(if (far) ringFar else ringNear, stroke)
+        stroke.strokeWidth = 1.2f * dpv
+        c.drawPath(if (far) tickMinorFar else tickMinorNear, stroke)
+        stroke.strokeWidth = 2.4f * dpv
+        c.drawPath(if (far) tickMajorFar else tickMajorNear, stroke)
+        if (northFar == far) {
+            stroke.color = NORTH_INK
+            c.drawPath(northTick, stroke)
+        }
+        for (k in 0..3) {
+            if (cardFar[k] != far) continue
             labelPaint.color = if (k == 0) NORTH_INK else dim
-            c.drawText(CARDINAL[k], sp[0].toFloat(),
-                sp[1].toFloat() + labelPaint.textSize * 0.36f, labelPaint)
+            c.drawText(CARDINAL[k], cardX[k], cardY[k], labelPaint)
         }
     }
 
