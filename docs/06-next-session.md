@@ -219,17 +219,26 @@ Two consequences worth knowing before planning work:
 - **Binary inspection belongs here, not on bigtab01.** binutils is already installed here, and the
   laptop has none of it. Pull the binary over and inspect it locally, as the camera work did.
 - **Kernel modules are the awkward case.** A module for bigtab01 must be built against Fedora 44's
-  `kernel-devel` for `7.1.13-200.fc44.x86_64`, and there is no working container runtime here to
-  get a Fedora userspace. The route is `apt install rpm2cpio cpio`, fetch the `kernel-devel` RPM,
-  extract it, and build against those headers — with the caveat that Debian's gcc may not match the
-  one Fedora built the kernel with. A **chroot** is the cleaner version of this and does not need
-  docker: unpack a Fedora 44 userspace into a directory and `chroot` into it (passwordless `sudo`
-  is available here). **Verify a trivial module loads before investing in a real one.** Secure Boot
-  is off and `sig_enforce = N` on bigtab01, so unsigned modules will load.
+  `kernel-devel` for `7.1.13-200.fc44.x86_64`, and there is no container runtime here to get a
+  Fedora userspace. **A chroot solves it, and it is verified working** (2026-09-06): `sudo chroot`
+  executes into a hand-made tree in this container, and `sudo mount --bind` succeeds, so `/proc`,
+  `/sys` and `/dev` can be mapped in and `dnf` will run inside the chroot.
+
+  Bootstrap it from the **Fedora 44 Container Base** rootfs tarball off a Fedora mirror: untar its
+  inner `layer.tar` and you have a working Fedora userspace with `dnf`, from which `kernel-devel`,
+  `gcc` and `make` install normally. That also fixes the compiler-mismatch problem for free — the
+  gcc inside the chroot is the one Fedora built the kernel with, rather than Debian's. Needs
+  `apt install xz-utils` first (`xz` is missing; `tar`, `curl`, `wget`, `mount` are present).
+
+  The cheaper alternative is `apt install rpm2cpio cpio` and extracting the `kernel-devel` RPM
+  directly. That gets headers only and leaves the gcc mismatch unsolved, so prefer the chroot.
+  Either way, **verify a trivial module loads before investing in a real one.** Secure Boot is off
+  and `sig_enforce = N` on bigtab01, so unsigned modules will load.
 
   None of this is needed for goal 2's sensors HAL — the NDK is self-contained and cross-compiles
   for Android on its own, exactly as the camera fix was built. The chroot question only arises if
   the vibrator turns out to need a kernel module.
+
 ## Traps already hit — do not repeat
 
 - **`waydroid shell -- /path/to/binary` returns `Permission denied` even when the file is fine.**
