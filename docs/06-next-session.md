@@ -1,6 +1,6 @@
 # Resume brief
 
-Rewritten 2026-09-05 after goals 1 and 3 were completed. Read this first, then
+Rewritten 2026-09-06 after goals 1, 2 and 3 were completed. Read this first, then
 [08-camera-fixed.md](08-camera-fixed.md) and [10-battery-fixed.md](10-battery-fixed.md) for what was
 actually wrong in each and what is deployed. [11-camera-facing.md](11-camera-facing.md) covers a
 second, separate camera fix (lens facing) plus the `Fence::waitForever` stall.
@@ -25,14 +25,25 @@ read the host's `/sys/class/power_supply`, and Waydroid's health HAL was overwri
 hardcoded fakes on the one path that reaches `BatteryService`. Three-byte patch, vendor overlay,
 [docs/10](10-battery-fixed.md).
 
+**Goal 2 (sensors) is done**, for all five: accelerometer, gyroscope, magnetometer, orientation
+and rotation vector are live in Android, and Android synthesises eight more on top of them.
+Waydroid's own design had the seam — `container_manager.py` starts a host daemon called
+`waydroid-sensord` if one is on `PATH`, and the guest's 10 KB stub HAL returns at its first line
+when it is. Upstream's daemon reads sensorfw (Sailfish's Qt/D-Bus daemon, unpackaged on Fedora), so
+its libgbinder `ISensors@1.0` server was kept and the **data source replaced with a direct IIO
+reader**. One binary in `/usr/local/bin`, no overlay, no image change, no layering, no reboot.
+Source in [sensors/](../sensors), writeup in [docs/14](14-sensors.md), verify with
+`bin/sensors-test.sh`. **Vibration is the one part of goal 2 still open**, and still blocked below
+Waydroid — see the vibration section below, which is unchanged.
+
 **Session of 2026-09-06** added a second camera fix (`LENS_FACING` `EXTERNAL`->`BACK`, so apps that
 demand a rear camera will open it) and spent most of its time ruling things out — see
 [11](11-camera-facing.md) and [12](12-v4l2-frame-errors.md). Net: the V4L2 frame errors were never
 reproduced and the hardware is provably clean; the one real remaining camera defect is that Mesa
 cannot allocate `YCbCr_420_888` at all, so ~4% of fallback allocations fail conversion. Open
 Camera's blank "Processing settings" turned out to be a **preference**, not a defect. The USB
-autosuspend rule was installed and then withdrawn as unnecessary. **Goal 2 is now scoped but not
-started** — read the next section, the position is better than it looks.
+autosuspend rule was installed and then withdrawn as unnecessary. Goal 2's five sensors were then
+scoped and completed in the same session; see above and [docs/14](14-sensors.md).
 
 **GPS was asked about directly and is closed: there is no receiver in this machine.** The DSDT's
 `GPS0` is an unconditional declaration in firmware shared across the Envy x2 13 family — its `_STA`
@@ -45,77 +56,21 @@ this without physical evidence of a module. Probe kept as [bin/gps-probe.py](../
 
 ## The immediate next task
 
-**Goal 2: sensors — accelerometer, tilt, compass (and vibration).** Scoped 2026-09-06 by
-reconnaissance only; **no changes were made**. The position is much better than expected.
+**Goal 2's sensors are done** — the scoping that used to live here is superseded by
+[docs/14-sensors.md](14-sensors.md), which records what the hardware actually is (three
+transducers, two firmware-fused outputs), the scale factors derived from the HID report descriptor,
+the gyroscope's five-second warm-up, and the traps.
 
-### The host already has everything, driven and working
+Two candidates, in the order AGENTS.md implies:
 
-All five sensors sit behind the ITE8350 HID sensor hub (`0018:048D:8350`) on i2c-0, exposed as IIO:
+1. **Vibration** — the rest of goal 2, and the harder half. Unchanged from the previous scoping;
+   read the next section. Nothing about the sensors work moves it forward, because the sensors were
+   already readable from Linux and the vibrator still is not.
+2. **Goal 4, removable media** — untouched, and much cheaper. Exposing the user's
+   `/run/media/<username>` to the container is probably sufficient.
 
-| Node | `name` | Android equivalent |
-|---|---|---|
-| `iio:device0` | `incli_3d` | tilt / `ORIENTATION` |
-| `iio:device1` | `gyro_3d` | `GYROSCOPE` |
-| `iio:device2` | `magn_3d` | `MAGNETIC_FIELD` (compass; also has `in_rot_from_north_magnetic_tilt_comp_raw`, a tilt-compensated heading) |
-| `iio:device3` | `dev_rotation` | `ROTATION_VECTOR` (quaternion) |
-| `iio:device4` | `accel_3d` | `ACCELEROMETER` |
-
-Modules `hid_sensor_{accel,gyro,magn,incl,rotation}_3d` are all loaded. Every node returns live
-data with a sane `_scale`, e.g. accel `scale=0.009806650` (raw is milli-g).
-
-### The container can already read them — no plumbing needed
-
-This is the key finding. `/dev/iio:device*` is `crw------- root root` and **not** passed into the
-container, but the **sysfs interface is world-readable** (`-rw-r--r--`) and `/sys` is visible
-inside. Reading from within the container works *today*, unmodified:
-
-```
-$ sudo waydroid shell -- sh -c 'for a in x y z; do cat /sys/bus/iio/devices/iio:device4/in_accel_${a}_raw; done'
-0
-0
-1000          <- exactly 1 g on z, byte-identical to the host. Device lying flat.
-```
-
-So no `lxc.mount.entry`, no device-node work, no udev rule. **Do not start by plumbing devices in** —
-that trap cost time on the camera and is not needed here.
-
-### What is actually missing
-
-Android reports `No Sensors on the device` (`dumpsys sensorservice`), because Waydroid ships a
-**stub** sensors HAL:
-
-```
-[waydroid.stub_sensors_hal]: [1]
-[init.svc.vendor.sensors-hal-1-0]: [running]
-/vendor/bin/hw/android.hardware.sensors@1.0-service.waydroid   10240 bytes   <- a stub, by size alone
-```
-
-Waydroid's intended real path is a host daemon, `waydroid-sensord`, which
-`tools/actions/container_manager.py:169` starts *if present*:
-
-```python
-if which("waydroid-sensord"):
-    ... ["waydroid-sensord", "/dev/" + args.HWBINDER_DRIVER] ...
-```
-
-**It is not installed.** Not in `PATH`, and `rpm -ql waydroid` (1.6.3-1.fc44) ships no sensor
-files at all. So the daemon half of the design is simply absent on Fedora.
-
-### Two routes, and the second is the one this repo has already proven
-
-1. **Get `waydroid-sensord` onto the host.** Upstream's intended design. Costs a build or a layered
-   package on an immutable OS, and the guest stub must then be told not to stub
-   (`waydroid.stub_sensors_hal`).
-2. **Patch or replace the stub HAL in the vendor overlay**, having it read
-   `/sys/bus/iio/devices/` directly — which, per the section above, already works from inside the
-   container. This is *exactly* the shape of the battery fix in [docs/10](10-battery-fixed.md):
-   a small Waydroid stub HAL binary in `/vendor/bin/hw/`, replaced via the vendor overlay, mode
-   `0755`. The NDK toolchain and the build recipe from [docs/08](08-camera-fixed.md) are still on
-   the dev box.
-
-Start by reading the 10 KB stub with `objdump` to see what it returns for `getSensorsList()`, and
-by checking whether `waydroid.stub_sensors_hal=0` changes its behaviour — that property exists for
-a reason and is a one-line experiment before any building.
+Goal 4 is the better next move if the aim is a working machine; vibration is the better next move
+if the aim is to finish goal 2. Vibration needs the DSDT, not Waydroid.
 
 ### Vibration — harder than the sensors, and blocked one layer lower
 
@@ -165,6 +120,9 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 
 | Item | State |
 |---|---|
+| **`/usr/local/bin/waydroid-sensord`** | **the sensors fix**, 663 KB, mode `0755`. `/usr/local` is a symlink to `/var/usrlocal`, so no layering and no reboot. **Delete to revert** — waydroid then restores `waydroid.stub_sensors_hal=1` by itself |
+| `/var/lib/waydroid/waydroid-sensord.pid` | the daemon's single-instance lock. Recreated on demand, safe to delete |
+| `/etc/waydroid-sensors.conf` | **not installed.** Optional; documented sample in [artifacts/sensors/](../artifacts/sensors/) |
 | **`overlay/vendor/bin/hw/android.hardware.health@2.0-service.waydroid`** | **patched health HAL — this is the battery fix**, mode `0755`. Delete to revert |
 | **`overlay/vendor/lib/libgbm_mesa_wrapper.so`** | **fixed 32-bit wrapper — this is the camera fix.** Delete to revert |
 | **`overlay/vendor/lib64/libgbm_mesa_wrapper.so`** | fixed 64-bit wrapper. Delete to revert |
@@ -221,7 +179,8 @@ container host, **not** to this environment — it is not the target kernel for 
 | | |
 |---|---|
 | Present | `gcc`, `make`, `ld`, **binutils** (`readelf`, `objdump`, `nm`, `strings`), `curl`, `wget`, `openssl`, `xxd` |
-| Missing | `clang` (the NDK brings its own), `python3`, `rsync`, `rpm2cpio`, `cpio`, `bison`, `flex`, `bc` |
+| Missing | `clang` (the NDK brings its own), `rsync`, `rpm2cpio`, `cpio`, `bison`, `flex`, `bc` |
+| Added 2026-09-06 | `cmake`, `libglib2.0-dev`, `pkg-config` (for `sensors/build.sh`). **`python3` is present** — the earlier note here saying otherwise was wrong |
 | **`apt` + passwordless `sudo`** | **available** — install what you need here rather than on bigtab01 |
 | `docker` | **unavailable by design.** This box *is* a Docker container and docker-in-docker is not set up, so the `/home/coder/bin/docker` shim fails with *"No suitable executable found"*. **Do not try to fix it** — plan without a container runtime |
 
@@ -286,6 +245,28 @@ Two consequences worth knowing before planning work:
 - **An overlay file that is a service binary needs mode `0755`.** The existing overlay files are
   `0644`, which is fine for libraries and would silently stop a HAL from starting.
 
+- **Root is not enough for anything the container manager spawns.** `waydroid-container` runs
+  confined as `system_u:system_r:waydroid_t:s0` and its children inherit that domain, so `/run`
+  (`var_run_t`) is denied while `/var/lib/waydroid` (`waydroid_data_t`) works. Running the same
+  binary by hand under `sudo` succeeds, because an ssh login is `unconfined_t` — so it fails
+  exactly one way round and looks like a phantom. **Write to `/var/lib/waydroid`.**
+- **`waydroid log` / `/var/lib/waydroid/waydroid.log` captures the stdout and stderr of anything
+  waydroid spawns in the background.** That is where the SELinux failure above was finally read
+  off, after a lot of guessing. Look there first when a spawned helper misbehaves.
+- **`waydroid session stop` does not reliably kill background helpers.** Its cleanup is inside a
+  `try:` that swallows every exception, and it runs `kill -9 $pid` with `pid` set to the *whole*
+  output of `pidof` — so once two instances exist it becomes `kill -9 "A B"` and can never work
+  again. Helpers should enforce single-instance themselves.
+- **Processes waydroid spawns become zombies.** Its `background()` helper Popens them and never
+  `wait()`s, so exited children sit in state `Z` for the life of the service. Harmless, but
+  `pidof` then returns several pids. Count live ones with
+  `ps -eo pid,stat,comm | awk '$3=="<comm>" && $2 !~ /Z/'`.
+- **A name longer than 15 characters cannot be found by plain `pgrep`** — `/proc/PID/comm` is
+  truncated. `pgrep -f` overshoots instead, matching any shell that merely mentions the name,
+  including the script doing the search.
+- **IIO device indices are not stable across boots.** `accel_3d` was `iio:device4` in one session
+  and `iio:device0` in the next. Match on the node's `name`.
+
 ## Hypotheses disproven along the way
 
 | Hypothesis | Verdict |
@@ -313,6 +294,11 @@ A third set — bad hardware, USB bandwidth, CPU starvation, buffer-queue depth 
 node churn — was disproven while chasing the intermittent V4L2 frame errors; see
 [12-v4l2-frame-errors.md](12-v4l2-frame-errors.md).
 
+A fifth set — that the guest stub HAL had to be patched, that a sensors daemon would drag in
+sensorfw, that the five IIO nodes are five sensors, that `in_magn_scale = 1.0` means the kernel's
+unit lookup failed, and that the gyroscope is faulty — was disproven while doing goal 2; see
+[14-sensors.md](14-sensors.md).
+
 A fourth set — the LPSS UARTs being `_OSI`-gated, `GPS0._STA` meaning the receiver exists, a missing
 driver, a USB or WWAN-attached GPS, and the module merely being held in reset — was disproven while
 answering the GPS question; see [13-gps.md](13-gps.md).
@@ -326,4 +312,4 @@ thermal HAL at all — `dumpsys thermalservice` says `HAL Ready: false`). Neithe
 goal. Goal 3 also has one unverified behaviour: the battery sat at 100% on AC throughout, so
 *tracking a changing value* was never exercised. Unplug the charger and re-run `bin/battery-test.sh`.
 
-Goal 4 is untouched.
+Goal 4 (removable media) is untouched, and is now the cheapest remaining item.

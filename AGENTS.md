@@ -84,13 +84,18 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    Two intermittent camera faults remain unreproduced and unexplained — errored V4L2 buffers and
    spurious device removal; [docs/12-v4l2-frame-errors.md](docs/12-v4l2-frame-errors.md) rules out
    the hardware, USB, the driver and CPU load, and ships `bin/camera-watch.sh` to catch the next one.
-2. **Sensors** — expose the accelerometer, tilt/inclinometer, compass (magnetometer), gyroscope
-   and rotation vector to Waydroid, plus vibration. All five sensors are already live on the host
-   as IIO nodes, and the container can already read them through `/sys` with no plumbing; what is
-   missing is that Waydroid ships a **stub** sensors HAL and the `waydroid-sensord` daemon is not
-   installed on Fedora. Scoped in [docs/06-next-session.md](docs/06-next-session.md) — start there. The five sensors are
-   the tractable half; **vibration is blocked a layer lower** — the motor exists but Linux exposes
-   no interface to it at all, so that part starts with the DSDT, not with Waydroid.
+2. **Sensors** — **DONE for all five.** Android now reports the accelerometer, gyroscope,
+   magnetometer, orientation and rotation vector, reading live values from the ITE8350 HID sensor
+   hub, and synthesises eight more sensor types on top of them (Gravity, Linear Acceleration, Game
+   and GeoMag Rotation Vector, …). Waydroid's own design had the seam: `container_manager.py`
+   starts a host daemon named `waydroid-sensord` if one is on `PATH`, and the guest's stub HAL
+   stands down by itself when it is. Upstream's daemon reads sensorfw, which Fedora does not
+   package, so its libgbinder `ISensors@1.0` server was kept and its **data source replaced with a
+   direct IIO reader**. One binary in `/usr/local/bin`, no overlay files, no image changes, no
+   layering, no reboot. See [docs/14-sensors.md](docs/14-sensors.md); verify with
+   `bin/sensors-test.sh`.
+   **Vibration is the remaining part and is blocked a layer lower** — the motor exists but Linux
+   exposes no interface to it at all, so that part starts with the DSDT, not with Waydroid.
 3. **Power** — **DONE.** Battery level, voltage, charge status and AC adapter state now come from
    the host. The container could always read the host's `/sys/class/power_supply` and the health HAL
    read it correctly; Waydroid's `healthd_board_battery_update()` then overwrote every field with
@@ -119,7 +124,10 @@ and the reasoning behind each change.
 - `docs/` — numbered investigation notes, one per topic
 - `bin/` — helper scripts for working with the host, incl. stdlib-only V4L2 probes
   (`v4l2-formats.py`, `v4l2-curfmt.py`, `v4l2-grab.py`) written because `v4l-utils` is not
-  installed and layering a package on an Atomic host costs a reboot
+  installed and layering a package on an Atomic host costs a reboot, plus the sensor tools
+  (`iio-probe.py`, `hid-decode.py`, `sensors-test.sh`)
+- `sensors/` — source for `waydroid-sensord`, the host-side sensors daemon (goal 2). Build with
+  `sensors/build.sh`; see the header comment for why it is a host daemon and not a guest HAL
 - `artifacts/` — configs pulled from or staged for the host, with originals kept alongside
 
 Record what was *ruled out* and why, not just what worked. Distinguish clearly between what has
