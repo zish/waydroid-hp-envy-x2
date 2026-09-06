@@ -255,3 +255,93 @@ sudo waydroid session stop && waydroid session start   # session, not container
 ```
 
 To switch to `FRONT` instead, deploy the `.front` variant from `artifacts/camera/` the same way.
+
+## Open Camera's blank "Processing settings" — a preference, not a defect
+
+Reported as *"Open Camera crashed when I tried to access processing settings"*, later refined to
+*"it froze and I tried to exit the app"*, and finally *"tapping Processing Settings results in a
+grey screen"*. It was none of those things. Recording it because four plausible explanations were
+wrong in sequence, and because the obvious fix would have made the system worse.
+
+### What it actually was
+
+Open Camera's `preference_camera_api` was set to **`preference_camera_api_old`** — the legacy
+Camera1 API. Every entry on the Processing screen requires Camera2, so all of them were filtered
+out. An empty full-screen `ListView` on a dark theme is a grey rectangle.
+
+Setting the preference to `preference_camera_api_camera2` fixed it. The screen now shows *Edge mode
+algorithm* and *Noise reduction algorithm*.
+
+```bash
+# app must be stopped first, or it rewrites the file on exit
+sudo waydroid shell -- sh -c "am force-stop net.sourceforge.opencamera"
+sudo waydroid shell -- sh -c "sed -i 's|>preference_camera_api_old<|>preference_camera_api_camera2<|' \
+    /data/data/net.sourceforge.opencamera/shared_prefs/net.sourceforge.opencamera_preferences.xml"
+sudo waydroid shell -- sh -c "am start -n net.sourceforge.opencamera/.MainActivity"
+```
+
+Only two entries appear, and that is correct: `android.request.availableCapabilities` is
+`[BACKWARD_COMPATIBLE]` and nothing else — no `MANUAL_SENSOR`, no `RAW`, no `BURST_CAPTURE` — so
+everything gated on those stays hidden. A UVC webcam genuinely cannot do them.
+
+### Bonus: it silenced the metadata errors
+
+`E/Camera2-Parameters: Error finding static metadata entry 'android.sensor.info.physicalSize'`
+was logged five times on every camera open, alongside `android.distortionCorrection.availableModes`.
+Those come from **cameraserver's Camera1→Camera2 shim**, which only runs for an app that asked for
+the legacy API. On Camera2 the count is **0**.
+
+This matters for planning: `SENSOR_INFO_PHYSICAL_SIZE` (tag `0xf0005`) is genuinely absent from
+the HAL — confirmed by scanning the binary, which pushes `ACTIVE_ARRAY_SIZE`, `PIXEL_ARRAY_SIZE`,
+`LENS_FACING`, `SENSOR_ORIENTATION` and `LENS_INFO_AVAILABLE_FOCAL_LENGTHS`, but never `0xf0005`.
+Adding it was on the table. It turned out not to be needed: **the gap stopped mattering rather than
+being patched.** Prefer that outcome where it is available.
+
+### The fix that was considered and rejected
+
+The hypothesis was that Open Camera hides its "Camera API" option because its `supportsCamera2()`
+whitelist predates `EXTERNAL`. The HAL makes that a one-byte change, in the *same function* as the
+facing patch and with the same shape:
+
+```
+0002bd3b: c6 44 24 3f 04    movb $0x4,0x3f(%esp)     <- 4 = EXTERNAL; byte at file offset 0x2bd3f
+0002bd40: 8d 44 24 3f       lea  0x3f(%esp),%eax
+0002bd44: 6a 01             push $0x1
+0002bd46: 50                push %eax
+0002bd47: 68 00 00 15 00    push $0x150000           <- ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL
+0002bd4d: e8 1e 34 03 00    call CameraMetadata::update@plt
+```
+
+`04` → `00` would report `LIMITED`. **Do not do this**, and the reason generalises:
+
+`EXTERNAL` is an *exemption*: it tells the framework the camera may disappear at any moment and
+need not supply the full static metadata set. `LIMITED` is a *promise* that it does. This HAL does
+not publish `SENSOR_INFO_PHYSICAL_SIZE`, so claiming `LIMITED` invites apps to trust metadata that
+is absent and dereference null — **precisely the failure that broke Google Lens** at the facing
+stage. It would trade one empty settings screen for a new class of crash across every camera app.
+
+The preference change was tried first because it was free and reversible, and it made the patch
+unnecessary. The hypothesis behind the patch was also simply **wrong**: Open Camera connected with
+`Camera API version 2` on an unmodified `EXTERNAL` HAL, so its gate never rejected `EXTERNAL` at
+all. Why the option is not visible in its settings UI is still unexplained, and no longer matters.
+
+### Hypotheses disproven, in order
+
+| Hypothesis | Verdict |
+|---|---|
+| The app crashed | **Wrong** — crash buffer empty, no `FATAL`, no tombstone, no `AndroidRuntime` |
+| The low-memory killer killed it | **Wrong** — not one `lmkd` line in the log |
+| The app hung | **Wrong** — it logged Choreographer frames and accepted input throughout the "frozen" window; no ANR for it |
+| It is the `Fence::waitForever` stall | **Wrong.** Tempting, and asserted too confidently. That stall is real and documented above, but it is not this |
+| The settings *activity* never launched | **Wrong question** — recent Open Camera opens settings as a **fragment** inside `MainActivity`, so no activity launch was ever expected |
+| The settings fragment was never added | **Wrong** — `MyPreferenceFragment` *and* `PreferenceSubProcessing` were both `mAdded=true mState=5` (RESUMED) |
+| The fragment's view failed to render | **Wrong** — its `ListView` was `V.ED.VC..` at `0,0-1916,964`, visible and drawn, and the background painted. It simply had **zero child views** |
+| Open Camera hides "Camera API" because its whitelist rejects `EXTERNAL` | **Wrong** — Camera2 engaged on an unpatched HAL |
+
+### The lesson worth keeping
+
+Every step of this pointed at the graphics stack or the HAL, because that is where the session's
+prior bugs lived. The evidence never actually supported it: no exception, no ANR, a resumed
+fragment, a visible correctly-sized view. **An empty list and a failed render look identical on
+screen and completely different in `dumpsys activity top`.** Dump the view hierarchy before
+theorising about rendering.

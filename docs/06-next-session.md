@@ -68,6 +68,7 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | `/tmp/camera-test.sh` on host | copy of `bin/camera-test.sh`; `/tmp` clears on reboot |
 | Waydroid session | `RUNNING`; container `FROZEN` when idle — normal, not a fault |
 | USB autosuspend | back at the `auto` default. The udev rule that pinned it `on` was tried and **withdrawn** — see [12](12-v4l2-frame-errors.md) |
+| **Open Camera `preference_camera_api`** | changed `..._old` -> `..._camera2` to populate its Processing settings screen. Original backed up beside it as `..._preferences.xml.bak-preclaude`. See [11](11-camera-facing.md) |
 | Toolbox container | `fedora-toolbox-44`, still never used. Safe to delete |
 
 Nothing destructive was done. No packages layered onto the immutable OS. The vendor and system
