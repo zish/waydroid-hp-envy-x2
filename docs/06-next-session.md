@@ -354,12 +354,30 @@ mCurrentAppOrientation=SCREEN_ORIENTATION_PORTRAIT
 deepestLastOrientationSource=ActivityRecord{... org.fossify.home/.activities.MainActivity}
 ```
 
-This build has the large-screen override that exists for exactly this case:
+There is **no launcher setting to change** — the orientation is hardcoded in its manifest, which
+`aapt2 dump xmltree` on the pulled APK shows directly, and its `Prefs.xml` has no rotation key:
 
-```bash
-sudo waydroid shell -- sh -c 'wm set-ignore-orientation-request true'
+```
+name = "org.fossify.home.activities.MainActivity"
+android:screenOrientation = 1        # 1 = portrait
 ```
 
-It makes the display ignore per-app orientation requests. It is per-display and does not survive a
-container restart, so if it works it belongs in a startup hook rather than typed once. Not applied
-yet — it changes device behaviour for every app, not just the launcher.
+**Fixed with a per-app compat override**, which is narrower than the display-wide
+`wm set-ignore-orientation-request true` because it leaves every other app alone:
+
+```bash
+sudo waydroid shell -- sh -c 'am compat enable 265464455 org.fossify.home'  # OVERRIDE_ANY_ORIENTATION
+sudo waydroid shell -- sh -c 'am compat enable 265451093 org.fossify.home'  # ..._UNDEFINED_ORIENTATION_TO_NOSENSOR
+sudo waydroid shell -- sh -c 'am force-stop org.fossify.home'
+```
+
+The first gate is what makes the second apply to an app that *did* specify an orientation; without
+it the `UNDEFINED_` override only touches apps that specified none. After it, `dumpsys window
+displays` reports `mCurrentAppOrientation=SCREEN_ORIENTATION_NOSENSOR` with the launcher resumed,
+and the display stays at `cur=1916x1027` instead of rotating to `1027x1916 ROTATION_270`. Undo with
+`am compat reset <id> org.fossify.home`.
+
+Two things not established: whether the override survives a container restart (check
+`dumpsys platform_compat | grep fossify` after the next one, and move it into a startup hook if it
+does not), and the launcher's grid is still the one it chose for portrait, so the icons sit in a
+sparse staggered layout — the column count is a launcher setting and can be raised.
