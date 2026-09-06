@@ -52,6 +52,15 @@ that line is still valid.
   Android images by dropping them in `/var/lib/waydroid/overlay/{system,vendor}/` instead of
   modifying the read-only images. Reversible by deleting one file — always prefer this.
 
+### Where builds happen
+
+**All software builds run on the dev box, from inside the project directory — never on bigtab01.**
+The laptop has 8 GB of RAM against the dev box's 32 GB, and it is an immutable host where every
+toolchain package costs a layered install and a reboot. Build here, copy the artifact across.
+`build/` in the repo is a gitignored symlink onto the big disk; see
+[docs/06-next-session.md](docs/06-next-session.md) for the layout and for what this box can and
+cannot do (no working container runtime; `apt` and `sudo` available).
+
 ### sudo
 
 Password auth for `sudo` is temporarily disabled, so sudo commands will run unprompted.

@@ -175,19 +175,55 @@ images were never modified — everything is overlay files.
 Exact deployed bytes are kept in [artifacts/phase2/](../artifacts/phase2/), so the fix can be
 re-deployed without rebuilding.
 
-## Dev box
+## Dev box — and where builds must happen
+
+**Policy (set 2026-09-06): all software builds happen on the dev box, from inside the project
+directory. Never on bigtab01.** The laptop has 8 GB of RAM against the dev box's 32 GB, and it is
+an immutable host where every toolchain package costs a layered install and a reboot. Build here,
+copy the artifact over.
+
+`build/` in the repo is a **symlink to `/home/coder/extra_space/bigtab01-build`** and is gitignored.
+The indirection is deliberate: the project lives on a filesystem that is 89% full (41 GB free),
+while `extra_space` has 435 GB. So builds are reachable at a project-relative path without landing
+their bytes on the small disk. Recreate it with:
+
+```bash
+mkdir -p /home/coder/extra_space/bigtab01-build && ln -s /home/coder/extra_space/bigtab01-build build
+```
+
+| Path | |
+|---|---|
+| `build/ndk` | NDK r27c (clang + x86_64 **and** i686 sysroots). `build/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang` |
+| `build/minigbm-yuv` | minigbm `yuv` branch checkout |
+| `build/wrapper-build/{32,64}` | camera gralloc wrapper build tree |
+| `build/sensors` | empty; for the goal 2 sensors HAL |
+| `build/acpi` | empty; for DSDT/SSDT decompilation |
+
+Rebuild the camera fix with `phase2/build.sh --abi 32 --fix` and `--abi 64 --fix`; add `--debug`
+for argument tracing.
+
+### What the dev box is, and what it can and cannot do
+
+**Debian 13 (trixie) in a container**, 8 cores, 31 GB RAM. Kernel `6.19.14-100.fc42` belongs to the
+container host, **not** to this environment — it is not the target kernel for anything.
 
 | | |
 |---|---|
-| NDK | r27c at `~/ndk-dl/android-ndk-r27c` (clang + x86_64 **and** i686 sysroots extracted) |
-| minigbm source | `yuv` branch cloned to `/home/coder/extra_space/minigbm-yuv` |
-| Wrapper build tree | `/home/coder/extra_space/wrapper-build/{32,64}` |
-| Big disk | `/home/coder/extra_space`, 460+ GB free |
-| Note | no `python3`, no `rsync`, no `clang` on the dev box; `gcc`, `readelf`, `objdump`, `nm`, `unzip`, `curl`, `patch`, `perl` are present |
+| Present | `gcc`, `make`, `ld`, **binutils** (`readelf`, `objdump`, `nm`, `strings`), `curl`, `wget`, `openssl`, `xxd` |
+| Missing | `clang` (the NDK brings its own), `python3`, `rsync`, `rpm2cpio`, `cpio`, `bison`, `flex`, `bc` |
+| **`apt` + passwordless `sudo`** | **available** — install what you need here rather than on bigtab01 |
+| `docker` | **present but broken** — `/home/coder/bin/docker` is a shim that fails with *"No suitable executable found"*. No containers here |
 
-Rebuild the fix with `phase2/build.sh --abi 32 --fix` and `--abi 64 --fix`; add `--debug` for
-argument tracing.
+Two consequences worth knowing before planning work:
 
+- **Binary inspection belongs here, not on bigtab01.** binutils is already installed here, and the
+  laptop has none of it. Pull the binary over and inspect it locally, as the camera work did.
+- **Kernel modules are the awkward case.** A module for bigtab01 must be built against Fedora 44's
+  `kernel-devel` for `7.1.13-200.fc44.x86_64`, and there is no working container runtime here to
+  get a Fedora userspace. The route is `apt install rpm2cpio cpio`, fetch the `kernel-devel` RPM,
+  extract it, and build against those headers — with the caveat that Debian's gcc may not match the
+  one Fedora built the kernel with. **Verify a trivial module loads before investing in a real
+  one.** Secure Boot is off and `sig_enforce = N` on bigtab01, so unsigned modules will load.
 ## Traps already hit — do not repeat
 
 - **`waydroid shell -- /path/to/binary` returns `Permission denied` even when the file is fine.**

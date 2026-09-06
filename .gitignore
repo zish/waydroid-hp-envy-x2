@@ -6,3 +6,8 @@ phase0/gbm-import-test
 phase0/gbm-map-test
 phase1/gbm-android-test
 phase1/gbm-import-android
+
+# Build area — a symlink onto the big disk (/home/coder/extra_space/bigtab01-build).
+# Builds run HERE on the 32 GB dev box, never on bigtab01 (8 GB). Recreate with:
+#   mkdir -p /home/coder/extra_space/bigtab01-build && ln -s /home/coder/extra_space/bigtab01-build build
+build
