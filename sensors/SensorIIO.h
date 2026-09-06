@@ -117,6 +117,11 @@ struct SensorIIO {
     /* Milliseconds between polls, from the config file. */
     int PollIntervalMs() const { return mPollIntervalMs; }
 
+    /* How far to trust the magnetometer right now, as an Android accuracy
+     * value (0 UNRELIABLE, 1 LOW, 2 MEDIUM, 3 HIGH).  See the definition for
+     * why |B| alone is enough to tell. */
+    int MagnetometerAccuracy(float x, float y, float z) const;
+
     /* Read live values and check the hub's quaternion against its own
      * accelerometer and compass.  Used by `waydroid-sensord --selftest`. */
     int SelfTest();
@@ -135,6 +140,7 @@ private:
     int mPollIntervalMs;
     int mAxisRotation;              /* 0, 90, 180 or 270 degrees about Z     */
     double mMagnScale;
+    double mEarthFieldUt;           /* local geomagnetic field strength      */
 };
 
 }  // namespace waydroid

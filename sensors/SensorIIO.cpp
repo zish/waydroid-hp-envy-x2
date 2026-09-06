@@ -10,6 +10,8 @@
 
 #include "SensorIIO.h"
 
+#include "hybrisbindertypes.h"   /* ACCURACY_* */
+
 #include <dirent.h>
 #include <math.h>
 #include <stdio.h>
@@ -52,6 +54,12 @@ namespace waydroid {
  */
 #define SCALE_ACCEL 9.80665e-3
 #define SCALE_GYRO 1.7453293e-7
+/* Local geomagnetic field strength, only used to judge how contaminated a
+ * reading is.  Earth's field runs 25-65 uT; 50 is a safe middle for a check
+ * that is meant to catch a bias comparable to the field, not to be precise.
+ * Override with earth_field_ut in the config for a tighter check. */
+#define EARTH_FIELD_UT_DEFAULT 50.0
+
 #define SCALE_MAGN_DEFAULT 1e-4
 #define SCALE_ROT 1e-7
 
@@ -129,7 +137,8 @@ static int read_iio_attr(const std::string &path, const std::string &attr,
 
 SensorIIO::SensorIIO()
     : mCb(nullptr), mUserdata(nullptr), mPollIntervalMs(50),
-      mAxisRotation(0), mMagnScale(SCALE_MAGN_DEFAULT)
+      mAxisRotation(0), mMagnScale(SCALE_MAGN_DEFAULT),
+      mEarthFieldUt(EARTH_FIELD_UT_DEFAULT)
 {
     LoadConfig();
 
@@ -212,13 +221,54 @@ void SensorIIO::LoadConfig()
             double s = atof(val);
             if (s > 0)
                 mMagnScale = s;
+        } else if (!strcmp(key, "earth_field_ut")) {
+            double f = atof(val);
+            /* Earth's field runs about 25-65 uT depending on latitude. */
+            if (f >= 20.0 && f <= 70.0)
+                mEarthFieldUt = f;
+            else
+                GWARN("earth_field_ut must be 20-70 uT; got %s", val);
         } else {
             GWARN("%s: unknown key '%s'", path, key);
         }
     }
     fclose(f);
-    GINFO("config: poll=%d ms  axis_rotation=%d  magn_scale=%g",
-          mPollIntervalMs, mAxisRotation, mMagnScale);
+    GINFO("config: poll=%d ms  axis_rotation=%d  magn_scale=%g  earth_field=%g uT",
+          mPollIntervalMs, mAxisRotation, mMagnScale, mEarthFieldUt);
+}
+
+/*
+ * Report how far the magnetometer can be trusted, from the one check that
+ * needs no external reference: |B| is a property of where the machine is
+ * standing, not of how it is held, so a clean magnetometer reads the same
+ * magnitude in every orientation.  A hard-iron offset -- and the keyboard's
+ * attachment magnets are a large one -- adds a constant vector in the device
+ * frame, so |measured| swings above and below the true field as the machine
+ * turns.  Deviation from the expected magnitude is therefore a direct measure
+ * of contamination, with no need to know which way is north.
+ *
+ * Measured on bigtab01 with the keyboard attached, |B| has ranged from about
+ * 52 uT to 134 uT against a local field near 54 -- a bias comparable to the
+ * field being measured.  This daemon used to report ACCURACY_HIGH regardless,
+ * which tells an app that a corrupted heading is good.  Android has a
+ * vocabulary for precisely this situation; the honest thing is to use it.
+ *
+ * Note this does NOT detect a bias that happens to leave the magnitude alone,
+ * so passing is weaker evidence than failing.  It is a contamination detector,
+ * not a correctness proof.
+ */
+int SensorIIO::MagnetometerAccuracy(float x, float y, float z) const
+{
+    double mag = sqrt((double)x * x + (double)y * y + (double)z * z);
+    double ratio = mag / mEarthFieldUt;
+
+    if (ratio >= 0.85 && ratio <= 1.15)
+        return ACCURACY_HIGH;
+    if (ratio >= 0.75 && ratio <= 1.30)
+        return ACCURACY_MEDIUM;
+    if (ratio >= 0.60 && ratio <= 1.60)
+        return ACCURACY_LOW;
+    return UNRELIABLE;
 }
 
 /*

@@ -356,6 +356,80 @@ is live (`heading via top edge` / `heading via screen back`) so the switch is ne
 Verified with two demo poses of identical attitude yawed 90° apart — upright facing south and
 upright facing west — which now read 0° and 90°, where before both read 0°.
 
+### The keyboard's magnets break the heading when the machine stands up
+
+Reported: with the keyboard attached and the laptop vertical the heading is wrong; detach the
+keyboard and it is correct. Flat on its back it is fine either way.
+
+That is a **hard-iron offset** — the keyboard's attachment magnets add a roughly constant vector in
+the *device* frame. It explains the flat-versus-vertical asymmetry exactly. A tilt-compensated
+heading uses only the field's *horizontal* component, and the keyboard sits behind the screen, so
+the bias is dominated by device Z:
+
+| attitude | device Z points | bias lands | heading |
+|---|---|---|---|
+| flat on its back | up | entirely in the vertical component, which is projected out | correct |
+| standing upright | horizontally | directly in the horizontal component | corrupted |
+
+The measurable signature is that **|B| should be constant under rotation** — it is a property of
+where you are standing, not of how the machine is held. Ours has ranged from about **52 µT to
+134 µT** against a local field near 54, so the bias is comparable to the field itself.
+
+#### Why it is hard to correct here
+
+Hard-iron calibration is the standard remedy, but four things get in the way:
+
+1. **The fusion is in the hub, not in our code.** The heading comes from the ITE8350's fused
+   quaternion, and the hub's own `Compass Heading, tilt-compensated` field is derived from the same
+   biased data — which is why the daemon's azimuth and the hub's heading agree closely in the
+   self-test. They are wrong together. Applying a correction means computing our own
+   tilt-compensated heading from corrected magnetometer + accelerometer, and giving up the hub's
+   gyro-aided yaw smoothing.
+2. **`in_magn_offset` is a single scalar shared by all three axes.** It is writable as root, but it
+   cannot express a 3-vector bias, so it is not the hook it looks like.
+3. **No attach detection.** The keyboard is *Bluetooth*, not a wired dock, so its connection state
+   says nothing about physical attachment — and this machine has no `SW_TABLET_MODE` or `SW_DOCK`.
+   Its only switch is `SW_LID`. Nothing tells us which calibration profile to select.
+4. **The hinge angle may move the magnets** relative to the tablet, in which case the bias is not
+   constant in the device frame and no single offset can correct it. Unknown until measured.
+
+#### What was done
+
+**The daemon now reports magnetometer accuracy honestly.** It used to hardcode `ACCURACY_HIGH` for
+every sensor, so the app displayed `accuracy high` while |B| was 134 µT — telling an app a corrupted
+heading was good. `SensorIIO::MagnetometerAccuracy()` now judges each sample by how far |B| sits
+from the expected field (`earth_field_ut` in the config, default 50 µT) and reports HIGH / MEDIUM /
+LOW / UNRELIABLE. Verified: at 58.5 µT the magnetometer reads `accuracy medium` while the
+accelerometer still reads `high`. This is a contamination *detector*, not a correctness proof — a
+bias that happens to leave the magnitude alone will pass, so failing is stronger evidence than
+passing.
+
+**[`bin/magn-calibrate.py`](../bin/magn-calibrate.py) measures the offset.** Sample while rotating
+the machine; the readings should trace a sphere centred on the origin, and a hard-iron offset moves
+that centre. It fits a sphere (hard iron) and an axis-aligned ellipsoid (adds diagonal soft iron),
+reports the offset per axis and the |B| spread before and after correction, and warns when the
+samples do not surround the centre — a fit from a few octants is under-constrained and will look
+confident while being wrong. The sphere fit recovers a known offset exactly on synthetic data.
+
+Three captures answer the two open questions:
+
+```bash
+ssh 10.42.0.137 "python3 - --secs 60 --out /tmp/attached.csv"   < bin/magn-calibrate.py
+ssh 10.42.0.137 "python3 - --secs 60 --out /tmp/detached.csv"   < bin/magn-calibrate.py
+ssh 10.42.0.137 "python3 - --secs 60 --out /tmp/attached2.csv"  < bin/magn-calibrate.py
+```
+
+Attached, detached, then attached again at a *different screen angle*. Detached gives the clean
+baseline and the true local field strength — which should then go into `earth_field_ut`. The two
+attached runs agreeing means a fixed offset holds and a correction is worth building; disagreeing
+means obstacle 4 is real and it is not.
+
+#### Not done
+
+Computing our own tilt-compensated heading from a corrected magnetometer. That is the actual fix,
+and it is deliberately gated on the measurement above rather than built on the assumption that a
+fixed offset will hold.
+
 ### Tap for demo poses
 
 Tapping the 3-D view cycles four canned attitudes — flat on its back, flat on its face, upright, on

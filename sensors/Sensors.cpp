@@ -115,10 +115,13 @@ static void sensor_event_cb(void *userdata, int id)
             events[ID_MAGNETIC_FIELD].u.vec3.x = x;
             events[ID_MAGNETIC_FIELD].u.vec3.y = y;
             events[ID_MAGNETIC_FIELD].u.vec3.z = z;
-            /* The hub does its own hard/soft-iron correction -- this is the
-             * calibrated node, and it also feeds the hub's own
-             * tilt-compensated heading. */
-            events[ID_MAGNETIC_FIELD].u.vec3.status = ACCURACY_HIGH;
+            /* This is the hub's calibrated node and it feeds the hub's own
+             * tilt-compensated heading -- but whatever hard-iron correction
+             * the hub applies is nowhere near enough to cope with the
+             * keyboard's attachment magnets, so do not claim it is good.
+             * Judge each sample by its magnitude instead. */
+            events[ID_MAGNETIC_FIELD].u.vec3.status =
+                iio->MagnetometerAccuracy(x, y, z);
             events[ID_MAGNETIC_FIELD].sensorType = SENSOR_TYPE_MAGNETIC_FIELD;
             dev->last_TimeStamp[ID_MAGNETIC_FIELD] = ts;
         }
@@ -131,7 +134,17 @@ static void sensor_event_cb(void *userdata, int id)
             events[ID_ORIENTATION].u.vec3.x = x;   /* azimuth, degrees */
             events[ID_ORIENTATION].u.vec3.y = y;   /* pitch,   degrees */
             events[ID_ORIENTATION].u.vec3.z = z;   /* roll,    degrees */
-            events[ID_ORIENTATION].u.vec3.status = ACCURACY_HIGH;
+            /* Azimuth is only as good as the compass it came from; pitch and
+             * roll are not, but a vec3 event carries one status for all
+             * three, and the misleading half is the one that matters. */
+            {
+                uint64_t mts;
+                float mx, my, mz;
+                events[ID_ORIENTATION].u.vec3.status =
+                    iio->GetMagnetometerEvent(&mts, &mx, &my, &mz) == 0
+                        ? iio->MagnetometerAccuracy(mx, my, mz)
+                        : ACCURACY_HIGH;
+            }
             events[ID_ORIENTATION].sensorType = SENSOR_TYPE_ORIENTATION;
             dev->last_TimeStamp[ID_ORIENTATION] = ts;
         }
