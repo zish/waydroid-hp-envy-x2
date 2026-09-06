@@ -23,23 +23,97 @@ needs YUV allocation no Mesa has).
 now reports the host's real level, voltage, charge status and AC state; the container could always
 read the host's `/sys/class/power_supply`, and Waydroid's health HAL was overwriting the values with
 hardcoded fakes on the one path that reaches `BatteryService`. Three-byte patch, vendor overlay,
-[docs/10](10-battery-fixed.md). **Goal 2 has still not been started.**
+[docs/10](10-battery-fixed.md).
+
+**Session of 2026-09-06** added a second camera fix (`LENS_FACING` `EXTERNAL`->`BACK`, so apps that
+demand a rear camera will open it) and spent most of its time ruling things out — see
+[11](11-camera-facing.md) and [12](12-v4l2-frame-errors.md). Net: the V4L2 frame errors were never
+reproduced and the hardware is provably clean; the one real remaining camera defect is that Mesa
+cannot allocate `YCbCr_420_888` at all, so ~4% of fallback allocations fail conversion. Open
+Camera's blank "Processing settings" turned out to be a **preference**, not a defect. The USB
+autosuspend rule was installed and then withdrawn as unnecessary. **Goal 2 is now scoped but not
+started** — read the next section, the position is better than it looks.
 
 ## The immediate next task
 
-**Goal 2: expose the accelerometer and vibration to Waydroid.** Nothing has been done on it.
+**Goal 2: sensors — accelerometer, tilt, compass (and vibration).** Scoped 2026-09-06 by
+reconnaissance only; **no changes were made**. The position is much better than expected.
 
-What is already known, and it is not much:
+### The host already has everything, driven and working
 
-- `vibrator.default.so` exists in the vendor image, but `.default` HALs are stubs, so vibration
-  will likely need real work rather than configuration.
-- The host is an HP Envy x2 convertible, so an accelerometer is present at the hardware level.
-  Whether Linux exposes it as IIO and whether Waydroid's sensor HAL can be pointed at it is
-  unexamined.
+All five sensors sit behind the ITE8350 HID sensor hub (`0018:048D:8350`) on i2c-0, exposed as IIO:
 
-Start by finding out what the host exposes (`/sys/bus/iio/devices/`) and what the container's
-sensor HAL expects. Waydroid has a `waydroid-sensord`/`libsensors` story that is worth reading up
-on before touching anything.
+| Node | `name` | Android equivalent |
+|---|---|---|
+| `iio:device0` | `incli_3d` | tilt / `ORIENTATION` |
+| `iio:device1` | `gyro_3d` | `GYROSCOPE` |
+| `iio:device2` | `magn_3d` | `MAGNETIC_FIELD` (compass; also has `in_rot_from_north_magnetic_tilt_comp_raw`, a tilt-compensated heading) |
+| `iio:device3` | `dev_rotation` | `ROTATION_VECTOR` (quaternion) |
+| `iio:device4` | `accel_3d` | `ACCELEROMETER` |
+
+Modules `hid_sensor_{accel,gyro,magn,incl,rotation}_3d` are all loaded. Every node returns live
+data with a sane `_scale`, e.g. accel `scale=0.009806650` (raw is milli-g).
+
+### The container can already read them — no plumbing needed
+
+This is the key finding. `/dev/iio:device*` is `crw------- root root` and **not** passed into the
+container, but the **sysfs interface is world-readable** (`-rw-r--r--`) and `/sys` is visible
+inside. Reading from within the container works *today*, unmodified:
+
+```
+$ sudo waydroid shell -- sh -c 'for a in x y z; do cat /sys/bus/iio/devices/iio:device4/in_accel_${a}_raw; done'
+0
+0
+1000          <- exactly 1 g on z, byte-identical to the host. Device lying flat.
+```
+
+So no `lxc.mount.entry`, no device-node work, no udev rule. **Do not start by plumbing devices in** —
+that trap cost time on the camera and is not needed here.
+
+### What is actually missing
+
+Android reports `No Sensors on the device` (`dumpsys sensorservice`), because Waydroid ships a
+**stub** sensors HAL:
+
+```
+[waydroid.stub_sensors_hal]: [1]
+[init.svc.vendor.sensors-hal-1-0]: [running]
+/vendor/bin/hw/android.hardware.sensors@1.0-service.waydroid   10240 bytes   <- a stub, by size alone
+```
+
+Waydroid's intended real path is a host daemon, `waydroid-sensord`, which
+`tools/actions/container_manager.py:169` starts *if present*:
+
+```python
+if which("waydroid-sensord"):
+    ... ["waydroid-sensord", "/dev/" + args.HWBINDER_DRIVER] ...
+```
+
+**It is not installed.** Not in `PATH`, and `rpm -ql waydroid` (1.6.3-1.fc44) ships no sensor
+files at all. So the daemon half of the design is simply absent on Fedora.
+
+### Two routes, and the second is the one this repo has already proven
+
+1. **Get `waydroid-sensord` onto the host.** Upstream's intended design. Costs a build or a layered
+   package on an immutable OS, and the guest stub must then be told not to stub
+   (`waydroid.stub_sensors_hal`).
+2. **Patch or replace the stub HAL in the vendor overlay**, having it read
+   `/sys/bus/iio/devices/` directly — which, per the section above, already works from inside the
+   container. This is *exactly* the shape of the battery fix in [docs/10](10-battery-fixed.md):
+   a small Waydroid stub HAL binary in `/vendor/bin/hw/`, replaced via the vendor overlay, mode
+   `0755`. The NDK toolchain and the build recipe from [docs/08](08-camera-fixed.md) are still on
+   the dev box.
+
+Start by reading the 10 KB stub with `objdump` to see what it returns for `getSensorsList()`, and
+by checking whether `waydroid.stub_sensors_hal=0` changes its behaviour — that property exists for
+a reason and is a one-line experiment before any building.
+
+### Vibration
+
+Untouched and unexamined beyond the earlier note that `vibrator.default.so` exists in the vendor
+image; `.default` HALs are stubs, so expect real work rather than configuration. **Also check
+whether the hardware has a vibrator at all** — this is a detachable laptop/tablet, and it may
+simply not have one, in which case park it rather than chase it.
 
 ## Camera: what is left, if you want to close it out fully
 
