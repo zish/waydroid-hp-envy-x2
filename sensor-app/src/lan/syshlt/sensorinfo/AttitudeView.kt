@@ -38,7 +38,9 @@ import android.hardware.SensorManager
 import android.view.View
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.sin
 
@@ -109,14 +111,19 @@ private val DEMO_R = arrayOf(
     // X=East, Y=Up, Z=South -- standing upright, screen toward the camera.
     floatArrayOf(1f, 0f, 0f, 0f, 0f, -1f, 0f, 1f, 0f),
     // X=Up, Y=West, Z=South -- on its left edge, screen toward the camera.
-    floatArrayOf(0f, -1f, 0f, 0f, 0f, -1f, 1f, 0f, 0f)
+    floatArrayOf(0f, -1f, 0f, 0f, 0f, -1f, 1f, 0f, 0f),
+    // X=South, Y=Up, Z=West -- upright again but yawed 90 degrees. Paired with
+    // pose 2 this is the check that a standing machine's heading tracks yaw:
+    // the two must read 90 degrees apart, where the old code read both as 0.
+    floatArrayOf(0f, 0f, -1f, -1f, 0f, 0f, 0f, 1f, 0f)
 )
 
 private val DEMO_NAME = arrayOf(
     "demo · flat on its back, top edge north",
     "demo · flat on its face",
     "demo · upright, screen facing south",
-    "demo · on its left edge, screen south"
+    "demo · on its left edge, screen south",
+    "demo · upright, screen facing west"
 )
 
 private val NORTH_INK = 0xFFE05252.toInt()
@@ -133,6 +140,43 @@ internal fun themeInk(context: Context): Int {
 }
 
 internal fun withAlpha(color: Int, alpha: Int) = (color and 0x00FFFFFF) or (alpha shl 24)
+
+/*
+ * A compass heading that survives the machine being stood up.
+ *
+ * SensorManager.getOrientation() defines azimuth as atan2(R[1], R[4]) -- the
+ * bearing of the device's +Y axis, the top edge of the screen, projected onto
+ * the horizontal plane. Stand the laptop upright and +Y points at the sky: the
+ * projection collapses to a point, the bearing is undefined, and yawing the
+ * machine does not change it, while tilting it left or right does. That is
+ * gimbal lock in the DEFINITION, not a fault in the magnetometer -- the fused
+ * quaternion is still correct, which is why the slab keeps tracking attitude
+ * perfectly while the number goes nonsense.
+ *
+ * So choose the reference axis by whichever has more horizontal length to
+ * project: +Y (the top edge) when the machine is flat, -Z (the back of the
+ * screen) when it is upright. This is what phone compass apps do, and the two
+ * definitions AGREE at the crossover -- tilt a laptop back from flat and its
+ * top edge and its screen-back sweep the same bearing -- so the reading stays
+ * continuous through the tilt instead of jumping 180 degrees.
+ *
+ * Row-major R maps device vectors to world (East, North, Up), so device +Y
+ * lands at (R[1], R[4], R[7]) and device +Z at (R[2], R[5], R[8]).
+ */
+internal fun useTopEdge(m: FloatArray): Boolean =
+    hypot(m[1].toDouble(), m[4].toDouble()) >= hypot(m[2].toDouble(), m[5].toDouble())
+
+internal fun headingOf(m: FloatArray): Double {
+    val az = if (useTopEdge(m)) {
+        Math.toDegrees(atan2(m[1].toDouble(), m[4].toDouble()))
+    } else {
+        Math.toDegrees(atan2(-m[2].toDouble(), -m[5].toDouble()))
+    }
+    return if (az < 0) az + 360.0 else az
+}
+
+internal fun headingRefOf(m: FloatArray): String =
+    if (useTopEdge(m)) "top edge" else "screen back"
 
 class AttitudeView(context: Context) : View(context) {
 
@@ -167,7 +211,7 @@ class AttitudeView(context: Context) : View(context) {
         demo = i
         if (i >= 0) {
             SensorManager.getOrientation(DEMO_R[i], tmpAngles)
-            demoAz = Math.toDegrees(tmpAngles[0].toDouble()).let { if (it < 0) it + 360.0 else it }
+            demoAz = headingOf(DEMO_R[i])
             demoPitch = Math.toDegrees(tmpAngles[1].toDouble())
             demoRoll = Math.toDegrees(tmpAngles[2].toDouble())
         }

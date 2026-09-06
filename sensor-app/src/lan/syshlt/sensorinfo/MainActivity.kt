@@ -273,13 +273,15 @@ class MainActivity : Activity(), SensorEventListener {
         }
 
         SensorManager.getOrientation(rotMatrix, angles)
-        var az = Math.toDegrees(angles[0].toDouble())
-        if (az < 0) az += 360.0
+        // Pitch and roll come straight from getOrientation, but the heading does
+        // not: its azimuth is undefined once the machine stands up. See
+        // headingOf() in AttitudeView.kt.
+        val az = headingOf(rotMatrix)
         attitude.setAttitude(
             rotMatrix, az,
             Math.toDegrees(angles[1].toDouble()),
             Math.toDegrees(angles[2].toDouble()),
-            attitudeLabel
+            "$attitudeLabel · heading via ${headingRefOf(rotMatrix)}"
         )
         val shown = attitude.demoHeading() ?: az
         compass.setHeading(shown, true, compassPoint(shown))

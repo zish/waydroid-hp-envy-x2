@@ -322,6 +322,40 @@ Three details are worth recording because each was got wrong first:
   drawn first, then the slab, then the near half — so the ring reads as a hoop the machine sits
   inside rather than a flat decal behind it.
 
+### The heading breaks when the machine stands up — and it is not the magnetometer
+
+Reported symptom, which is a textbook signature once you know what to look for:
+
+| laptop | heading correct? | changes when yawed? | changes when tilted L/R? |
+|---|---|---|---|
+| flat on its back | yes | yes | — |
+| standing upright | **no** | **no** | **yes** |
+
+`SensorManager.getOrientation()` defines azimuth as `atan2(R[1], R[4])` — the bearing of the
+device's **+Y axis, the top edge of the screen**, projected onto the horizontal plane. Stand the
+machine up and +Y points at the sky, so that projection collapses to a point: the bearing is
+undefined, yawing about the vertical does not change it (+Y stays vertical), and tilting left or
+right does (it gives +Y a horizontal component again). All three symptoms, exactly.
+
+**This is gimbal lock in the definition of azimuth, not a fault in the magnetometer, the fusion or
+the daemon.** The evidence that the underlying attitude is fine: the daemon's self-test still finds
+the quaternion's gravity direction agreeing with the accelerometer's, and the 3-D slab keeps
+rendering the correct attitude while standing — it could not if the rotation matrix were wrong.
+
+The fix belongs in the app, not the HAL. `TYPE_ORIENTATION` is *specified* to be that formula, so
+the daemon is conformant and is deliberately left alone; any third-party compass app will hit the
+same thing and is expected to remap for itself. `headingOf()` in `AttitudeView.kt` picks the
+reference axis by whichever has more horizontal length to project — **+Y (top edge) when flat, -Z
+(the back of the screen) when upright** — which is what phone compass apps do.
+
+Choosing **-Z** rather than +Z matters: tilt a laptop back from flat and its top edge and its
+screen-back sweep the *same* bearing, so the two definitions agree at the crossover and the reading
+stays continuous. Picking +Z would flip it by 180° at the switch. The panel names which reference
+is live (`heading via top edge` / `heading via screen back`) so the switch is never invisible.
+
+Verified with two demo poses of identical attitude yawed 90° apart — upright facing south and
+upright facing west — which now read 0° and 90°, where before both read 0°.
+
 ### Tap for demo poses
 
 Tapping the 3-D view cycles four canned attitudes — flat on its back, flat on its face, upright, on
