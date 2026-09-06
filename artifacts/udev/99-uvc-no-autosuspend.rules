@@ -1,3 +1,5 @@
+# WITHDRAWN 2026-09-06 — kept for reference only, NOT installed. See docs/12.
+#
 # HP TrueVision Full HD webcam (Suyin 064e:c353) — disable USB runtime autosuspend.
 #
 # The camera is the only video source Waydroid's external camera HAL has. With the

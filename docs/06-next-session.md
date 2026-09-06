@@ -62,12 +62,12 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | **`overlay/vendor/lib/libgbm_mesa_wrapper.so`** | **fixed 32-bit wrapper — this is the camera fix.** Delete to revert |
 | **`overlay/vendor/lib64/libgbm_mesa_wrapper.so`** | fixed 64-bit wrapper. Delete to revert |
 | **`overlay/vendor/lib/camera.device@3.4-external-impl.so`** | **facing patch, `EXTERNAL`->`BACK`**, mode `0644`. Delete to revert. See [11](11-camera-facing.md) |
-| `/etc/udev/rules.d/99-uvc-no-autosuspend.rules` | pins the webcam at `power/control=on`. Not a proven fix; see [12](12-v4l2-frame-errors.md) |
 | `overlay/vendor/etc/external_camera_config.xml` | pre-existing 720p cap, unrelated to the fix |
 | `waydroid_base.prop` | original, byte-identical. Backup at `waydroid_base.prop.orig` |
 | Probes in the container | `gbm-android-test`, `gbm-import-android`, `wrapper-harness`, `wrapper-harness32` in `/data/local/tmp` (host path `/home/jmelanso/.local/share/waydroid/data/local/tmp/`, owner `2000:2000`). Harmless; delete anytime |
 | `/tmp/camera-test.sh` on host | copy of `bin/camera-test.sh`; `/tmp` clears on reboot |
 | Waydroid session | `RUNNING`; container `FROZEN` when idle — normal, not a fault |
+| USB autosuspend | back at the `auto` default. The udev rule that pinned it `on` was tried and **withdrawn** — see [12](12-v4l2-frame-errors.md) |
 | Toolbox container | `fedora-toolbox-44`, still never used. Safe to delete |
 
 Nothing destructive was done. No packages layered onto the immutable OS. The vendor and system

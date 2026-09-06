@@ -162,3 +162,38 @@ view. In order of expected value:
 3. Note that the earlier occurrences were on a session already poisoned by the Lens crash
    (`DIED client(s) with PID 113, Binder died unexpectedly`). Session hygiene between camera tests
    matters — see [docs/11](11-camera-facing.md).
+
+## Postscript: the udev rule was withdrawn
+
+The `power/control=on` rule was installed, then removed the same session. It had no demonstrated
+benefit — the Lens crash reproduced identically with autosuspend off, and both device flaps
+happened *while* `control` was already `on` — and pinning a USB device out of runtime suspend has a
+real if small cost on a battery-powered tablet.
+
+Removing it was also the better experiment, and it settled the question outright. With `control`
+back at `auto` the device suspends after ~2 s idle, and **opening a suspended device is completely
+transparent**:
+
+```
+runtime_status = suspended        <- before opening
+  150 frames in 5.5s = 27.2 fps
+  ERROR-flagged      : 0
+  sequence gaps      : 0
+  missing EOI (ffd9) : 0
+runtime_status = active           <- immediately after
+runtime_status = suspended        <- 10 s later, re-suspended on its own
+```
+
+Resume costs nothing measurable and corrupts nothing. **Autosuspend was never a suspect worth
+having.**
+
+### This run also confirmed the exposure explanation
+
+The same command that gave 14.7 fps earlier gave **27.2 fps** here, with no configuration change
+whatsoever — only a brighter room. Average frame size fell with it (299 KB against 371 KB), which
+is the right direction: a dark frame is noisy, and noise does not compress. Both numbers move
+together exactly as auto-exposure predicts, and neither moves with resolution. The camera is not
+being throttled by Waydroid, USB or the driver; it is being throttled by the light in the room.
+
+To revert the revert, the rule is preserved at
+[artifacts/udev/99-uvc-no-autosuspend.rules](../artifacts/udev/99-uvc-no-autosuspend.rules).
