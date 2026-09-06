@@ -200,8 +200,13 @@ than guesses:
 |---|---|---|---|
 | accelerometer | 4 | 0.0392 m/s² | ±0.16 m/s² |
 | gyroscope | 22381 | 0.003906 rad/s | ±1.3 °/s p-p |
-| magnetometer | 3907 | 0.3907 µT | \|B\| = 53.5 µT |
+| magnetometer | 3907 | 0.3907 µT | \|B\| = 53.5-64 µT |
 | rotation vector | 10 | 1e-6 | — |
+
+`|B|` drifts between about 53 and 64 µT depending on where the machine is sitting. The upper end is
+above Earth's field, which is expected rather than alarming: this is a detachable whose keyboard
+attaches **magnetically**, so the dock's magnets bias the reading. It is a hardware fact, not a
+scale error — the scale is fixed by the descriptor and the axes still behave.
 
 Reading three sysfs attributes over the hub's i2c link costs **3–7 ms**, and a cold read 150–300 ms.
 That is why the daemon polls at 20 Hz by default and advertises `minDelay` to match: promising a
@@ -250,6 +255,58 @@ Real framework clients attach immediately — `com.android.server.wm.WindowOrien
 
 `waydroid-sensord --selftest` runs the cross-checks alone, needs no container, and is safe to run
 while the real daemon is serving Android — it only reads sysfs and never touches binder.
+
+## Sensor Info: a viewer app, and what it was for
+
+Android only streams a sensor while something is subscribed to it, so several sensors were
+registered but never actually exercised. [`sensor-app/`](../sensor-app) is a ~350-line Kotlin app
+that subscribes to **every** sensor `SensorManager` reports and shows live values, which both gives
+a direct read-out and closes that verification gap.
+
+It depends on nothing but the platform — no AndroidX, no Compose, no Gradle. The UI is built
+programmatically, so `sensor-app/build.sh` is four tool invocations:
+
+```
+aapt2 compile res/          -> compiled resources
+aapt2 link + manifest       -> an APK with resources but no code
+kotlinc src/                -> JVM .class files
+d8 .class + kotlin-stdlib   -> classes.dex
+zipalign, apksigner         -> a signed, installable APK
+```
+
+`--deps` fetches the SDK (platform 33, build-tools 34.0.0) and Kotlin 2.0.21 into `build/android`.
+Note that Debian trixie's default JDK is 25, which Android's build-tools reject; the script pins
+JDK 21.
+
+For rotation-vector sensors it prints the quaternion *and* the azimuth/pitch/roll an app would
+derive from it, which is what makes a wrong component order or a wrong world frame obvious at a
+glance.
+
+### Installing into Waydroid — three traps
+
+- **`waydroid app install` fails silently.** No output, no non-zero exit, no installed package. Use
+  `pm install` inside the container, which reports real errors.
+- **The container cannot see the host's `/tmp`.** Its `/data/local/tmp` is the host's
+  `~/.local/share/waydroid/data/local/tmp`, owned `2000:2000`, so the copy needs `sudo` plus a
+  `chown` or `pm` cannot open the file.
+- **Play Protect rejects a self-signed APK**, logging `Finsky: VerifyApps: … verdict 9`. The build
+  script turns `package_verifier_enable` off for the install and restores it afterwards.
+
+And a fourth, already in AGENTS.md but easy to forget: `waydroid shell` always exits non-zero with a
+cosmetic `ERROR: [Errno 13] Permission denied: 1`, so a remote install script must **not** use
+`set -e` — it silently skipped the cleanup the first time.
+
+### An app can starve itself of the sensors it is watching
+
+First run showed every sensor at **0.3–0.4 Hz** while `dumpsys sensorservice` showed the
+accelerometer being delivered at exactly 50 ms intervals. The HAL was fine; the app was the
+bottleneck. A 100 ms timer re-set the text of ~40 `TextView`s, and `setText` invalidates and
+re-lays-out, which on a fanless Core M-5Y70 rendering through Waydroid consumed the whole main
+looper — leaving nothing to drain the sensor event queue.
+
+Refreshing at 3 Hz, skipping hidden cards, and not re-setting a string that has not changed took it
+from 1 event/s to **179 events/s, 19.8 Hz per sensor** — the full rate the HAL advertises. Worth
+remembering before blaming a HAL for a low rate seen inside an app.
 
 ## Traps hit — do not repeat
 
@@ -315,14 +372,10 @@ Reverting is deleting one file and restarting the session: waydroid then puts
 
 ## Not done, and what is unproven
 
-- **The magnetometer has not been exercised end to end through Android.** It is registered, and its
-  scale is validated three ways on the host (the HID descriptor's unit and exponent, `|B|` landing
-  on Earth's field, and the daemon's own cross-checks). What has not been observed is a
-  magnetometer *event* travelling through the HIDL pipe into `SensorService`, because Android only
-  streams a sensor while an app subscribes and nothing installed does. Its code path is the same
-  `PollOnce` → `sensor_event_cb` → `u.vec3` route as the accelerometer, which is verified, so the
-  risk is low but not zero. `bin/sensors-test.sh` will compare it automatically the moment any app
-  uses the compass.
+- ~~The magnetometer has not been exercised end to end through Android.~~ **Closed** — see the
+  Sensor Info app below. With a subscriber attached, `bin/sensors-test.sh` compared it directly:
+  Android `[28.52, -28.13, 49.62]` against the host's `[28.12, -28.12, 45.31]` µT. Four of four
+  comparable sensors now pass end to end.
 - **The sensor axes have not been reconciled with the display's natural orientation.** The values
   are provably correct in the *sensor's* frame, but whether that frame matches what Android expects
   for this panel is a physical question that cannot be settled remotely. It currently does not

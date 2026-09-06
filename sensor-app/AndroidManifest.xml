@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sensor Info - a minimal sensor viewer for bigtab01.
+
+  Deliberately depends on NOTHING but the platform: no AndroidX, no Compose, no
+  Gradle. The whole UI is built programmatically in MainActivity.kt, so the
+  build is aapt2 + kotlinc + d8 + apksigner and nothing else. See build.sh.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="lan.syshlt.sensorinfo"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
+
+    <!-- Rates above 200 Hz need this from API 31. We never ask for more than
+         SENSOR_DELAY_GAME, but declaring it costs nothing and avoids a silent
+         cap if the delay is ever lowered. -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
+
+    <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.compass" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
