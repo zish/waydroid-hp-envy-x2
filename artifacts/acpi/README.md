@@ -31,15 +31,18 @@ hand at byte offset `22032` (`0x5610`) resolves it:
    _HID  0d "HPQC4752" 00               <- 0x0D = StringPrefix
    _HRV
    _CRS  ... \_SB.PCI0.UA00 ... \_SB.PCI0.GPI0    <- a UART and a GPIO
-   _STA  -> 0x0F                        <- present, enabled, functioning
+   _STA  -> 0x0F                        <- looked like present, enabled, functioning
 ```
 
 So it is a **GPS module on a UART**, and everything else in the DSDT is stock Intel `INT33xx`/
 `INT34xx` LPSS plus `ITE8350`. **Do not re-chase this device for the vibrator.**
 
-Worth noting for a different reason: bigtab01 has a GPS receiver, reported present and functioning.
-Android has a location HAL, so this is a plausible future capability well beyond the current goal
-list — recorded here so it is not forgotten.
+> **Correction, 2026-09-06 (later that day).** Read with `iasl`, `GPS0._STA` turns out to be a
+> hardcoded `Method (_STA) { Return (0x0F) }` — it branches on nothing, so it cannot report absence
+> and `status=15` is not evidence a receiver exists. **There is no GPS in this machine**; the wire
+> was sniffed directly and is silent. See [docs/13-gps.md](../../docs/13-gps.md). The two sections
+> below are left as written, but the hypothesis in the second one is **disproven** — see the note
+> at its end.
 
 ## The GPS is wired to a UART the firmware has disabled
 
@@ -75,3 +78,15 @@ Confirm by decompiling the DSDT (`iasl -d DSDT.aml`) and reading the `_STA` meth
 **This is out of scope for goals 1-4** and is recorded only so the finding is not lost. Note also
 that even with NMEA flowing on the host, exposing it to Android would need a GPS HAL in Waydroid —
 a separate project again.
+
+> **Disproven, 2026-09-06.** The test above was run and the `_OSI` hypothesis is **wrong**.
+> `UA00._STA` has *two* gates, and the one that fires is the first: `If (SMD5 == Zero)`, a BIOS
+> byte in ACPI NVS. The `OSYS` gate is provably not it — `I2C0` (`INT3432`) carries the identical
+> `If (OSYS < 0x07DD)` test and reports `status=15`, so `OSYS >= 0x07DD` already and `acpi_osi=`
+> would change nothing. The firmware simply has SerialIO UART0 set to *Disabled*.
+>
+> It is moot anyway: the UART0 pads were muxed to GPIO and sniffed directly, and nothing is
+> transmitting on them — 10.5M samples across both polarities of the enable line, all high. There
+> is no GPS receiver fitted. Full write-up and the reasoning in
+> [docs/13-gps.md](../../docs/13-gps.md); annotated AML in
+> [lpss-uart-gps.dsl](lpss-uart-gps.dsl).

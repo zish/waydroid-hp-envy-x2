@@ -34,6 +34,15 @@ Camera's blank "Processing settings" turned out to be a **preference**, not a de
 autosuspend rule was installed and then withdrawn as unnecessary. **Goal 2 is now scoped but not
 started** — read the next section, the position is better than it looks.
 
+**GPS was asked about directly and is closed: there is no receiver in this machine.** The DSDT's
+`GPS0` is an unconditional declaration in firmware shared across the Envy x2 13 family — its `_STA`
+is a hardcoded `Return (0x0F)` and tests nothing. The UART0 pads were muxed to GPIO and sniffed
+directly at 387 kHz; 10.5M samples across both polarities of the enable line, all high, nothing
+transmitting. [docs/13](13-gps.md) has the proof and also **corrects** the earlier `_OSI` guess in
+[artifacts/acpi/README.md](../artifacts/acpi/README.md) — the LPSS UARTs are off because `SMD5 == 0`
+in ACPI NVS, not because of `_OSI`, so `acpi_osi=` would have been a wasted reboot. Do not re-open
+this without physical evidence of a module. Probe kept as [bin/gps-probe.py](../bin/gps-probe.py).
+
 ## The immediate next task
 
 **Goal 2: sensors — accelerometer, tilt, compass (and vibration).** Scoped 2026-09-06 by
@@ -168,6 +177,8 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | USB autosuspend | back at the `auto` default. The udev rule that pinned it `on` was tried and **withdrawn** — see [12](12-v4l2-frame-errors.md) |
 | **Open Camera `preference_camera_api`** | changed `..._old` -> `..._camera2` to populate its Processing settings screen. Original backed up beside it as `..._preferences.xml.bak-preclaude`. See [11](11-camera-facing.md) |
 | Toolbox container | `fedora-toolbox-44`, still never used. Safe to delete |
+| **GPIO pin 91 (`GP91_UART0_RXD`)** | left muxed as a GPIO input by [bin/gps-probe.py](../bin/gps-probe.py) — `pinctrl-lynxpoint` does not restore the native function on release. Harmless (UART0 is disabled in firmware anyway) and **a reboot restores it**. See [13](13-gps.md) |
+| GPIO pin 17 (`GP17`, GPS0 enable) | driven high during the probe, **restored to low**. Back as found |
 
 Nothing destructive was done. No packages layered onto the immutable OS. The vendor and system
 images were never modified — everything is overlay files.
@@ -301,6 +312,10 @@ was disproven during the lens-facing work; see [11-camera-facing.md](11-camera-f
 A third set — bad hardware, USB bandwidth, CPU starvation, buffer-queue depth and uevent-driven
 node churn — was disproven while chasing the intermittent V4L2 frame errors; see
 [12-v4l2-frame-errors.md](12-v4l2-frame-errors.md).
+
+A fourth set — the LPSS UARTs being `_OSI`-gated, `GPS0._STA` meaning the receiver exists, a missing
+driver, a USB or WWAN-attached GPS, and the module merely being held in reset — was disproven while
+answering the GPS question; see [13-gps.md](13-gps.md).
 
 ## Goals 3-4
 
