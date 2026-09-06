@@ -79,7 +79,9 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    and rotation vector to Waydroid, plus vibration. All five sensors are already live on the host
    as IIO nodes, and the container can already read them through `/sys` with no plumbing; what is
    missing is that Waydroid ships a **stub** sensors HAL and the `waydroid-sensord` daemon is not
-   installed on Fedora. Scoped in [docs/06-next-session.md](docs/06-next-session.md) — start there.
+   installed on Fedora. Scoped in [docs/06-next-session.md](docs/06-next-session.md) — start there. The five sensors are
+   the tractable half; **vibration is blocked a layer lower** — the motor exists but Linux exposes
+   no interface to it at all, so that part starts with the DSDT, not with Waydroid.
 3. **Power** — **DONE.** Battery level, voltage, charge status and AC adapter state now come from
    the host. The container could always read the host's `/sys/class/power_supply` and the health HAL
    read it correctly; Waydroid's `healthd_board_battery_update()` then overwrote every field with

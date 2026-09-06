@@ -108,12 +108,36 @@ Start by reading the 10 KB stub with `objdump` to see what it returns for `getSe
 by checking whether `waydroid.stub_sensors_hal=0` changes its behaviour — that property exists for
 a reason and is a one-line experiment before any building.
 
-### Vibration
+### Vibration — harder than the sensors, and blocked one layer lower
 
-Untouched and unexamined beyond the earlier note that `vibrator.default.so` exists in the vendor
-image; `.default` HALs are stubs, so expect real work rather than configuration. **Also check
-whether the hardware has a vibrator at all** — this is a detachable laptop/tablet, and it may
-simply not have one, in which case park it rather than chase it.
+The vibrator **does exist in the hardware** (confirmed by the owner, 2026-09-06). But **Linux
+exposes no interface to it**, which makes this a very different problem from the sensors: those are
+already readable from inside the container, whereas this one has nothing to read.
+
+Checked and found empty:
+
+| Where a vibrator would appear | Result |
+|---|---|
+| force-feedback input device | **none** — no `B: FF=` line in `/proc/bus/input/devices`, and no device sets `EV` bit 21 |
+| `/sys/class/leds/` | only `hda::mute`, keyboard lock LEDs and `phy0-led` |
+| loaded modules | no `ff_memless`, no haptic/vibra driver |
+| sysfs by name | nothing matching `*vibra*` or `*haptic*` |
+| HID Haptics usage page (`05 0e`) | **absent from all three HID report descriptors** — BT keyboard, ITE8350 sensor hub, SYNA7500 touch |
+| `hp-wmi` attributes | `als display dock hddtemp postcode power tablet` — no haptics |
+
+(Beware a false lead: `05 09` appears in two descriptors and is Usage Page **Button**, not a
+vibrator. A naive hex grep for it will look like a hit.)
+
+So do **not** start this in Waydroid. Android already runs `vendor.vibrator-1-0` in the container
+(visible in `dmesg`) and `vibrator.default.so` is a stub, but there is nothing underneath for it to
+drive. The question to answer first is *how the firmware drives it* — most likely an ACPI method on
+the ITE8350 embedded controller, which means dumping and decompiling the DSDT (`acpidump` +
+`iasl -d`) and looking for a haptic/vibrate method. Only once Linux can buzz the motor does the
+Waydroid half become worth doing.
+
+One unexplained device may or may not be related: `HID-SENSOR-ff830080.1.auto`, a vendor-defined
+HID sensor collection (usage page `0xff83`) with **no driver bound** — it exists as a bare
+`mfd_device` with no attributes. Vendor-specific, purpose unknown, worth a look while in the DSDT.
 
 ## Camera: what is left, if you want to close it out fully
 
