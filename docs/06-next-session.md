@@ -212,7 +212,7 @@ container host, **not** to this environment — it is not the target kernel for 
 | Present | `gcc`, `make`, `ld`, **binutils** (`readelf`, `objdump`, `nm`, `strings`), `curl`, `wget`, `openssl`, `xxd` |
 | Missing | `clang` (the NDK brings its own), `python3`, `rsync`, `rpm2cpio`, `cpio`, `bison`, `flex`, `bc` |
 | **`apt` + passwordless `sudo`** | **available** — install what you need here rather than on bigtab01 |
-| `docker` | **present but broken** — `/home/coder/bin/docker` is a shim that fails with *"No suitable executable found"*. No containers here |
+| `docker` | **unavailable by design.** This box *is* a Docker container and docker-in-docker is not set up, so the `/home/coder/bin/docker` shim fails with *"No suitable executable found"*. **Do not try to fix it** — plan without a container runtime |
 
 Two consequences worth knowing before planning work:
 
@@ -222,8 +222,14 @@ Two consequences worth knowing before planning work:
   `kernel-devel` for `7.1.13-200.fc44.x86_64`, and there is no working container runtime here to
   get a Fedora userspace. The route is `apt install rpm2cpio cpio`, fetch the `kernel-devel` RPM,
   extract it, and build against those headers — with the caveat that Debian's gcc may not match the
-  one Fedora built the kernel with. **Verify a trivial module loads before investing in a real
-  one.** Secure Boot is off and `sig_enforce = N` on bigtab01, so unsigned modules will load.
+  one Fedora built the kernel with. A **chroot** is the cleaner version of this and does not need
+  docker: unpack a Fedora 44 userspace into a directory and `chroot` into it (passwordless `sudo`
+  is available here). **Verify a trivial module loads before investing in a real one.** Secure Boot
+  is off and `sig_enforce = N` on bigtab01, so unsigned modules will load.
+
+  None of this is needed for goal 2's sensors HAL — the NDK is self-contained and cross-compiles
+  for Android on its own, exactly as the camera fix was built. The chroot question only arises if
+  the vibrator turns out to need a kernel module.
 ## Traps already hit — do not repeat
 
 - **`waydroid shell -- /path/to/binary` returns `Permission denied` even when the file is fine.**
