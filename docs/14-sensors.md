@@ -259,9 +259,12 @@ while the real daemon is serving Android — it only reads sysfs and never touch
 ## Sensor Info: a viewer app, and what it was for
 
 Android only streams a sensor while something is subscribed to it, so several sensors were
-registered but never actually exercised. [`sensor-app/`](../sensor-app) is a ~350-line Kotlin app
-that subscribes to **every** sensor `SensorManager` reports and shows live values, which both gives
-a direct read-out and closes that verification gap.
+registered but never actually exercised. [`sensor-app/`](../sensor-app) is a Kotlin app that
+subscribes to **every** sensor `SensorManager` reports and shows live values, which both gives a
+direct read-out and closes that verification gap.
+
+Above the list sits an attitude panel: a compass dial and a 3-D view of the machine's orientation
+in space. Both are described under [The attitude panel](#the-attitude-panel) below.
 
 It depends on nothing but the platform — no AndroidX, no Compose, no Gradle. The UI is built
 programmatically, so `sensor-app/build.sh` is four tool invocations:
@@ -281,6 +284,64 @@ JDK 21.
 For rotation-vector sensors it prints the quaternion *and* the azimuth/pitch/roll an app would
 derive from it, which is what makes a wrong component order or a wrong world frame obvious at a
 glance.
+
+## The attitude panel
+
+Two custom views, pinned above the scrolling card list so they stay visible.
+
+[`CompassView`](../sensor-app/src/lan/syshlt/sensorinfo/CompassView.kt) is a rotating-card dial in
+the heading-indicator convention rather than the magnetic-needle one: the card turns under a fixed
+lubber index, so whatever the device's **+Y axis** (the top edge of the screen) points at reads off
+directly at twelve o'clock, with the number repeated in the middle.
+
+[`AttitudeView`](../sensor-app/src/lan/syshlt/sensorinfo/AttitudeView.kt) draws a thin rectangular
+slab standing in for the laptop, inside a compass ring fixed to the world. The slab's **+Z** face —
+the screen side — is labelled `FRONT` and its **-Z** face `BACK`. A gold wedge lying in the ring's
+plane points along the reported heading. Both views take their numbers from the same rotation
+matrix, so they cannot disagree; if they ever do, the bug is in the app, not in the HAL.
+
+### Why not OpenGL
+
+The scene is six quads and a 48-segment ring. A `GLSurfaceView` would pull in an EGL context and a
+render thread to draw less geometry than a launcher icon, on a fanless Core M rendering through
+Waydroid's Wayland surface. `Canvas` with a hand-rolled projection is cheaper and has no setup cost.
+Everything the frame path touches is preallocated — paints, paths, the matrix, the vertex and ring
+buffers — so `onDraw` allocates nothing and never triggers a collection.
+
+Three details are worth recording because each was got wrong first:
+
+- **Backface culling needs no normals.** Each face's corners are listed top-left, top-right,
+  bottom-right, bottom-left *as seen from outside*. That ordering is clockwise from outside, so
+  after the y-flip of screen coordinates a visible face has a positive shoelace area — one sign
+  test. The slab is convex, so culling alone gives correct occlusion and no depth sort is needed.
+- **The face labels use a three-point `setPolyToPoly`, not four.** Four points would give the true
+  perspective map, but a non-affine canvas matrix pushes Skia onto a slow path for glyphs. At this
+  camera distance the difference is invisible and the cost is not. The label is skipped entirely
+  once a face is near edge-on, where the map goes singular and the glyphs smear.
+- **The ring is split at the slab's depth.** Segments, ticks and cardinals behind the origin are
+  drawn first, then the slab, then the near half — so the ring reads as a hoop the machine sits
+  inside rather than a flat decal behind it.
+
+### Tap for demo poses
+
+Tapping the 3-D view cycles four canned attitudes — flat on its back, flat on its face, upright, on
+its left edge — and tapping past the last returns to live data. Each is written as the three columns
+of its rotation matrix: where device X, Y and Z land in East/North/Up.
+
+This exists because the only access to bigtab01 is ssh. There is no way to physically tilt the
+machine from here, so without it the `FRONT` and `BACK` faces could not be verified at all — and
+`FRONT` appearing where `BACK` belongs is exactly the class of bug this app is meant to catch. It
+doubles as a legend: it shows what the slab is claiming, without waiting for someone to pick the
+laptop up. The dial follows the demo pose too, since a slab reading 270 next to a dial still showing
+the real 107 would look precisely like the fault being hunted.
+
+### Two sizing bugs, both from budgeting space that is not consumed
+
+The scene came out a third too small at first because the vertical fit budgeted the ring's
+foreshortened radius **plus** room for the slab standing on a corner. Those do not stack — the
+extreme is whichever is larger, not their sum. And the HUD was drawn at the top-left until the slab
+stood on its long edge and struck through it; the fix is to reserve a strip along the bottom and fit
+the scene into what is left, so chrome and geometry never share pixels.
 
 ### Installing into Waydroid — three traps
 
@@ -307,6 +368,12 @@ looper — leaving nothing to drain the sensor event queue.
 Refreshing at 3 Hz, skipping hidden cards, and not re-setting a string that has not changed took it
 from 1 event/s to **179 events/s, 19.8 Hz per sensor** — the full rate the HAL advertises. Worth
 remembering before blaming a HAL for a low rate seen inside an app.
+
+The attitude panel was added on top of that budget without losing any of it. It animates at 15 fps
+from the same timer, which now ticks every 66 ms and refreshes the text rows only every fifth tick —
+so the cards still update at the 3 Hz that was measured to be safe. Two custom views drawing a few
+dozen primitives cost far less than a pass over 40 `TextView`s: the measured event rate with the
+panel running is **180 events/s**, unchanged.
 
 ## Traps hit — do not repeat
 

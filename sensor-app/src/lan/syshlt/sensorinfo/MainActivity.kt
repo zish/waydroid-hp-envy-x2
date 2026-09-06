@@ -7,6 +7,11 @@
  * app existed the magnetometer was registered but never actually exercised
  * through the HIDL pipe. See docs/14-sensors.md.
  *
+ * Above the card list sits an attitude panel -- CompassView, a rotating-card
+ * dial, and AttitudeView, a software-rendered slab standing in for the laptop
+ * inside a world-fixed compass ring. Both read the same rotation matrix, so
+ * they cannot disagree with each other, only with reality.
+ *
  * No AndroidX, no Compose, no Gradle -- the entire UI is built in code so the
  * build is aapt2 + kotlinc + d8 + apksigner. See build.sh.
  */
@@ -64,12 +69,29 @@ class MainActivity : Activity(), SensorEventListener {
 
     private var dp = 1f
 
+    // The attitude panel. Heading and tilt come from whichever rotation source
+    // the HAL offers, preferring the fused rotation vector; if there is none,
+    // the matrix is rebuilt from raw accelerometer + magnetometer, which is
+    // what the fused sensor does internally and so doubles as a cross-check.
+    private lateinit var attitude: AttitudeView
+    private lateinit var compass: CompassView
+    private var attitudeSensor: Sensor? = null
+    private var accelSensor: Sensor? = null
+    private var magnSensor: Sensor? = null
+    private var attitudeLabel = "no rotation source"
+    private val rotMatrix = FloatArray(9)
+    private val angles = FloatArray(3)
+    private val rv3 = FloatArray(3)
+    private val rv4 = FloatArray(4)
+    private var tick = 0
+
     // ---------------------------------------------------------------- lifecycle
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         dp = resources.displayMetrics.density
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        pickAttitudeSource()
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -82,6 +104,7 @@ class MainActivity : Activity(), SensorEventListener {
             setPadding(0, 0, 0, pad(8))
         }
         root.addView(header)
+        root.addView(buildPanel())
 
         hideSoftware = CheckBox(this).apply {
             text = "Hide sensors synthesised in software"
@@ -98,8 +121,15 @@ class MainActivity : Activity(), SensorEventListener {
 
         for (sensor in all) list.addView(buildCard(sensor))
 
-        root.addView(list)
-        setContentView(ScrollView(this).apply { addView(root) })
+        // Only the card list scrolls; the panel stays pinned, because
+        // watching the slab move while scrolling to a sensor is the point.
+        root.addView(ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+            )
+            addView(list)
+        })
+        setContentView(root)
 
         updateHeader()
         applyFilter()
@@ -113,7 +143,8 @@ class MainActivity : Activity(), SensorEventListener {
             sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME)
         }
         lastRateSample = SystemClock.elapsedRealtime()
-        ui.postDelayed(refresh, REFRESH_MS)
+        tick = 0
+        ui.postDelayed(refresh, TICK_MS)
     }
 
     override fun onPause() {
@@ -141,6 +172,19 @@ class MainActivity : Activity(), SensorEventListener {
      */
     private val refresh = object : Runnable {
         override fun run() {
+            // The panel animates every tick; the text rows still only refresh
+            // every TEXT_EVERY ticks, which is what kept the main looper from
+            // starving the sensor queue in the first place.
+            pushAttitude()
+            if (++tick >= TEXT_EVERY) {
+                tick = 0
+                refreshText()
+            }
+            ui.postDelayed(this, TICK_MS)
+        }
+    }
+
+    private fun refreshText() {
             val now = SystemClock.elapsedRealtime()
             val elapsed = (now - lastRateSample) / 1000.0
             if (elapsed >= 1.0) {
@@ -172,13 +216,98 @@ class MainActivity : Activity(), SensorEventListener {
                     row.shownStatus = st
                 }
             }
-            ui.postDelayed(this, REFRESH_MS)
+    }
+
+    // ----------------------------------------------------------------- attitude
+
+    /**
+     * Prefer the fused rotation vector, then the geomagnetic one, then the game
+     * one (which carries no heading at all), and only then fall back to
+     * rebuilding the matrix from the raw accelerometer and magnetometer.
+     */
+    private fun pickAttitudeSource() {
+        accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        magnSensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+        attitudeSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+            ?: sensorManager.getDefaultSensor(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR)
+            ?: sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+        val chosen = attitudeSensor
+        attitudeLabel = when {
+            chosen != null -> typeName(chosen)
+            accelSensor != null && magnSensor != null -> "accelerometer + magnetic-field"
+            else -> "no rotation source"
         }
+    }
+
+    private fun pushAttitude() {
+        var ok = false
+        val s = attitudeSensor
+        if (s != null) {
+            val v = latest[s]
+            if (v != null && v.size >= 3) {
+                // getRotationMatrixFromVector reads w out of values[3] when the
+                // array is long enough and derives it otherwise, so the two
+                // cases need genuinely different lengths -- not a padded 4.
+                val src = if (v.size >= 4) {
+                    rv4[0] = v[0]; rv4[1] = v[1]; rv4[2] = v[2]; rv4[3] = v[3]; rv4
+                } else {
+                    rv3[0] = v[0]; rv3[1] = v[1]; rv3[2] = v[2]; rv3
+                }
+                SensorManager.getRotationMatrixFromVector(rotMatrix, src)
+                ok = true
+            }
+        } else {
+            val a = accelSensor?.let { latest[it] }
+            val m = magnSensor?.let { latest[it] }
+            if (a != null && m != null && a.size >= 3 && m.size >= 3) {
+                ok = SensorManager.getRotationMatrix(rotMatrix, null, a, m)
+            }
+        }
+
+        if (!ok) {
+            attitude.setUnavailable(attitudeLabel)
+            val demoAz = attitude.demoHeading()
+            if (demoAz != null) compass.setHeading(demoAz, true, compassPoint(demoAz))
+            else compass.setHeading(0.0, false, "")
+            return
+        }
+
+        SensorManager.getOrientation(rotMatrix, angles)
+        var az = Math.toDegrees(angles[0].toDouble())
+        if (az < 0) az += 360.0
+        attitude.setAttitude(
+            rotMatrix, az,
+            Math.toDegrees(angles[1].toDouble()),
+            Math.toDegrees(angles[2].toDouble()),
+            attitudeLabel
+        )
+        val shown = attitude.demoHeading() ?: az
+        compass.setHeading(shown, true, compassPoint(shown))
     }
 
     // -------------------------------------------------------------------- views
 
     private fun pad(v: Int) = (v * dp).toInt()
+
+    private fun buildPanel(): View {
+        compass = CompassView(this)
+        attitude = AttitudeView(this)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(PANEL_BG)
+            setPadding(pad(6), pad(6), pad(6), pad(6))
+            // Weights rather than fixed widths: the Waydroid window is 956x1027
+            // and its density is not ours to assume.
+            addView(compass, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            addView(attitude, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.MATCH_PARENT, 1.55f))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                minOf(pad(215), resources.displayMetrics.heightPixels / 3)
+            ).apply { bottomMargin = pad(8) }
+        }
+    }
 
     private fun buildCard(sensor: Sensor): View {
         val software = isSoftware(sensor)
@@ -326,7 +455,7 @@ class MainActivity : Activity(), SensorEventListener {
             Sensor.TYPE_ORIENTATION ->
                 if (axes < 3) v.joinToString("   ") { "%+.5f".format(it) }
                 else "azimuth %7.2f°   pitch %+7.2f°   roll %+7.2f°\n%s"
-                    .format(v[0], v[1], v[2], compassPoint(v[0].toDouble()))
+                    .format(v[0], v[1], v[2], "facing " + compassPoint(v[0].toDouble()))
 
             Sensor.TYPE_ROTATION_VECTOR,
             Sensor.TYPE_GAME_ROTATION_VECTOR,
@@ -373,14 +502,14 @@ class MainActivity : Activity(), SensorEventListener {
         return ("x %+8.5f  y %+8.5f  z %+8.5f  w %+8.5f   |q| = %.5f\n" +
                 "-> azimuth %6.2f°  pitch %+6.2f°  roll %+6.2f°   %s")
             .format(quat[1], quat[2], quat[3], quat[0], norm,
-                    azimuth, pitch, roll, compassPoint(azimuth))
+                    azimuth, pitch, roll, "facing " + compassPoint(azimuth))
     }
 
     private fun compassPoint(azimuth: Double): String {
         val points = arrayOf("N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
                              "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW")
         val idx = (((azimuth % 360.0 + 360.0) % 360.0) / 22.5 + 0.5).toInt() % 16
-        return "facing ${points[idx]}"
+        return points[idx]
     }
 
     private fun typeName(sensor: Sensor): String =
@@ -391,10 +520,13 @@ class MainActivity : Activity(), SensorEventListener {
         }
 
     companion object {
-        // 3 Hz. Fast enough to read, slow enough to leave the main looper
-        // free to drain the sensor event queue on a fanless Core M.
-        private const val REFRESH_MS = 333L
+        // ~15 fps for the attitude panel. The text rows still land at 3 Hz
+        // (5 x 66 ms), which is what a fanless Core M can sustain while the
+        // main looper is also draining ~180 sensor events a second.
+        private const val TICK_MS = 66L
+        private const val TEXT_EVERY = 5
         private const val HARDWARE_BG = 0x2200AA55
         private const val SOFTWARE_BG = 0x22888888
+        private const val PANEL_BG = 0x22607080
     }
 }

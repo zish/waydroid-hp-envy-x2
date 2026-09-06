@@ -128,9 +128,10 @@ and the reasoning behind each change.
   (`iio-probe.py`, `hid-decode.py`, `sensors-test.sh`)
 - `sensors/` — source for `waydroid-sensord`, the host-side sensors daemon (goal 2). Build with
   `sensors/build.sh`; see the header comment for why it is a host daemon and not a guest HAL
-- `sensor-app/` — "Sensor Info", a dependency-free Kotlin app that displays every sensor live.
-  Built without Gradle (`aapt2` + `kotlinc` + `d8` + `apksigner`); `sensor-app/build.sh --install`
-  puts it on the device
+- `sensor-app/` — "Sensor Info", a dependency-free Kotlin app that displays every sensor live,
+  with an attitude panel above it: a compass dial and a software-rendered 3-D view of the
+  machine's orientation. Built without Gradle (`aapt2` + `kotlinc` + `d8` + `apksigner`);
+  `sensor-app/build.sh --install` puts it on the device
 - `artifacts/` — configs pulled from or staged for the host, with originals kept alongside
 
 Record what was *ruled out* and why, not just what worked. Distinguish clearly between what has
