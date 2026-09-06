@@ -64,29 +64,43 @@ Every `/dev/ttyS0`…`ttyS17` node is a legacy static `serial8250` platform plac
 hardware behind it (`/sys/class/tty/ttySN/device` → `serial8250:0.N`). `dmesg` registers the 8250
 core's 32 ports and never enumerates a real one. So the GPS has no tty to talk on.
 
-### The likely cause, and how to test it
+### It is `SMD5`, not `_OSI` — and `acpi_osi=` will not help
 
-This pattern — vendor devices present but their LPSS bus disabled — is usually an **`_OSI` gate**
-in the DSDT: the firmware only enables LPSS UARTs when the OS identifies as a particular Windows
-version, and returns 0 from `_STA` otherwise. It is common on HP and Lenovo machines of this era.
+An earlier note in this file guessed an `_OSI` gate and suggested `acpi_osi="Windows 2013"`.
+**That guess was wrong.** Decompiling settles it. `_STA` has two gates:
 
-Confirm by decompiling the DSDT (`iasl -d DSDT.aml`) and reading the `_STA` method for `INT3434`/
-`INT3435` to see whether it branches on `_OSI`. If it does, the standard workaround is an
-`acpi_osi=` kernel parameter (e.g. `acpi_osi="Windows 2013"`), which on an rpm-ostree host means
-`rpm-ostree kargs --append=...`.
+```
+Method (_STA, 0, NotSerialized)
+{
+    If ((SMD5 == Zero))   { Return (Zero) }     // gate 1: firmware NVS
+    If ((OSYS < 0x07DD))  { Return (Zero) }     // gate 2: OS year < 2013
+    Return (0x0F)
+}
+```
 
-**This is out of scope for goals 1-4** and is recorded only so the finding is not lost. Note also
-that even with NMEA flowing on the host, exposing it to Android would need a GPS HAL in Waydroid —
-a separate project again.
+Gate 2 passes. The `_INI` ladder contains `If (_OSI ("Windows 2013")) { OSYS = 0x07DD }`, and Linux
+claims `Windows 2013`, so `OSYS` is exactly `0x07DD` and `OSYS < 0x07DD` is false.
 
-> **Disproven, 2026-09-06.** The test above was run and the `_OSI` hypothesis is **wrong**.
-> `UA00._STA` has *two* gates, and the one that fires is the first: `If (SMD5 == Zero)`, a BIOS
-> byte in ACPI NVS. The `OSYS` gate is provably not it — `I2C0` (`INT3432`) carries the identical
-> `If (OSYS < 0x07DD)` test and reports `status=15`, so `OSYS >= 0x07DD` already and `acpi_osi=`
-> would change nothing. The firmware simply has SerialIO UART0 set to *Disabled*.
->
-> It is moot anyway: the UART0 pads were muxed to GPIO and sniffed directly, and nothing is
-> transmitting on them — 10.5M samples across both polarities of the enable line, all high. There
-> is no GPS receiver fitted. Full write-up and the reasoning in
-> [docs/13-gps.md](../../docs/13-gps.md); annotated AML in
-> [lpss-uart-gps.dsl](lpss-uart-gps.dsl).
+So **gate 1 is the one firing: `SMD5 == 0`.** `SMD5`/`SMD6` are firmware NVS variables selecting the
+UART's mode, and the DSDT shows `SMD5 == 0x02` means PCI mode (it then gives `UA00` an `_ADR` of
+`0x00150005`). `lspci -s 00:15` returns **nothing**, so it is not in PCI mode either. `SMD5` is zero:
+**the firmware has the UART switched off entirely.**
+
+That makes the GPS unreachable from the OS side. No kernel argument, driver or quirk changes an NVS
+value the firmware set before Linux booted — it would need a BIOS setup option (if one is even
+exposed on this machine) or firmware modification. **Do not spend time on `acpi_osi=`.**
+
+## The vibrator is not in ACPI at all
+
+Searched the **decompiled source** of all seven tables — 136 devices — not just raw bytes:
+
+| Search | Result |
+|---|---|
+| text `vibrat`/`haptic`/`rumble`/`buzzer`/`motor` | **zero hits** |
+| device names matching `VIB`/`HAP`/`MOT`/`BUZ`/`RUM`/`HPT` | **none** |
+| the 24 `_DSM` methods | all owned by `PEPD`, PCIe root ports `RP01`–`RP08`, processors `PR15`/`PR17`, and I2C buses — all stock platform plumbing, no haptic candidate |
+| HP-specific `_HID`s | only `HPQC4752` (the GPS) and `HPQOEM` (the standard HP OEM table signature) |
+
+**ACPI is ruled out as the vibrator's control path.** Combined with the sensor hub having no HID
+Output reports, the remaining candidate is the SYNA7500 touchscreen's two Output reports on vendor
+page `0xff00` — see [../hid/README.md](../hid/README.md).
