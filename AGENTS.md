@@ -125,7 +125,8 @@ and the reasoning behind each change.
 - `bin/` — helper scripts for working with the host, incl. stdlib-only V4L2 probes
   (`v4l2-formats.py`, `v4l2-curfmt.py`, `v4l2-grab.py`) written because `v4l-utils` is not
   installed and layering a package on an Atomic host costs a reboot, plus the sensor tools
-  (`iio-probe.py`, `hid-decode.py`, `sensors-test.sh`)
+  (`iio-probe.py`, `hid-decode.py`, `sensors-test.sh`) and `powerbtn-probe.py`, which measures
+  whether the power button reports a *held* press at all
 - `sensors/` — source for `waydroid-sensord`, the host-side sensors daemon (goal 2). Build with
   `sensors/build.sh`; see the header comment for why it is a host daemon and not a guest HAL
 - `sensor-app/` — "Sensor Info", a dependency-free Kotlin app that displays every sensor live,

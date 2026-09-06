@@ -54,6 +54,18 @@ transmitting. [docs/13](13-gps.md) has the proof and also **corrects** the earli
 in ACPI NVS, not because of `_OSI`, so `acpi_osi=` would have been a wasted reboot. Do not re-open
 this without physical evidence of a module. Probe kept as [bin/gps-probe.py](../bin/gps-probe.py).
 
+**Session of 2026-09-06 (evening)** did two things outside the goal list, both at the owner's
+request. **The power button** now suspends on a short press instead of powering the machine
+off — **verified on the machine**, `PM: suspend entry (s2idle)` with a clean resume and working
+wifi and bluetooth. The hold-to-shutdown stage is configured but **untested**, and two open
+questions could still make it unreachable; [docs/15](15-power-button.md) states exactly what is
+verified and what is not. **Waydroid's internet access** came back: an orphaned `com.android.networkstack.process`
+survived a `system_server` restart and deadlocked `EthernetServiceThread` in an untimed
+`awaitIpClientStart()`, so Android had no default route. The host side — bridge, dnsmasq, firewalld,
+NAT, forwarding — was correct throughout and was ruled out first. `waydroid container restart`
+fixed it; killing the stale process alone did not. **This will recur** on the next `system_server`
+restart; [docs/16](16-waydroid-network.md) has the one-command diagnosis.
+
 ## The immediate next task
 
 **Goal 2's sensors are done** — the scoping that used to live here is superseded by
@@ -120,6 +132,9 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 
 | Item | State |
 |---|---|
+| **`/etc/systemd/logind.conf.d/10-power-button.conf`** | **power button: short press suspends, long press powers off**, mode `0644`. Was previously unconfigured, i.e. a short press powered the machine off. Delete to revert. See [15](15-power-button.md) |
+| **`/etc/systemd/sleep.conf.d/10-s2idle.conf`** | `MemorySleepMode=s2idle`, mode `0644` — pins suspend to s2idle instead of the `deep` default. Delete to revert |
+| `/var/tmp/powerbtn-probe.py` | copy of [bin/powerbtn-probe.py](../bin/powerbtn-probe.py), for the untested button-hold question in [15](15-power-button.md). `/var/tmp` survives reboots; safe to delete |
 | **`/usr/local/bin/waydroid-sensord`** | **the sensors fix**, 663 KB, mode `0755`. `/usr/local` is a symlink to `/var/usrlocal`, so no layering and no reboot. **Delete to revert** — waydroid then restores `waydroid.stub_sensors_hal=1` by itself |
 | `/var/lib/waydroid/waydroid-sensord.pid` | the daemon's single-instance lock. Recreated on demand, safe to delete |
 | `/etc/waydroid-sensors.conf` | **not installed.** Optional; documented sample in [artifacts/sensors/](../artifacts/sensors/) |
