@@ -71,7 +71,14 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [waydroid#2339](https://github.com/waydroid/waydroid/issues/2339) — see
    [docs/09-upstream-report.md](docs/09-upstream-report.md).
 2. **Accelerometer and vibration** — expose these to Waydroid.
-3. **Power** — make Waydroid report correct battery statistics and AC adapter state.
+3. **Power** — **DONE.** Battery level, voltage, charge status and AC adapter state now come from
+   the host. The container could always read the host's `/sys/class/power_supply` and the health HAL
+   read it correctly; Waydroid's `healthd_board_battery_update()` then overwrote every field with
+   hardcoded fakes (85%, charging) on the one path that reaches Android's `BatteryService`. Fixed
+   with a three-byte patch to that hook, deployed via the vendor overlay. See
+   [docs/10-battery-fixed.md](docs/10-battery-fixed.md); verify with `bin/battery-test.sh`.
+   Temperature is still unreported — that needs an NDK rebuild of the HAL (battery temp) or a new
+   thermal HAL (system temps); both are scoped in docs/10.
 4. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.
    Exposing the user's `/run/media/<username>` directory is probably sufficient.
 

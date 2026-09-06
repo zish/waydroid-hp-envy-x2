@@ -1,7 +1,8 @@
 # Resume brief
 
-Rewritten 2026-09-05 after goal 1 was completed. Read this first, then
-[08-camera-fixed.md](08-camera-fixed.md) for what was actually wrong and what is deployed.
+Rewritten 2026-09-05 after goals 1 and 3 were completed. Read this first, then
+[08-camera-fixed.md](08-camera-fixed.md) and [10-battery-fixed.md](10-battery-fixed.md) for what was
+actually wrong in each and what is deployed.
 
 ## One-paragraph state
 
@@ -13,7 +14,13 @@ Mesa cannot allocate it falls back to a linear R8 buffer, but the importer passe
 always **0**, the import failed, and the map returned NULL. Fixed by rebuilding
 `libgbm_mesa_wrapper.so` with the NDK alone and deploying it through the vendor overlay for both
 ABIs. **No AOSP tree was needed**, and the upstream `yuv` fix turned out to be unusable here (it
-needs YUV allocation no Mesa has). **Goal 2 has not been started.**
+needs YUV allocation no Mesa has).
+
+**Goal 3 (battery) is also done**, taken out of order because it was asked for directly. Android
+now reports the host's real level, voltage, charge status and AC state; the container could always
+read the host's `/sys/class/power_supply`, and Waydroid's health HAL was overwriting the values with
+hardcoded fakes on the one path that reaches `BatteryService`. Three-byte patch, vendor overlay,
+[docs/10](10-battery-fixed.md). **Goal 2 has still not been started.**
 
 ## The immediate next task
 
@@ -48,6 +55,7 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 
 | Item | State |
 |---|---|
+| **`overlay/vendor/bin/hw/android.hardware.health@2.0-service.waydroid`** | **patched health HAL — this is the battery fix**, mode `0755`. Delete to revert |
 | **`overlay/vendor/lib/libgbm_mesa_wrapper.so`** | **fixed 32-bit wrapper — this is the camera fix.** Delete to revert |
 | **`overlay/vendor/lib64/libgbm_mesa_wrapper.so`** | fixed 64-bit wrapper. Delete to revert |
 | `overlay/vendor/etc/external_camera_config.xml` | pre-existing 720p cap, unrelated to the fix |
@@ -104,6 +112,14 @@ argument tracing.
 - **Absence of errors is not success.** `bin/camera-test.sh` now confirms positively — app pid and
   active camera client — before reporting counters.
 
+- **A new overlay file is invisible until the *session* restarts.** The vendor overlay is a live
+  overlayfs `lowerdir`, and overlayfs does not support changing a lower dir underneath a mount.
+  `waydroid container restart` is **not** enough — it leaves the mount in place. Use
+  `waydroid session stop` then `waydroid session start`, and confirm with `md5sum` on
+  `/var/lib/waydroid/rootfs/...` that the bytes you deployed are the bytes that are live.
+- **An overlay file that is a service binary needs mode `0755`.** The existing overlay files are
+  `0644`, which is fine for libraries and would silently stop a HAL from starting.
+
 ## Hypotheses disproven along the way
 
 | Hypothesis | Verdict |
@@ -126,4 +142,11 @@ argument tracing.
 
 ## Goals 3-4
 
-Untouched. Per [AGENTS.md](../AGENTS.md), work them in order after goal 2.
+Goal 3 is **done** — see [docs/10](10-battery-fixed.md). Two things it deliberately left alone, both
+scoped in that doc: battery *temperature* (needs an NDK rebuild of the health HAL so the board hook
+reads a thermal zone instead of being stubbed out) and *system* thermals (this image ships no
+thermal HAL at all — `dumpsys thermalservice` says `HAL Ready: false`). Neither is required for the
+goal. Goal 3 also has one unverified behaviour: the battery sat at 100% on AC throughout, so
+*tracking a changing value* was never exercised. Unplug the charger and re-run `bin/battery-test.sh`.
+
+Goal 4 is untouched.
