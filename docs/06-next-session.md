@@ -2,7 +2,8 @@
 
 Rewritten 2026-09-05 after goals 1 and 3 were completed. Read this first, then
 [08-camera-fixed.md](08-camera-fixed.md) and [10-battery-fixed.md](10-battery-fixed.md) for what was
-actually wrong in each and what is deployed.
+actually wrong in each and what is deployed. [11-camera-facing.md](11-camera-facing.md) covers a
+second, separate camera fix (lens facing) plus the `Fence::waitForever` stall.
 
 ## One-paragraph state
 
@@ -58,6 +59,7 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | **`overlay/vendor/bin/hw/android.hardware.health@2.0-service.waydroid`** | **patched health HAL — this is the battery fix**, mode `0755`. Delete to revert |
 | **`overlay/vendor/lib/libgbm_mesa_wrapper.so`** | **fixed 32-bit wrapper — this is the camera fix.** Delete to revert |
 | **`overlay/vendor/lib64/libgbm_mesa_wrapper.so`** | fixed 64-bit wrapper. Delete to revert |
+| **`overlay/vendor/lib/camera.device@3.4-external-impl.so`** | **facing patch, `EXTERNAL`->`BACK`**, mode `0644`. Delete to revert. See [11](11-camera-facing.md) |
 | `overlay/vendor/etc/external_camera_config.xml` | pre-existing 720p cap, unrelated to the fix |
 | `waydroid_base.prop` | original, byte-identical. Backup at `waydroid_base.prop.orig` |
 | Probes in the container | `gbm-android-test`, `gbm-import-android`, `wrapper-harness`, `wrapper-harness32` in `/data/local/tmp` (host path `/home/jmelanso/.local/share/waydroid/data/local/tmp/`, owner `2000:2000`). Harmless; delete anytime |
@@ -139,6 +141,9 @@ argument tracing.
 | Multi-plane YUV import is a way around | imports (planes=3) but `gbm_bo_map` segfaults |
 | The import width is `total_size` | **wrong — it is 0**, and that was the actual bug |
 | The 1D buffer is 4096x338, so the fix can recompute it | wrong — the kernel returned 4096x512; size the dmabuf with `lseek` |
+
+A second set — ARM translation, a phantom camera, USB autosuspend, the `uvcvideo quirks` value —
+was disproven during the lens-facing work; see [11-camera-facing.md](11-camera-facing.md).
 
 ## Goals 3-4
 

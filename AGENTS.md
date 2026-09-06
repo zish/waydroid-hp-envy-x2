@@ -70,6 +70,8 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [minigbm#3](https://github.com/waydroid/android_external_minigbm/issues/3), cross-linked from
    [waydroid#2339](https://github.com/waydroid/waydroid/issues/2339) — see
    [docs/09-upstream-report.md](docs/09-upstream-report.md).
+   A separate camera fix — reporting `LENS_FACING_BACK` instead of `EXTERNAL`, so apps that
+   require a rear camera will open it — is in [docs/11-camera-facing.md](docs/11-camera-facing.md).
 2. **Accelerometer and vibration** — expose these to Waydroid.
 3. **Power** — **DONE.** Battery level, voltage, charge status and AC adapter state now come from
    the host. The container could always read the host's `/sys/class/power_supply` and the health HAL
