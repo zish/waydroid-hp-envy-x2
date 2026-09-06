@@ -1,0 +1,14 @@
+# HP TrueVision Full HD webcam (Suyin 064e:c353) — disable USB runtime autosuspend.
+#
+# The camera is the only video source Waydroid's external camera HAL has. With the
+# stock 2000 ms autosuspend delay the device suspends between uses, and the HAL has
+# to resume it on every stream start. Runtime suspend buys nothing here (the device
+# draws negligible power) and costs resume latency on an already slow Core M.
+#
+# This did NOT fix any known bug — the Lens enumeration crash reproduced identically
+# with autosuspend off (see docs/11-camera-facing.md). It is kept because suspending
+# a camera a HAL is about to stream from is the wrong default, not because it is a
+# proven fix.
+#
+# Revert: rm this file, then `udevadm control --reload`.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="064e", ATTR{idProduct}=="c353", TEST=="power/control", ATTR{power/control}="on"
