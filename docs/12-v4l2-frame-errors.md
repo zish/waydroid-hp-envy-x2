@@ -197,3 +197,99 @@ being throttled by Waydroid, USB or the driver; it is being throttled by the lig
 
 To revert the revert, the rule is preserved at
 [artifacts/udev/99-uvc-no-autosuspend.rules](../artifacts/udev/99-uvc-no-autosuspend.rules).
+
+## Correction: these are two different bugs, not one
+
+This doc opened by treating two log lines as one phenomenon. They are not, and the distinction
+matters because only one of them is reproducible:
+
+| Line | What it is | Status |
+|---|---|---|
+| `dequeueV4l2FrameLocked: v4l2 buf error! buf flag 0x12040` | an **incomplete frame from the driver** | **never reproduced.** 1,800 host frames and ~5 min of Waydroid streaming, zero occurrences |
+| `threadLoop: Convert V4L2 frame to YU12 failed! res 1` | a **gralloc format-conversion failure** | **reproduced**, and root-caused below |
+
+They were seen together once and wrongly assumed to be cause and effect. The second does not need
+the first: a frame can be perfectly intact and still fail to convert.
+
+## The conversion failure: Mesa cannot allocate YCbCr_420_888
+
+Captured from a live session:
+
+```
+[minigbm:gbm_mesa_internals.cpp(352)]: Unable to allocate 0x37393939 format, allocate as 1D buffer
+[minigbm:gbm_mesa_internals.cpp(362)]: Allocate 1D buffer as 4096x38 R8 2D texture
+[minigbm:gbm_mesa_internals.cpp(382)]: Allocated: 352x288, stride: 4096, map_stride: 4096
+E/ExtCamDevSsn@3.4: threadLoop: Convert V4L2 frame to YU12 failed! res 1
+W/Camera2Client: notifyError: Received recoverable error 3 from HAL - ignoring, requestId 10000025
+```
+
+`0x37393939` is `fourcc_code('9','9','9','7')` = **`DRM_FORMAT_FLEX_YCbCr_420_888`**, the flexible
+YUV format the camera HAL asks gralloc for. Over one session:
+
+| Measure | Count |
+|---|---|
+| 1D-fallback allocations | **45** |
+| ...of which format `0x37393939` | **45 (all of them)** |
+| Sizes seen | 1280x720 ×24, 352x288 ×7, 640x480 ×4 |
+| `Convert ... to YU12 failed` | **2** |
+| `v4l2 buf error` | **0** |
+
+So **Mesa cannot allocate `YCbCr_420_888` at all** — every request without exception falls back to
+a linear R8 1D buffer. This is the same fallback path as the original camera bug in
+[docs/08](08-camera-fixed.md), which is worth stating plainly: **that fix is working.** The
+fallback buffers now come back with `map_stride: 4096` rather than the `0` that made the map return
+NULL. (The `map_stride: 0` entries still in the log are `1916x1027` display buffers — the Waydroid
+window surface, allocated normally and never CPU-mapped. Different path, not a regression.)
+
+What is left is that the fallback **usually** works and **occasionally** does not — 2 failures in
+45 allocations, roughly 4%. The framework treats it as `error 3` (`ERROR_REQUEST`), logs
+"recoverable ... ignoring", and drops that frame. Visible effect: an occasional dropped frame, not
+a broken camera.
+
+**This is the real remaining camera defect**, and it is a gralloc/Mesa format-support gap, not a
+V4L2, USB or driver problem. It belongs with the upstream minigbm report in
+[docs/09](09-upstream-report.md) rather than anywhere near `uvcvideo`.
+
+## Suspend/resume: completely clean
+
+The lid test, with `power/control` back at the `auto` default. `bin/suspend-probe.sh` logged from
+on the host, since ssh does not survive the suspend:
+
+```
+22:46:48  baseline: control=auto status=active
+22:46:57  status: active -> suspended          <- idle, autosuspended
+22:47:33  status: suspended -> active          <- Open Camera opened it (CONNECT at 22:47:32)
+22:47:48  status: active -> suspended          <- released at 22:47:45, re-suspended 3s later
+22:48:48  status: suspended -> active          <- relaunched (CONNECT at 22:48:48)
+22:54:19  *** RESUMED after ~195s asleep ***
+22:54:19      on resume: control=auto status=active node=present device=present
+```
+
+Every runtime-power transition tracks camera use exactly, to the second. Across a ~195 s S3
+suspend: the USB device returned at the same bus address, `/dev/video0` survived, `control=auto`
+was preserved, the Waydroid session and container stayed `RUNNING`, and the camera provider was
+still holding the device **mmap'd** — i.e. the streaming session persisted straight through the
+suspend without the HAL noticing anything. The camera worked immediately on resume, confirmed by
+the user. `/sys/power/suspend_stats/success` incremented.
+
+The kernel log shows the camera was **fully reset** on the way back:
+
+```
+PM: suspend entry (deep)
+PM: suspend devices took 0.413 seconds
+usb 1-6: reset high-speed USB device number 4 using xhci_hcd   <- the camera
+PM: resume devices took 0.623 seconds
+Restarting tasks: Done
+PM: suspend exit
+```
+
+So this was not a soft transition that the camera slept through — the USB device was reset out
+from under a provider that still had buffers mapped, and the session survived it anyway.
+(`dmesg -T` compresses these timestamps: the monotonic clock does not advance while suspended, so
+the whole cycle appears to happen in one second. The probe log has the real wall-clock timing.)
+
+**No `REMOVE`/`ADD` pair appears across the resume**, which is worth noting given the spurious-flap
+bug above: suspend/resume is not a trigger for it.
+
+This closes the autosuspend question completely. Runtime PM is not merely harmless here, it is
+working correctly and tracking the camera precisely. The withdrawn udev rule was solving nothing.
