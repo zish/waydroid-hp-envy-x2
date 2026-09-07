@@ -1,0 +1,81 @@
+#!/bin/bash
+# Revive the ITE8350 HID sensor hub if it failed to come back from suspend.
+# Installed at /usr/local/bin/ite8350-resume-check, launched by the
+# systemd-sleep hook in this directory. See docs/19-sensor-hub-suspend-wedge.md.
+#
+# The failure this exists for: after s2idle, accel_3d, dev_rotation and
+# incli_3d can stop publishing while gyro_3d and magn_3d keep going, and the
+# kernel logs "i2c_hid_acpi i2c-ITE8350:00: failed to set a report to device:
+# -121" (EREMOTEIO). Reads still SUCCEED -- they just return the same numbers
+# forever -- so nothing downstream can detect it. Android keeps being told the
+# machine is at whatever attitude the last live sample caught, which pins the
+# display to that rotation. Observed after two suspends four seconds apart.
+#
+# A stale accelerometer is indistinguishable, from Android's side, from the
+# sign-convention bug fixed in docs/18. Check here before re-opening that.
+#
+# Only a driver reprobe fixes it: rewriting in_*_sampling_frequency revives
+# dev_rotation but never the accelerometer, even when the value genuinely
+# changes. Reprobing renumbers the iio:deviceN nodes, which waydroid-sensord
+# now survives by re-resolving them by name (SensorIIO::ReadSensor), so this
+# needs no container or session restart.
+#
+# Runs detached via systemd-run so it never delays a resume.
+set -u
+
+exec 1> >(systemd-cat -t ite8350-resume -p info) 2>&1
+
+I2C_DEV=i2c-ITE8350:00
+I2C_DRV=/sys/bus/i2c/drivers/i2c_hid_acpi
+
+# Give the hub a chance to come back on its own. A single suspend usually
+# recovers unaided, and -121 on resume is common and self-healing, so acting
+# too early would reprobe the hub for no reason on every wake.
+sleep 8
+
+accel_path() {
+	local d
+	for d in /sys/bus/iio/devices/iio:device*; do
+		[ "$(cat "$d/name" 2>/dev/null)" = "accel_3d" ] && { echo "$d"; return; }
+	done
+}
+
+# A live accelerometer jitters by an LSB or two even on a desk. Identical
+# readings across a 3 s window mean the hub has stopped publishing.
+accel_is_stale() {
+	local d first cur i
+	d=$(accel_path)
+	[ -z "$d" ] && return 0                 # gone entirely counts as stale
+	first=$(cat "$d"/in_accel_{x,y,z}_raw 2>/dev/null | tr '\n' ' ')
+	[ -z "$first" ] && return 0
+	for i in $(seq 1 15); do
+		sleep 0.2
+		cur=$(cat "$d"/in_accel_{x,y,z}_raw 2>/dev/null | tr '\n' ' ')
+		[ "$cur" != "$first" ] && return 1
+	done
+	return 0
+}
+
+if ! accel_is_stale; then
+	echo "accelerometer live after resume, nothing to do"
+	exit 0
+fi
+
+echo "accelerometer stale after resume -- reprobing $I2C_DEV"
+# Safe: only HID-SENSOR-* function nodes sit behind this device, no input
+# devices, so the touchscreen and keyboard are untouched.
+if ! echo "$I2C_DEV" > "$I2C_DRV/unbind" 2>/dev/null; then
+	echo "unbind failed"; exit 1
+fi
+sleep 2
+if ! echo "$I2C_DEV" > "$I2C_DRV/bind" 2>/dev/null; then
+	echo "bind failed -- sensors are down until the next reprobe or reboot"
+	exit 1
+fi
+sleep 5
+
+if accel_is_stale; then
+	echo "STILL stale after reprobe -- a reboot is the next step"
+	exit 1
+fi
+echo "accelerometer recovered at $(accel_path)"

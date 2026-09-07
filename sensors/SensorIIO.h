@@ -76,9 +76,10 @@ struct IioSensor {
     int warmup_ms;                  /* discard events for this long after
                                      * enabling; see the gyro note below      */
 
-    /* Resolved at startup. */
+    /* Resolved at startup, and again if the node is renumbered under us. */
     std::string path;               /* /sys/bus/iio/devices/iio:deviceN       */
     bool available;
+    int64_t last_resolve_ns;        /* rate-limits re-resolution on failure   */
 
     /* Runtime state. */
     bool enabled;
@@ -128,6 +129,8 @@ struct SensorIIO {
 
 private:
     bool ReadSensor(IioSensor &s);
+    bool ReadSensorAt(IioSensor &s);
+    bool ResolveNode(IioSensor &s);
     void ApplyAxisRotation(double &x, double &y) const;
     void LoadConfig();
 

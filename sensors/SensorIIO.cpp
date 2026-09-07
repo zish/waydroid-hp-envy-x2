@@ -303,22 +303,39 @@ void SensorIIO::ApplyAxisRotation(double &x, double &y) const
     y = ny;
 }
 
-void SensorIIO::RegisterSensors(sensor_event_cb_t cb, void *userdata)
-{
-    mCb = cb;
-    mUserdata = userdata;
+/* How long to wait before re-scanning /sys for a sensor whose read failed. */
+#define RESOLVE_RETRY_NS (2LL * 1000000000LL)
 
-    /* Map IIO node name -> path.  Matching on name is mandatory: the
-     * iio:deviceN indices are assigned in probe order and are not stable
-     * across boots (accel_3d was device4 on one boot, device0 on the next). */
+/*
+ * Point s.path at the IIO node whose `name` attribute is s.iio_name.
+ *
+ * Matching on the name rather than the index is mandatory, and for two
+ * separate reasons.  The indices are assigned in probe order and are not
+ * stable across boots -- accel_3d was device4 on one boot and device0 on the
+ * next.  They are not stable across a *driver reprobe* either: unbinding and
+ * rebinding the ITE8350 to recover it from a failed resume moved dev_rotation
+ * from device1 to device4 while leaving the other four in place.
+ *
+ * That second case is why this is a standalone function rather than inline
+ * startup code.  ReadSensor calls it again when a read fails, so a reprobe
+ * costs a couple of dropped samples instead of requiring the daemon -- and
+ * therefore the whole container and session -- to be restarted.
+ * See docs/19-sensor-hub-suspend-wedge.md.
+ *
+ * Every attribute must be readable before a node is accepted, so a half-probed
+ * driver is reported absent rather than returning garbage.
+ */
+bool SensorIIO::ResolveNode(IioSensor &s)
+{
     DIR *d = opendir(IIO_ROOT);
     if (!d) {
         GERR("cannot open %s -- no sensors will be reported", IIO_ROOT);
-        return;
+        return false;
     }
 
+    bool found = false;
     struct dirent *e;
-    while ((e = readdir(d)) != NULL) {
+    while (!found && (e = readdir(d)) != NULL) {
         if (strncmp(e->d_name, "iio:device", 10))
             continue;
 
@@ -327,39 +344,43 @@ void SensorIIO::RegisterSensors(sensor_event_cb_t cb, void *userdata)
         FILE *f = fopen((path + "/name").c_str(), "r");
         if (!f)
             continue;
-        if (fscanf(f, "%63s", name) != 1) {
-            fclose(f);
+        int got = fscanf(f, "%63s", name);
+        fclose(f);
+        if (got != 1 || strcmp(s.iio_name, name))
+            continue;
+
+        bool ok = true;
+        for (const std::string &a : s.attrs) {
+            double tmp[4];
+            if (read_iio_attr(path, a, tmp, 4) < 1)
+                ok = false;
+        }
+        if (!ok) {
+            GWARN("%s: node %s found but attributes unreadable",
+                  SensorIdToName(s.id), name);
             continue;
         }
-        fclose(f);
 
-        for (int i = 0; i < MAX_NUM_SENSORS; i++) {
-            if (strcmp(mSensors[i].iio_name, name))
-                continue;
-            /* Require every attribute to be readable, so a half-probed
-             * driver is reported absent rather than returning garbage. */
-            bool ok = true;
-            for (const std::string &a : mSensors[i].attrs) {
-                double tmp[4];
-                if (read_iio_attr(path, a, tmp, 4) < 1)
-                    ok = false;
-            }
-            if (!ok) {
-                GWARN("%s: node %s found but attributes unreadable",
-                      SensorIdToName(i), name);
-                continue;
-            }
-            mSensors[i].path = path;
-            mSensors[i].available = true;
-            GINFO("%-16s -> %s (%s)", SensorIdToName(i), e->d_name, name);
-        }
+        s.path = path;
+        found = true;
+        GINFO("%-16s -> %s (%s)", SensorIdToName(s.id), e->d_name, name);
     }
     closedir(d);
+    return found;
+}
 
-    for (int i = 0; i < MAX_NUM_SENSORS; i++)
-        if (!mSensors[i].available)
+void SensorIIO::RegisterSensors(sensor_event_cb_t cb, void *userdata)
+{
+    mCb = cb;
+    mUserdata = userdata;
+
+    for (int i = 0; i < MAX_NUM_SENSORS; i++) {
+        if (ResolveNode(mSensors[i]))
+            mSensors[i].available = true;
+        else
             GWARN("%-16s -- no IIO node named '%s'", SensorIdToName(i),
                   mSensors[i].iio_name);
+    }
 }
 
 bool SensorIIO::IsSensorAvailable(int id)
@@ -401,7 +422,11 @@ int SensorIIO::DisableSensorEvents(int id)
     return 0;
 }
 
-bool SensorIIO::ReadSensor(IioSensor &s)
+/*
+ * Read once from the path we currently believe in.  Failure here is not
+ * necessarily fatal -- see ReadSensor.
+ */
+bool SensorIIO::ReadSensorAt(IioSensor &s)
 {
     double raw[4];
     int n = 0;
@@ -425,6 +450,45 @@ bool SensorIIO::ReadSensor(IioSensor &s)
     s.n = n;
     s.ts = (uint64_t)now_boottime_ns();
     return true;
+}
+
+/*
+ * A read failure usually means the node was renumbered underneath us, not that
+ * the hardware went away: reprobing the ITE8350 -- the only thing that revives
+ * its accelerometer after a failed resume -- destroys and recreates every
+ * iio:deviceN, and does not necessarily hand back the same numbers.
+ *
+ * Re-resolving by name here is what keeps that recovery cheap.  Without it the
+ * daemon reads a path that no longer belongs to the sensor it wants, every
+ * read fails, PollOnce silently skips it, and Android keeps reporting the last
+ * value it ever saw -- a frozen accelerometer, which pins the display to
+ * whatever rotation that stale sample implies.  The only cure was restarting
+ * the daemon, and since container_manager.py owns its lifetime that meant
+ * restarting the container and the session, closing every running app.
+ *
+ * Rate-limited so a genuinely absent sensor does not walk /sys on every poll.
+ * Note this cannot detect the *other* failure mode, where the hub keeps
+ * answering reads with a value that never changes: those reads succeed. That
+ * one needs the reprobe, which is what bin/sensor-hub-reset.sh and the
+ * systemd-sleep hook exist for.
+ */
+bool SensorIIO::ReadSensor(IioSensor &s)
+{
+    if (ReadSensorAt(s))
+        return true;
+
+    int64_t now = now_boottime_ns();
+    if (now - s.last_resolve_ns < RESOLVE_RETRY_NS)
+        return false;
+    s.last_resolve_ns = now;
+
+    std::string was = s.path;
+    if (!ResolveNode(s))
+        return false;
+
+    GWARN("%s: node moved from %s, recovered without a restart",
+          SensorIdToName(s.id), was.c_str());
+    return ReadSensorAt(s);
 }
 
 void SensorIIO::PollOnce()

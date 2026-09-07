@@ -305,6 +305,16 @@ Two consequences worth knowing before planning work:
 
 ## Traps already hit — do not repeat
 
+- **A frozen accelerometer is indistinguishable from the sign-convention bug.** The ITE8350 does
+  not always survive s2idle: it keeps *answering* reads while returning the same numbers forever,
+  so Android pins the display to whatever rotation the stale sample implies and every app comes up
+  rotated — the exact symptom [docs/18](18-sensor-axes.md) fixed, from an unrelated cause. Check
+  staleness with `bin/sensor-hub-reset.sh --check` before re-opening that. Recovery is a driver
+  reprobe, now automatic on resume; see [docs/19](19-sensor-hub-suspend-wedge.md).
+- **A hub reprobe renumbers the `iio:deviceN` nodes** — but only the first time after a boot,
+  because the boot-time and reprobe probe orders differ. That is also the only time it matters.
+  `waydroid-sensord` now re-resolves by name when a read fails, so it no longer costs a container
+  and session restart.
 - **A cross-check is only independent if it was not written against the broken behaviour.**
   `waydroid-sensord --selftest` compared the hub's fused quaternion against its accelerometer and
   *required them anti-parallel* — which is what the hardware reported. So it ratified the

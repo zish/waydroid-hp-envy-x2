@@ -1,0 +1,15 @@
+#!/bin/bash
+# systemd-sleep hook: installed at /etc/systemd/system-sleep/ite8350
+#
+# /usr is read-only on this rpm-ostree host, so the hook lives in /etc, which
+# systemd searches alongside /usr/lib/systemd/system-sleep.
+#
+# systemd waits for system-sleep scripts to finish, and the staleness check
+# takes about 11 s, so the work is handed to a transient unit with
+# --no-block and resume is not delayed at all.
+[ "${1:-}" = "post" ] || exit 0
+
+exec systemd-run --no-block --quiet \
+	--unit="ite8350-resume-check-$$" \
+	--description="Check the ITE8350 sensor hub survived resume" \
+	/usr/local/bin/ite8350-resume-check

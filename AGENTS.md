@@ -99,6 +99,11 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    upside down. One negation in `GetAccelerometerEvent`, deployed by rebuilding the daemon. See
    [docs/18-sensor-axes.md](docs/18-sensor-axes.md), which also records why the daemon's own
    self-test had been ratifying the bug rather than catching it.
+   Separately, the hub does **not** reliably survive s2idle: it can keep answering reads with a
+   frozen value, which looks identical to that sign bug. Recovery is a driver reprobe, now
+   automatic on resume via a `systemd-sleep` hook, and the daemon re-resolves its IIO nodes by
+   name so the reprobe costs nothing. See
+   [docs/19-sensor-hub-suspend-wedge.md](docs/19-sensor-hub-suspend-wedge.md).
    **Vibration is the remaining part and is blocked a layer lower** — the motor exists but Linux
    exposes no interface to it at all, so that part starts with the DSDT, not with Waydroid.
 3. **Power** — **DONE.** Battery level, voltage, charge status and AC adapter state now come from
@@ -130,7 +135,8 @@ and the reasoning behind each change.
 - `bin/` — helper scripts for working with the host, incl. stdlib-only V4L2 probes
   (`v4l2-formats.py`, `v4l2-curfmt.py`, `v4l2-grab.py`) written because `v4l-utils` is not
   installed and layering a package on an Atomic host costs a reboot, plus the sensor tools
-  (`iio-probe.py`, `hid-decode.py`, `sensors-test.sh`) and `powerbtn-probe.py`, which measures
+  (`iio-probe.py`, `hid-decode.py`, `sensors-test.sh`, `sensor-hub-reset.sh`) and
+  `powerbtn-probe.py`, which measures
   whether the power button reports a *held* press at all
 - `sensors/` — source for `waydroid-sensord`, the host-side sensors daemon (goal 2). Build with
   `sensors/build.sh`; see the header comment for why it is a host daemon and not a guest HAL
