@@ -1,0 +1,21 @@
+# Start Android's shutdown before the host begins its own teardown.
+#
+# Installed at /etc/systemd/system/waydroid-shutdown-inhibitor.service.
+# Disabling this unit restores stock behaviour; nothing else depends on it.
+
+[Unit]
+Description=Shut Android down cleanly before the host goes down
+Documentation=https://github.com/waydroid/waydroid
+After=systemd-logind.service dbus.service
+Wants=systemd-logind.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/waydroid-shutdown-inhibitor
+# It exits once it has handled a shutdown, which is the point at which the host
+# is going down anyway. A non-zero exit means it lost logind, so try again.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

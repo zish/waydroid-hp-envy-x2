@@ -1,0 +1,126 @@
+#!/usr/bin/python3
+# waydroid-shutdown-inhibitor -- start Android's shutdown before the host starts
+# tearing itself down.
+#
+# Installed at /usr/local/bin/waydroid-shutdown-inhibitor and run by
+# waydroid-shutdown-inhibitor.service.
+#
+# Why this exists, and not just ExecStop= on waydroid-container.service:
+#
+# Android's shutdown needs two things that belong to the host -- the user's
+# Wayland session (the composer HAL and the SysUI shutdown path talk to it) and
+# Waydroid's own hardware binder service. At host shutdown both of those live in
+# units with no ordering relative to waydroid-container.service: the user's
+# session scope and the container service merely conflict with shutdown.target,
+# so systemd stops them in parallel. Whichever wins is luck, and losing means the
+# session dies first and Android's shutdown hangs -- which is exactly what was
+# measured when the same trigger was tried from inside the container manager's
+# own stop path (docs/23).
+#
+# A logind delay inhibitor does not race, because it runs BEFORE systemd stops
+# anything at all. logind emits PrepareForShutdown(true), waits for the delay
+# locks to be released (up to InhibitDelayMaxSec, 5 s by default), and only then
+# begins the transaction. So the whole machine -- compositor, session, hardware
+# manager -- is still up while Android does the part that needs it.
+#
+# The lock does not have to cover the whole shutdown. The framework half, which is
+# the half that flushes app and system state, finishes inside a second; what
+# follows is init tearing the container down, and that needs nothing from the
+# host. waydroid-container.service's ExecStop waits for that remainder.
+#
+# Living in the repo at artifacts/shutdown/waydroid-shutdown-inhibitor.
+
+import os
+import signal
+import subprocess
+import sys
+
+import dbus
+import dbus.mainloop.glib
+from gi.repository import GLib
+
+try:
+    # GLib.unix_signal_add is deprecated as of pygobject 3.52 and warns on every
+    # start; the replacement does not exist on older ones.
+    from gi.repository import GLibUnix
+    unix_signal_add = GLibUnix.signal_add
+except ImportError:
+    unix_signal_add = GLib.unix_signal_add
+
+SHUTDOWN_SCRIPT = "/usr/local/bin/waydroid-shutdown-android"
+
+# Generous: the script bounds itself at 30 s, and this is only here so a wedged
+# child can never hold the lock open for good.
+SCRIPT_TIMEOUT = 120
+
+
+def log(msg):
+    print("waydroid-shutdown-inhibitor: {}".format(msg), flush=True)
+
+
+class Inhibitor:
+    def __init__(self):
+        self.bus = dbus.SystemBus()
+        self.manager = dbus.Interface(
+            self.bus.get_object("org.freedesktop.login1", "/org/freedesktop/login1"),
+            "org.freedesktop.login1.Manager")
+        self.fd = None
+        self.loop = GLib.MainLoop()
+
+    def take_lock(self):
+        if self.fd is not None:
+            return
+        handle = self.manager.Inhibit(
+            "shutdown", "Waydroid", "Letting Android shut itself down", "delay")
+        # Inhibit() hands back a file descriptor; the lock is held until it is
+        # closed, or until logind gives up on us at InhibitDelayMaxSec.
+        self.fd = handle.take()
+        log("holding a shutdown delay lock")
+
+    def release_lock(self):
+        if self.fd is None:
+            return
+        os.close(self.fd)
+        self.fd = None
+        log("released the delay lock")
+
+    def on_prepare_for_shutdown(self, starting):
+        if not starting:
+            # logind sends PrepareForShutdown(false) when a shutdown is
+            # cancelled. Re-arm and keep waiting.
+            log("shutdown cancelled, re-arming")
+            self.take_lock()
+            return
+
+        log("host is shutting down, handing over to " + SHUTDOWN_SCRIPT)
+        try:
+            subprocess.run([SHUTDOWN_SCRIPT], timeout=SCRIPT_TIMEOUT, check=False)
+        except Exception as e:
+            log("shutdown script failed: {}".format(e))
+        finally:
+            self.release_lock()
+        self.loop.quit()
+
+    def quit(self, _data=None):
+        self.loop.quit()
+        return GLib.SOURCE_REMOVE
+
+    def run(self):
+        self.bus.add_signal_receiver(
+            self.on_prepare_for_shutdown,
+            signal_name="PrepareForShutdown",
+            dbus_interface="org.freedesktop.login1.Manager")
+        self.take_lock()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            unix_signal_add(GLib.PRIORITY_HIGH, sig, self.quit, None)
+        self.loop.run()
+        self.release_lock()
+
+
+if __name__ == "__main__":
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    try:
+        Inhibitor().run()
+    except dbus.exceptions.DBusException as e:
+        log("could not talk to logind: {}".format(e))
+        sys.exit(1)

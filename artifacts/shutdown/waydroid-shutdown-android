@@ -1,0 +1,108 @@
+#!/bin/sh
+# waydroid-shutdown-android -- ask Android to shut itself down, and wait for it.
+#
+# Installed at /usr/local/bin/waydroid-shutdown-android.
+#
+# Every path that stops Waydroid ends in the same place: container_manager.stop()
+# calls helpers.lxc.stop(), which runs `lxc-stop ... -k`. The -k is "kill": SIGKILL
+# to every process in the container, immediately. Android never learns it is going
+# away -- no ACTION_SHUTDOWN broadcast to apps, no PackageManager or settings
+# flush, no sync(). That is what happens today when the host reboots.
+#
+# This script supplies the missing half. Waydroid already handles Android shutting
+# *itself* down: the guest asks the host over the hardware binder, and
+# services/hardware_manager.py:shutdownRequest() waits up to 30 s for the container
+# to stop and then runs the normal cleanup. So all that was missing is a trigger
+# from the outside, which is this.
+#
+# It is best effort on purpose and ALWAYS exits 0. Whatever called it still has its
+# hard stop, and a host that is shutting down must not be held up by a guest that
+# will not go quietly.
+#
+# Wired up by /etc/systemd/system/waydroid-container.service.d/graceful-shutdown.conf.
+
+set -u
+
+LXC_PATH=/var/lib/waydroid/lxc
+WAYDROID=/usr/bin/waydroid
+LXC_INFO=/usr/bin/lxc-info
+LXC_UNFREEZE=/usr/bin/lxc-unfreeze
+
+# The framework shutdown is the one worth waiting for, so it gets the bigger
+# budget. Both are deliberately well inside the unit's TimeoutStopSec.
+FRAMEWORK_WAIT=${WAYDROID_SHUTDOWN_FRAMEWORK_WAIT:-20}
+INIT_WAIT=${WAYDROID_SHUTDOWN_INIT_WAIT:-10}
+
+log() {
+    echo "waydroid-shutdown-android: $*" >&2
+}
+
+# lxc-info prints "<name> doesn't exist" and exits 1 when there is no container,
+# so anything that is not a state we recognise is treated as STOPPED.
+state() {
+    out=$("$LXC_INFO" -P "$LXC_PATH" -n waydroid -sH 2>/dev/null) || out=STOPPED
+    case "$out" in
+        RUNNING|FROZEN|STOPPED|STARTING|STOPPING|ABORTING|FREEZING|THAWED) echo "$out" ;;
+        *) echo STOPPED ;;
+    esac
+}
+
+wait_stopped() {
+    i=0
+    while [ "$i" -lt "$1" ]; do
+        [ "$(state)" = STOPPED ] && return 0
+        sleep 1
+        i=$((i + 1))
+    done
+    [ "$(state)" = STOPPED ]
+}
+
+case "$(state)" in
+    STOPPED)
+        exit 0
+        ;;
+    FROZEN|FREEZING)
+        # suspend_action = freeze in waydroid.cfg, so this is a normal state to
+        # find the container in. A frozen container cannot run its own shutdown.
+        log "container is frozen, thawing it first"
+        "$LXC_UNFREEZE" -P "$LXC_PATH" -n waydroid || exit 0
+        ;;
+esac
+
+[ "$(state)" = RUNNING ] || exit 0
+
+# First choice: the framework path. `svc power shutdown` is PowerManager.shutdown(),
+# which broadcasts ACTION_SHUTDOWN to apps, then shuts down ActivityManager and
+# PackageManager -- the step that actually flushes packages.xml and the settings
+# providers -- before handing over to init.
+#
+# `waydroid shell` is used rather than lxc-attach directly because svc is an
+# app_process wrapper: it needs the full Android environment including the
+# CLASSPATH Android generated at boot, and assembling that by hand is how you end
+# up with a shutdown command that silently does nothing.
+log "asking Android to shut down (svc power shutdown)"
+"$WAYDROID" shell -- svc power shutdown >/dev/null 2>&1 &
+trigger=$!
+
+if wait_stopped "$FRAMEWORK_WAIT"; then
+    log "Android shut down cleanly"
+    exit 0
+fi
+kill "$trigger" 2>/dev/null
+
+# Second choice: init's own shutdown. It SIGTERMs every service, kills what is
+# left, sync()s and unmounts. Less than the framework path gives, far more than
+# SIGKILL gives. This is the path that matters when the host is already tearing
+# itself down and the compositor has gone, taking the framework's UI with it.
+log "no shutdown after ${FRAMEWORK_WAIT}s; falling back to init (sys.powerctl)"
+"$WAYDROID" shell -- setprop sys.powerctl shutdown >/dev/null 2>&1 &
+trigger=$!
+
+if wait_stopped "$INIT_WAIT"; then
+    log "Android shut down via init"
+    exit 0
+fi
+kill "$trigger" 2>/dev/null
+
+log "still running after $((FRAMEWORK_WAIT + INIT_WAIT))s; leaving it to the caller's hard stop"
+exit 0
