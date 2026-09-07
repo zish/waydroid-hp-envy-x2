@@ -472,6 +472,10 @@ checked by diffing the two lists rather than by reading. The `License:` tag is a
   no display power here at all — the panel stays lit at full backlight — so the timeout's only real
   benefit is idle guest CPU. 30 minutes keeps that and puts the black-screen state far out of
   normal reach. Note this is an Android-wide setting, so it applies to windowed sway sessions too.
+  **30 minutes is a real option in this image's UI** — confirmed by the owner under Settings >
+  Display > Screen timeout, which was not a given, since the list of offered values is a build
+  resource and some builds stop at 10 minutes. The UI writes this same `system.screen_off_timeout`
+  key, so touching it there replaces whatever was set from the shell.
 
 ### Recovering a black screen, verified
 
