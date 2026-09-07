@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Two offset arcs: the two quaternions being compared, and the gap between
+     them. Vector drawable so there are no density buckets to generate. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp"
+    android:viewportWidth="48" android:viewportHeight="48">
+    <path android:fillColor="#1B5E20"
+        android:pathData="M0,0h48v48h-48z" />
+    <path android:strokeColor="#A5D6A7" android:strokeWidth="3"
+        android:fillColor="#00000000" android:strokeLineCap="round"
+        android:pathData="M10,30 C16,14 26,14 34,22" />
+    <path android:strokeColor="#FFD54F" android:strokeWidth="3"
+        android:fillColor="#00000000" android:strokeLineCap="round"
+        android:pathData="M10,36 C16,20 26,20 40,28" />
+</vector>

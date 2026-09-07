@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Quat Monitor - logs the ITE8350's hardware-fused quaternion against AOSP's
+  software fusion, continuously, and lets a rotation anomaly be reported the
+  moment it is seen.
+
+  Same house style as sensor-app: depends on NOTHING but the platform. No
+  AndroidX, no Compose, no coroutines, no Gradle. See build.sh.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="lan.syshlt.quatmon"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
+
+    <!-- The service must keep sampling while other apps are in the foreground,
+         which is the entire point: rotation anomalies show up in other apps. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- API 33 makes the foreground-service notification itself require a
+         runtime grant. Without it the service still runs, but silently. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Sampling must not stop when the display blanks, or every gap in the
+         series would have to be disambiguated from a real sensor stall. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- signature|privileged|development. The `development` flag is what makes
+         it grantable with `pm grant`, which the install step in build.sh does.
+         Without it
+         logcat capture silently returns only this app's own log lines. -->
+    <uses-permission android:name="android.permission.READ_LOGS" />
+    <!-- Same protection level and the same grant path. Without it an anomaly
+         capture cannot record what WindowManager believed the rotation was,
+         which for a rotation glitch is the single most useful line in it. -->
+    <uses-permission android:name="android.permission.DUMP" />
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
+
+    <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.compass" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:launchMode="singleTop"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Opened from the "describe it" notification, never by another app. -->
+        <activity
+            android:name=".AnomalyActivity"
+            android:label="@string/report_title"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.DeviceDefault.Dialog"
+            android:exported="false" />
+
+        <!-- dataSync rather than a bare service: this is periodic data capture
+             to disk, and declaring the type keeps the intent explicit. -->
+        <service
+            android:name=".SamplerService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+    </application>
+</manifest>

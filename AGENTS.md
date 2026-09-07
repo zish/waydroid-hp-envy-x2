@@ -144,6 +144,14 @@ and the reasoning behind each change.
   with an attitude panel above it: a compass dial and a software-rendered 3-D view of the
   machine's orientation. Built without Gradle (`aapt2` + `kotlinc` + `d8` + `apksigner`);
   `sensor-app/build.sh --install` puts it on the device
+- `quat-monitor/` — "Quat Monitor", a dependency-free Kotlin app that logs the ITE8350's
+  hardware-fused quaternion against Android's software fusions at 20 Hz, continuously, so the
+  question "is the hardware meaningfully steadier, or should the software fusion be improved?"
+  can be settled from data. Logs the raw accel/gyro/magn too, which is what makes the data
+  *replayable* — a candidate fusion can be scored offline without a device round-trip. Same
+  no-Gradle build as `sensor-app/`; `--install` deploys and grants, `--pull` retrieves the CSVs.
+  See [docs/20-quat-monitor.md](docs/20-quat-monitor.md), and read its "interpretation traps"
+  before drawing conclusions from the data
 - `artifacts/` — configs pulled from or staged for the host, with originals kept alongside
 
 Record what was *ruled out* and why, not just what worked. Distinguish clearly between what has
