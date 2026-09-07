@@ -94,6 +94,11 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    direct IIO reader**. One binary in `/usr/local/bin`, no overlay files, no image changes, no
    layering, no reboot. See [docs/14-sensors.md](docs/14-sensors.md); verify with
    `bin/sensors-test.sh`.
+   Turning **auto-rotation** on then exposed a sign bug: the hub reports the gravity vector where
+   Android's convention is proper acceleration, so every app that follows the sensor rendered
+   upside down. One negation in `GetAccelerometerEvent`, deployed by rebuilding the daemon. See
+   [docs/18-sensor-axes.md](docs/18-sensor-axes.md), which also records why the daemon's own
+   self-test had been ratifying the bug rather than catching it.
    **Vibration is the remaining part and is blocked a layer lower** — the motor exists but Linux
    exposes no interface to it at all, so that part starts with the DSDT, not with Waydroid.
 3. **Power** — **DONE.** Battery level, voltage, charge status and AC adapter state now come from

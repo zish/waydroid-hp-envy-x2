@@ -33,7 +33,11 @@ when it is. Upstream's daemon reads sensorfw (Sailfish's Qt/D-Bus daemon, unpack
 its libgbinder `ISensors@1.0` server was kept and the **data source replaced with a direct IIO
 reader**. One binary in `/usr/local/bin`, no overlay, no image change, no layering, no reboot.
 Source in [sensors/](../sensors), writeup in [docs/14](14-sensors.md), verify with
-`bin/sensors-test.sh`. **Vibration is the one part of goal 2 still open**, and still blocked below
+`bin/sensors-test.sh`. **One follow-up landed 2026-09-07**: with auto-rotation switched on, every
+app that follows the sensor rendered upside down, because the hub reports the gravity vector where
+Android's convention is proper acceleration. One negation in `GetAccelerometerEvent`, plus the
+repair of two cross-checks that had been ratifying the bug; [docs/18](18-sensor-axes.md).
+**Vibration is the one part of goal 2 still open**, and still blocked below
 Waydroid — see the vibration section below, which is unchanged.
 
 **Session of 2026-09-06** added a second camera fix (`LENS_FACING` `EXTERNAL`->`BACK`, so apps that
@@ -301,6 +305,17 @@ Two consequences worth knowing before planning work:
 
 ## Traps already hit — do not repeat
 
+- **A cross-check is only independent if it was not written against the broken behaviour.**
+  `waydroid-sensord --selftest` compared the hub's fused quaternion against its accelerometer and
+  *required them anti-parallel* — which is what the hardware reported. So it ratified the
+  accelerometer's inverted sign instead of catching it, and `bin/sensors-test.sh` compared
+  Android's value against the raw IIO node with exactly the same blind spot. Both passed for a
+  month. A check derived from observed behaviour rather than from the spec tests self-consistency,
+  not correctness. See [docs/18](18-sensor-axes.md).
+- **`systemctl restart waydroid-container` stops the session and does not bring it back.**
+  `waydroid status` sits at `Session: STOPPED` indefinitely. Restart it as the session user:
+  `XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus nohup waydroid session start &`
 - **`waydroid shell -- /path/to/binary` returns `Permission denied` even when the file is fine.**
   It is `lxc-attach`'s `execvp`, not permissions, and there is **no AVC** behind it. Wrap it:
   `waydroid shell -- sh -c "/path/to/binary"`. Do not go hunting SELinux for this.
@@ -370,6 +385,10 @@ Two consequences worth knowing before planning work:
 | SELinux | no AVC denials, including for the exec failure in phase 1 |
 | Alternative gralloc modules | `default` breaks Android; `minigbm_gbm_mesa` identical failure |
 | Mesa cannot map the R8 fallback buffer | wrong — it maps fine, once imported with a valid shape |
+| Upside-down apps are a sensor *mounting* rotation | wrong — all three axes negated is a reflection (det −1), which no rigid mount can produce; it is a sign convention |
+| `axis_rotation` can correct the upside-down apps | wrong — it only rotates about Z and can never change the Z component |
+| The panel's natural orientation is wrong | wrong — the `NOSENSOR`-pinned launcher renders correctly at `ROTATION_0` |
+| The magnetometer shares the accelerometer's inverted sign | wrong — `getRotationMatrix` azimuth lands 11° from the hub's own heading, not 180° |
 | The upstream fix `a41dbe7` will fix this | wrong — it needs YUV allocation no Mesa has, and it deletes the fallback the code depends on |
 | The image predates both fix commits | wrong — `a9367e8` is already in; only `a41dbe7` is missing |
 | `gbm_map`'s error branch is dead, log untrustworthy | wrong in the shipped binaries — they test the return value |
@@ -434,7 +453,14 @@ from the package name before assuming it will behave.
 
 Only `org.fossify.home` shows the wrong orientation; every other app is fine. It is not the
 sensors — `settings get system accelerometer_rotation` returns `0`, so Android is not rotating
-anything from sensor data. The launcher requests `SCREEN_ORIENTATION_PORTRAIT`, and with the
+anything from sensor data.
+
+> **Premise superseded, 2026-09-07.** Auto-rotation has since been turned on
+> (`accelerometer_rotation = 1`), and a real sensor bug was waiting behind it: the accelerometer's
+> sign convention was inverted, so every app that follows the sensor came up upside down — while
+> the launcher, pinned to `NOSENSOR` by the very override below, kept looking correct and
+> disguised it. Fixed in [docs/18](18-sensor-axes.md). The launcher diagnosis below is unaffected;
+> only the "auto-rotation is off, so it cannot be the sensors" reasoning has expired. The launcher requests `SCREEN_ORIENTATION_PORTRAIT`, and with the
 Waydroid output at `base=1916x1027` the display honours it and rotates to `cur=1027x1916`
 `ROTATION_270`, which is taller than the physical screen. `dumpsys window displays` names the
 culprit directly:
@@ -467,7 +493,14 @@ displays` reports `mCurrentAppOrientation=SCREEN_ORIENTATION_NOSENSOR` with the 
 and the display stays at `cur=1916x1027` instead of rotating to `1027x1916 ROTATION_270`. Undo with
 `am compat reset <id> org.fossify.home`.
 
-Two things not established: whether the override survives a container restart (check
-`dumpsys platform_compat | grep fossify` after the next one, and move it into a startup hook if it
-does not), and the launcher's grid is still the one it chose for portrait, so the icons sit in a
+**The override does survive a container restart** — established 2026-09-07 after a
+`systemctl restart waydroid-container` for the sensors fix. Both change IDs came back with their
+package overrides intact, so no startup hook is needed:
+
+```
+ChangeId(265464455; name=OVERRIDE_ANY_ORIENTATION; packageOverrides={org.fossify.home=true} ...)
+ChangeId(265451093; name=OVERRIDE_UNDEFINED_ORIENTATION_TO_NOSENSOR; packageOverrides={org.fossify.home=true} ...)
+```
+
+Still open: the launcher's grid is the one it chose for portrait, so the icons sit in a
 sparse staggered layout — the column count is a launcher setting and can be raised.

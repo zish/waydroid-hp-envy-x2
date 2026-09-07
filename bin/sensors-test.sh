@@ -125,18 +125,25 @@ DUMP=$(sudo -n waydroid shell -- sh -c 'dumpsys sensorservice' 2>/dev/null | tr 
 
 TESTED=0
 
-# --- accelerometer: raw milli-g x 9.80665e-3 = m/s^2
+# --- accelerometer: raw milli-g x 9.80665e-3 = m/s^2, then negated.
+#
+# The hub reports the gravity vector, pointing down. Android's convention is
+# proper acceleration, pointing up. waydroid-sensord negates it on the way
+# through, so the host node and Android's value are expected to be opposite and
+# comparing them as-is is wrong. Reading them as-is is exactly how this test
+# scored a correctly-fixed accelerometer as a 19.4 m/s^2 error.
+# See docs/18-sensor-axes.md.
 A=$(android_last "ITE8350 3-axis Accelerometer")
 if [ -n "$A" ]; then
   P=$(iio_path accel_3d)
   HX=$(cat "$P/in_accel_x_raw"); HY=$(cat "$P/in_accel_y_raw"); HZ=$(cat "$P/in_accel_z_raw")
   read -r RES < <(awk -v a="$A" -v hx="$HX" -v hy="$HY" -v hz="$HZ" 'BEGIN {
-      split(a, v, " "); k = 9.80665e-3
+      split(a, v, " "); k = -9.80665e-3
       dx = v[1] - hx*k; dy = v[2] - hy*k; dz = v[3] - hz*k
       d = sqrt(dx*dx + dy*dy + dz*dz)
       printf "%.3f|%.3f %.3f %.3f|%.3f %.3f %.3f", d, v[1], v[2], v[3], hx*k, hy*k, hz*k }')
   D=${RES%%|*}; REST=${RES#*|}; AV=${REST%%|*}; HV=${REST##*|}
-  echo "        android [$AV]  host [$HV]  |diff| = $D m/s^2"
+  echo "        android [$AV]  host negated [$HV]  |diff| = $D m/s^2"
   awk -v d="$D" 'BEGIN { exit !(d < 1.0) }' \
     && pass "accelerometer agrees (tolerance 1.0 m/s^2)" \
     || fail "accelerometer differs by $D m/s^2"

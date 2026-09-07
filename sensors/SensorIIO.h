@@ -139,6 +139,7 @@ private:
      * convention can be corrected on the host without a rebuild. */
     int mPollIntervalMs;
     int mAxisRotation;              /* 0, 90, 180 or 270 degrees about Z     */
+    bool mAccelReportsGravity;      /* hub reports gravity, not proper accel */
     double mMagnScale;
     double mEarthFieldUt;           /* local geomagnetic field strength      */
 };

@@ -112,6 +112,11 @@ normalised gravity vector at the same moment was `(0.011, −0.895, −0.446)` �
 sign, agreeing to **1.5°**. The component order is therefore `x, y, z, w`; reading it as `w, x, y, z`
 misses by 12°.
 
+> **The "opposite sign" in that sentence is the bug, not a property of the hub.** Android's
+> accelerometer convention is proper acceleration, which points *up*, so a correct accelerometer
+> is *parallel* to world-up, not anti-parallel. This paragraph is right about the component order
+> and wrong to accept the sign. Corrected in [docs/18](18-sensor-axes.md).
+
 ### Which is why ORIENTATION is derived from the quaternion, not from `incli_3d`
 
 `incli_3d` does not use Android's convention, so mapping it would be guesswork. Applying Android's
@@ -592,13 +597,15 @@ Reverting is deleting one file and restarting the session: waydroid then puts
   Sensor Info app below. With a subscriber attached, `bin/sensors-test.sh` compared it directly:
   Android `[28.52, -28.13, 49.62]` against the host's `[28.12, -28.12, 45.31]` µT. Four of four
   comparable sensors now pass end to end.
-- **The sensor axes have not been reconciled with the display's natural orientation.** The values
-  are provably correct in the *sensor's* frame, but whether that frame matches what Android expects
-  for this panel is a physical question that cannot be settled remotely. It currently does not
-  matter: auto-rotation is off (`accelerometer_rotation = 0`) and Waydroid renders into a fixed
-  956×1027 Wayland window, so there is no panel orientation to track. It would matter for games,
-  compass apps or AR. `SensorIIO` has an `axis_rotation` knob (0/90/180/270 about Z) readable from
-  `/etc/waydroid-sensors.conf` so it can be corrected without a rebuild.
+- ~~The sensor axes have not been reconciled with the display's natural orientation.~~ **Closed,
+  and the answer was not an axis question at all** — see [docs/18](18-sensor-axes.md). The axes
+  were always right and `axis_rotation` was never going to help. What was wrong is the
+  *accelerometer's sign convention*: the hub reports the gravity vector, pointing down, where
+  Android wants proper acceleration, pointing up. Harmless while auto-rotation was off; the
+  moment it was switched on, every app that follows the sensor rendered upside down. The
+  measurement proving it is the one recorded above under "Proof that `dev_rotation` is a real
+  fused quaternion" — "the same axis, opposite sign" is the bug itself, written down a month
+  early and filed as an expected property of the hardware.
 - **Long-running stability is unmeasured.** The daemon has been up for tens of minutes, not days.
   RSS was 4.4 MB.
 - **Rates above 20 Hz are untested.** `minDelay` advertises 50 ms, derived from the 3–7 ms cost of

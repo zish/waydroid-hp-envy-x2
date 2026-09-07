@@ -137,7 +137,8 @@ static int read_iio_attr(const std::string &path, const std::string &attr,
 
 SensorIIO::SensorIIO()
     : mCb(nullptr), mUserdata(nullptr), mPollIntervalMs(50),
-      mAxisRotation(0), mMagnScale(SCALE_MAGN_DEFAULT),
+      mAxisRotation(0), mAccelReportsGravity(true),
+      mMagnScale(SCALE_MAGN_DEFAULT),
       mEarthFieldUt(EARTH_FIELD_UT_DEFAULT)
 {
     LoadConfig();
@@ -217,6 +218,14 @@ void SensorIIO::LoadConfig()
                 mAxisRotation = deg;
             else
                 GWARN("axis_rotation must be 0, 90, 180 or 270; got %s", val);
+        } else if (!strcmp(key, "accel_reports_gravity")) {
+            if (!strcmp(val, "1") || !strcmp(val, "yes"))
+                mAccelReportsGravity = true;
+            else if (!strcmp(val, "0") || !strcmp(val, "no"))
+                mAccelReportsGravity = false;
+            else
+                GWARN("accel_reports_gravity must be 0/1 or no/yes; got %s",
+                      val);
         } else if (!strcmp(key, "magn_scale")) {
             double s = atof(val);
             if (s > 0)
@@ -233,8 +242,9 @@ void SensorIIO::LoadConfig()
         }
     }
     fclose(f);
-    GINFO("config: poll=%d ms  axis_rotation=%d  magn_scale=%g  earth_field=%g uT",
-          mPollIntervalMs, mAxisRotation, mMagnScale, mEarthFieldUt);
+    GINFO("config: poll=%d ms  axis_rotation=%d  accel_reports_gravity=%d  "
+          "magn_scale=%g  earth_field=%g uT", mPollIntervalMs, mAxisRotation,
+          mAccelReportsGravity, mMagnScale, mEarthFieldUt);
 }
 
 /*
@@ -447,6 +457,40 @@ void SensorIIO::PollOnce()
     }
 }
 
+/*
+ * Android's accelerometer convention is proper acceleration -- the force the
+ * device's frame resists -- so a machine at rest reads +1 g along whichever
+ * axis points at the sky, and lying flat with the screen up reads +9.81 on Z.
+ * The ITE8350 reports the opposite: the gravity vector itself, pointing down.
+ *
+ * Measured on bigtab01 against Android's axes (+X right, +Y toward the top of
+ * the screen, +Z out of the screen):
+ *
+ *     pose                      hub reads               Android needs
+ *     flat, screen up           (+0.32, -0.04, -9.83)   (0, 0, +9.81)
+ *     upright, top edge up      (+0.13, -9.90, +0.06)   (0, +9.81, 0)
+ *     upright, right edge up    (-9.47, -0.04, -0.65)   (+9.81, 0, 0)
+ *
+ * Every axis is negated and none are swapped.  That rules a mounting rotation
+ * out rather than suggesting one: a global negation has determinant -1, and no
+ * rigid mounting can turn one right-handed frame into a reflection of another.
+ * The hub's axes already line up with the panel's; only the sign convention of
+ * the quantity differs, which is why this correction lives here and not in
+ * ApplyAxisRotation.
+ *
+ * The hub's own fused quaternion is the independent witness, and it is already
+ * in Android's convention: rotating world-up into the device frame with it
+ * gives (0.007, 0.885, 0.463) where the raw accelerometer reads
+ * (0.011, -0.895, -0.446) at the same moment -- the same axis, opposite sign,
+ * agreeing to 1.5 degrees (docs/14-sensors.md).  So the quaternion needs no
+ * correction and the accelerometer needs exactly this one.
+ *
+ * Uncorrected, this is what made Android's WindowOrientationListener propose
+ * ROTATION_180 in normal viewing pose, so every app that follows the sensor
+ * rendered upside down.  It also quietly wronged Gravity and Linear
+ * Acceleration, which Android synthesises from this sensor.  See
+ * docs/18-sensor-axes.md.
+ */
 int SensorIIO::GetAccelerometerEvent(uint64_t *ts, float *x, float *y,
                                      float *z)
 {
@@ -455,12 +499,13 @@ int SensorIIO::GetAccelerometerEvent(uint64_t *ts, float *x, float *y,
     if (!s.valid || s.n < 3)
         return -1;
 
-    double vx = s.v[0], vy = s.v[1];
+    double sgn = mAccelReportsGravity ? -1.0 : 1.0;
+    double vx = sgn * s.v[0], vy = sgn * s.v[1];
     ApplyAxisRotation(vx, vy);
     *ts = s.ts;
     *x = (float)vx;
     *y = (float)vy;
-    *z = (float)s.v[2];
+    *z = (float)(sgn * s.v[2]);
     return 0;
 }
 
@@ -674,8 +719,16 @@ int SensorIIO::SelfTest()
         failures += !ok;
 
         /* Cross-check 4: world-up rotated into the device frame is the third
-         * row of R, and should be the negative of the accelerometer's
-         * normalised reading. */
+         * row of R, and must equal the accelerometer's normalised reading --
+         * both answer "which way is up, in device axes".
+         *
+         * This check used to negate the dot product, demanding the two be
+         * anti-parallel, which is what the hub reports raw.  So it agreed with
+         * the accelerometer's sign convention rather than catching it, and the
+         * bug reached Android unnoticed until auto-rotation was switched on and
+         * every app came up inverted.  Requiring them parallel makes this a
+         * real regression test for the correction in GetAccelerometerEvent.
+         * See docs/18-sensor-axes.md. */
         float ax, ay, az;
         uint64_t ats;
         if (ok && GetAccelerometerEvent(&ats, &ax, &ay, &az) == 0) {
@@ -684,14 +737,15 @@ int SensorIIO::SelfTest()
             double uz = 1 - 2 * ((double)x * x + (double)y * y);
             double amag = sqrt((double)ax * ax + (double)ay * ay +
                                (double)az * az);
-            double dot = -(ux * ax + uy * ay + uz * az) / amag;
+            double dot = (ux * ax + uy * ay + uz * az) / amag;
             if (dot > 1.0) dot = 1.0;
             if (dot < -1.0) dot = -1.0;
             double err = acos(dot) * 180.0 / M_PI;
             bool agree = err < 15.0;
             printf("  quat vs accel   gravity directions differ by %.2f deg"
                    "        %s\n", err,
-                   agree ? "OK" : "FAIL: wrong component order or axis map?");
+                   agree ? "OK" : "FAIL: wrong sign convention, component "
+                                  "order or axis map?");
             failures += !agree;
         }
     } else {
