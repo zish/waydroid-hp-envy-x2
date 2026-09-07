@@ -176,14 +176,31 @@ heading of **229.8°** — 11.1° apart. A sign inversion would appear as ~180°
 with the known hard-iron bias from the keyboard's attachment magnets ([docs/14](14-sensors.md)).
 Azimuth is scale-invariant, so the `magn_scale` question does not enter into it.
 
+**The gyroscope is not affected either.** Sampled `dev_rotation` and `gyro_3d` together at ~40 Hz
+while the machine was rotated by hand, and compared the gyro against the rate implied by the
+quaternion, `2·vec(conj(q₁)⊗q₂)/Δt`. Pooling only samples above 29°/s where a single axis carries
+more than 70% of the rotation:
+
+| axis | n | sign agrees |
+|---|---|---|
+| X | 66 | 75.8% |
+| Y | 38 | 76.3% |
+| **Z** | **153** | **96.1%** |
+
+Z is measured directly and decisively. X and Y follow from the same determinant argument that
+solved the accelerometer: a three-axis gyroscope reports in one frame with one handedness
+convention, so the only physically available alternatives are *all three correct* or *all three
+inverted* — a single inverted axis would make the frame a reflection. Z at 96% rules out the
+global inversion, and 76% is far from both chance (50%) and inversion (~25%).
+
+The residual noise on X and Y is explained rather than excused: the hub's quaternion fuses the
+accelerometer to constrain tilt, so it is damped in pitch and roll and its derivative is a poor
+instantaneous reference there. Yaw carries no such constraint and tracks the gyro closely, which
+is exactly the pattern observed. A first attempt was inconclusive (mean cosine −0.017) purely
+because the machine only saw 4.5°/s; the check needs a brisk sweep, above roughly 30°/s.
+
 ## Not established
 
-- **The gyroscope's sign convention is unverified.** It cannot be checked from a stationary
-  machine, and unlike the accelerometer it has no second hub output to compare against directly.
-  The test is to sample `dev_rotation` and `gyro_3d` together under motion and compare the gyro
-  against `2·vec(conj(q₁)⊗q₂)/Δt`; anti-parallel would mean inverted. Nothing observed so far
-  suggests it is wrong, and it does not affect display rotation, which uses only the
-  accelerometer.
 - **Whether other HID sensor hubs share this convention.** The default is set from one machine.
 - **Gravity and Linear Acceleration were also wrong** before this fix, since Android synthesises
   both from the accelerometer. They should now be correct, but have not been exercised directly.
