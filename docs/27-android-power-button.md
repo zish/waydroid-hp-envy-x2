@@ -339,12 +339,22 @@ The second one matters. `KEY_SLEEP` reaches `PhoneWindowManager` as
 shortcut does not apply and the keyguard would otherwise arm after the default 5 s grace — long
 enough for a resume to show the unlocked UI first.
 
-A PIN or pattern is then set normally in Settings > Security.
+A PIN or pattern is then set normally in Settings > Security. **Done by the owner 2026-09-07, and
+unlock confirmed working under cage.** Android agrees it is real:
+
+```
+KeyguardServiceDelegate
+  secure=true
+```
 
 **The way back out of a lost credential** needs no root and no Android: stop the session and delete
 `~/.local/share/waydroid/data/system/locksettings.db`, which is host-visible and owned by the
-session user (`-rw-rw---- jmelanso jmelanso`). `locksettings clear` is *not* the escape hatch — it
-requires `--old <CREDENTIAL>`.
+session user (`-rw-rw---- jmelanso jmelanso`).
+
+`locksettings` is *not* the escape hatch, and that is now demonstrable rather than inferred from its
+help text: with a credential set, `locksettings get-disabled` returns **nothing at all**, because
+every subcommand requires `--old <CREDENTIAL>` once a lock screen exists. A tool that needs the
+credential cannot be the way to recover from having lost it.
 
 ## Bluetooth in s2idle
 
