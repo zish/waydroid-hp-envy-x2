@@ -143,7 +143,10 @@ Two files, both in [artifacts/sensor-hub/](../artifacts/sensor-hub):
 > Converted to the two units above and verified on a real suspend, where it immediately earned its
 > keep: `accelerometer stale after resume -- reprobing i2c-ITE8350:00`, then `accelerometer
 > recovered at /sys/bus/iio/devices/iio:device0`. **The wedge is real and it fired on the first
-> cycle the check was alive for.** It also retroactively explains the loose end in
+> cycle the check was alive for** — and again on the second, a lid close/open at 18:32. Two for
+> two, which sits oddly with the "intermittent" framing above; see the note in
+> [27](27-android-power-button.md) on whether that is the hub degrading or the detector
+> false-positiving on a motionless machine. It also retroactively explains the loose end in
 > [25](25-waydroid-in-cage.md), where the accelerometer returned bit-identical values after a
 > suspend and was charitably read as a filtered sensor sitting still.
 >

@@ -289,6 +289,20 @@ resume lands on the lock screen. Confirmed visually by the owner.
 | touch comes back | `Device reconfigured: id=4, name='wayland_touch', ... mode 1` |
 | the cage session is untouched | `cage` and `waydroid-cage-session` the same pids across five sleep/wake cycles and two suspends; watchdog silent |
 
+The **lid** was confirmed by the owner afterwards, and takes the identical path — it reaches
+`sleep.target` the same way, so all three units fire:
+
+```
+18:32:03  Lid closed.
+18:32:03  waydroid-android-key: sent sleep (142)
+18:32:04  Successfully froze unit 'user.slice'
+18:32:04  PM: suspend entry (s2idle)
+18:32:16  Lid opened.  ->  PM: suspend exit
+18:32:16  sent wakeup (143), twice
+18:32:27  ite8350-resume: accelerometer stale after resume -- reprobing
+18:32:39  ite8350-resume: accelerometer recovered
+```
+
 ## Enabling the lock screen
 
 The keyguard is present and wired up but **switched off in this image** — `locksettings
@@ -426,5 +440,9 @@ checked by diffing the two lists rather than by reading. The `License:` tag is a
   suspend/resume, but between times a kiosk left idle still goes black with no in-band way back.
   The proper fix is either a wake lock while the kiosk session runs, or `persist.waydroid.suspend`
   — both untested.
-- **The lid was not retested** with the unit installed. It goes through the same
-  `sleep.target`, so it should behave identically, but "should" is not "did".
+- **The wedge may not be intermittent at all.** The ITE8350 check has now caught a stale
+  accelerometer on **both** resumes it has been alive for — 17:49 and 18:32 — where
+  [19](19-sensor-hub-suspend-wedge.md) describes the fault as occasional. Two samples is not a
+  rate, and a motionless machine is exactly where a staleness test is most likely to false-positive
+  (though a live hub does show LSB noise here: `x=11 y=-886 z=-484` → `x=15 y=-878 z=-480`). Worth
+  watching, and worth checking the detector before concluding the hardware got worse.
