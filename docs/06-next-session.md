@@ -66,6 +66,15 @@ NAT, forwarding — was correct throughout and was ruled out first. `waydroid co
 fixed it; killing the stale process alone did not. **This will recur** on the next `system_server`
 restart; [docs/16](16-waydroid-network.md) has the one-command diagnosis.
 
+**Session of 2026-09-06 (late)** measured what the machine actually draws and built a periodic
+wake timer for Waydroid; both are in [docs/17](17-hybrid-sleep.md). Headline: **screen-off awake is
+2.14 W (~12 h)** against **s2idle ~0.6 W (~43 h)** — a ratio of only ~3.5x, not the 10x assumed, so
+the timer earns its place for multi-day standby rather than daily use. The **S3 comparison is the
+open thread**: the kernel's own default was `deep`, s2idle at 0.6 W is high for standby, but S3
+resume throws `xhci_hcd ... xHC error in resume, Reinit` where s2idle resumes clean. Re-add one
+config file and run one command to finish it; docs/17 has both. **Bluetooth as a wake source** also
+looks achievable and untested — `1-4/power/wakeup` exists, so the hardware is capable.
+
 ## The immediate next task
 
 **Goal 2's sensors are done** — the scoping that used to live here is superseded by
@@ -132,6 +141,12 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 
 | Item | State |
 |---|---|
+| **`/usr/local/bin/waydroid-sync`**, **`waydroid-bt-restore`** | periodic sync-window scripts, mode `0755`. See [17](17-hybrid-sleep.md). Delete to revert |
+| **`/etc/systemd/system-sleep/50-waydroid-sync`** | writes the cycle marker, arms the deferred bluetooth restore, mode `0755` |
+| **`/etc/systemd/system/waydroid-sync.{timer,service}`** | installed but the timer is **DISABLED**. Its guards were verified to refuse action, but the path where it *acts* has never run. Enable with `sudo systemctl enable --now waydroid-sync.timer` once tested |
+| `/etc/systemd/sleep.conf.d/20-s3-test.conf` | **not installed** — the S3 comparison was cancelled and the file removed, so the host is back on validated s2idle. Source in [artifacts/power/](../artifacts/power/) |
+| `/var/tmp/power-*.sh`, `/var/tmp/power-measure.log` | measurement harness and the raw session log. `/var/tmp` survives reboots; safe to delete |
+| sway output `eDP-1` transform | **back at `normal`, as found.** After a resume the display was reported upside-down; a `transform 180` was tried and was **wrong** — it put waybar at the bottom and inverted it, which is what 180 does to an already-correct display. Reverted. Cause never established, and sway reported `normal` throughout. Note `grim` cannot diagnose this: it captures the compositor framebuffer, so it looks correct whatever the panel is doing |
 | **`/etc/systemd/logind.conf.d/10-power-button.conf`** | **power button: short press suspends, long press powers off**, mode `0644`. Was previously unconfigured, i.e. a short press powered the machine off. Delete to revert. See [15](15-power-button.md) |
 | **`/etc/systemd/sleep.conf.d/10-s2idle.conf`** | `MemorySleepMode=s2idle`, mode `0644` — pins suspend to s2idle instead of the `deep` default. Delete to revert |
 | `/var/tmp/powerbtn-probe.py` | copy of [bin/powerbtn-probe.py](../bin/powerbtn-probe.py), for the untested button-hold question in [15](15-power-button.md). `/var/tmp` survives reboots; safe to delete |
