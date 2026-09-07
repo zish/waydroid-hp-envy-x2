@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=Waydroid in Cage
+Comment=Log in directly to Waydroid in a cage session.
+Exec=cage -s -- @BINDIR@/waydroid-cage-session
+Type=Application

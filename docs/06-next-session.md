@@ -229,6 +229,12 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | **`/usr/local/bin/waydroid-shutdown-android`**, **`waydroid-shutdown-inhibitor`** | **graceful Android shutdown when the host goes down**, mode `0755`. See [23](23-graceful-shutdown.md) |
 | **`/etc/systemd/system/waydroid-shutdown-inhibitor.service`** | **enabled**. Holds a logind `shutdown`/`delay` lock and runs the shutdown on `PrepareForShutdown`. `systemctl disable --now` to revert |
 | **`waydroid-container.service.d/graceful-shutdown.conf`** | `ExecStop=` + `TimeoutStopSec=60`, mode `0644`. Delete to revert |
+| **`/usr/local/bin/waydroid-graceful-exit`** | **graceful Android shutdown at logout, unprivileged**, mode `0755`. See [24](24-graceful-logout.md) |
+| **`/etc/sway/config.d/95-waydroid-graceful-exit.conf`** | rebinds `$mod+Shift+e` to shut Android down before `swaymsg exit`, mode `0644`. Loaded for every user; delete to revert |
+| **`/usr/local/lib/systemd/user/waydroid-graceful-exit.service`** | backstop for logouts that bypass the chord, plus a `graphical-session.target.wants/` symlink that enables it for every user. Delete both to revert |
+| **`/usr/local/bin/waydroid-cage-session`** | **Waydroid as a kiosk session under cage**, mode `0755`. Entry check, shutdown watchdog, exit paths. See [25](25-waydroid-in-cage.md) |
+| **`/var/tmp/waydroid-install/`** | staged sources for the two installers above (`cage`, `graceful-exit`). `/var/tmp` survives reboots; safe to delete |
+| **`/etc/wayland-sessions/waydroid-cage.desktop`** | the SDDM session entry, `cage -s -- …/waydroid-cage-session`, mode `0644`. Pre-existing file; restore the one-line `Exec=cage -- waydroid show-full-ui` to revert |
 | `/var/tmp/powerbtn-probe.py` | copy of [bin/powerbtn-probe.py](../bin/powerbtn-probe.py), for the untested button-hold question in [15](15-power-button.md). `/var/tmp` survives reboots; safe to delete |
 | **`/usr/local/bin/waydroid-sensord`** | **the sensors fix**, 663 KB, mode `0755`. `/usr/local` is a symlink to `/var/usrlocal`, so no layering and no reboot. **Delete to revert** — waydroid then restores `waydroid.stub_sensors_hal=1` by itself |
 | `/var/lib/waydroid/waydroid-sensord.pid` | the daemon's single-instance lock. Recreated on demand, safe to delete |

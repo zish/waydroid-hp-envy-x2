@@ -1,0 +1,313 @@
+#!/bin/sh
+# waydroid-cage-session -- run Waydroid as a full-screen kiosk session under cage.
+#
+# Installed at @BINDIR@/waydroid-cage-session and launched from
+# /etc/wayland-sessions/waydroid-cage.desktop as
+#
+#     cage -s -- @BINDIR@/waydroid-cage-session
+#
+# The obvious form, `cage -- waydroid show-full-ui`, is wrong in three ways, and
+# each one is a property of Waydroid's design rather than a bug (docs/25):
+#
+#  1. cage exits when its child exits, and `waydroid show-full-ui` only blocks
+#     when NO session is running. maybeLaunchLater() catches the "no session"
+#     D-Bus error and calls session_manager.start(background=False), which holds
+#     the session main loop -- but if a session is already registered it just
+#     fires the intent and returns, cage exits, and the user lands straight back
+#     on the greeter. So a stale session has to be cleared before starting.
+#
+#  2. When Android shuts itself down, nothing tells the host. The host implements
+#     IHardware transaction 7 (shutdownRequest) and would do the full teardown,
+#     but the guest-side client -- lineageos.waydroid.Hardware, in
+#     /system/framework/org.lineageos.platform.jar -- only implements
+#     enableNFC, enableBluetooth, suspend, reboot, upgrade and upgrade2. There is
+#     no shutdown method in this image, and waydroid.log has never recorded a
+#     transaction 7. So the session manager blocks forever against a dead
+#     container and cage never exits: a black screen, not a logout. The watchdog
+#     below is what turns Android's power-off into an actual session exit.
+#
+#     This is version skew, not a design gap: the guest half is
+#     android_vendor_waydroid#50, merged 2026-05-09, and this image is dated
+#     2026-04-03. A newer image makes the watchdog a backstop instead of the
+#     mechanism -- the loop checks the child before the container, so a session
+#     manager that exits on its own simply ends the loop.
+#
+#  3. cage has no sway-systemd equivalent -- the package is just /usr/bin/cage --
+#     so nothing starts graphical-session.target and the
+#     waydroid-graceful-exit.service backstop (docs/24) never runs. Under cage
+#     this script has to own that itself.
+#
+# Everything here is unprivileged, like waydroid-graceful-exit: GetSession and
+# Stop are reachable by context="default" per id.waydro.Container.conf.
+
+set -u
+
+WAYDROID=/usr/bin/waydroid
+BUSCTL=/usr/bin/busctl
+GRACEFUL_EXIT=@BINDIR@/waydroid-graceful-exit
+
+# The watchdog polls for the life of the session, so it uses busctl rather than
+# `waydroid status`: measured on this host, 9 ms against 220 ms, because the
+# latter starts a Python interpreter to make the same D-Bus call.
+POLL=${WAYDROID_CAGE_POLL:-2}
+
+# Android's own "Restart" goes through IHardware transaction 4, which the guest
+# DOES implement, and hardware_manager.reboot() is `lxc-stop` immediately
+# followed by `lxc-start` with no wait in between. The container is briefly
+# STOPPED during that, and treating it as a shutdown would end the session on
+# every reboot. So a stop has to be observed this many polls running.
+STOP_CONFIRM=${WAYDROID_CAGE_STOP_CONFIRM:-3}
+
+BOOT_WAIT=${WAYDROID_CAGE_BOOT_WAIT:-120}
+# Grace period for the session manager to act on SIGTERM. Short on purpose: it is
+# often not slow but wedged, and waiting the old 20 s just held a black screen.
+CHILD_WAIT=${WAYDROID_CAGE_CHILD_WAIT:-6}
+
+# A kiosk session that fails instantly is a relogin loop waiting to happen, and
+# with SDDM autologin it is a spin. Pause before handing the greeter back.
+MIN_RUNTIME=${WAYDROID_CAGE_MIN_RUNTIME:-15}
+BOUNCE_SLEEP=${WAYDROID_CAGE_BOUNCE_SLEEP:-5}
+
+child=
+session=
+terminating=0
+started=$(date +%s)
+
+log() {
+    echo "waydroid-cage-session: $*" >&2
+    if command -v logger >/dev/null 2>&1; then
+        logger -t waydroid-cage-session -p user.notice -- "$*"
+    fi
+}
+
+# Whether the daemon holds its bus name -- asked of the bus, not of the daemon.
+# GetSession cannot stand in for this: waydroid PR #2389 (open) adds a caller
+# check to GetSession that denies a non-root caller whenever no session is
+# tracked, so "GetSession failed" is about to stop meaning "no service".
+container_service_up() {
+    [ "$("$BUSCTL" --system call org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus NameHasOwner s id.waydro.Container 2>/dev/null)" = "b true" ]
+}
+
+# GetSession answers "a{ss} 0" when the service is up with no session. An empty
+# capture means "no session we are allowed to see", which -- given the check
+# above has already passed -- is the same thing for every decision made here.
+refresh_session() {
+    session=$("$BUSCTL" --system call id.waydro.Container /ContainerManager \
+        id.waydro.ContainerManager GetSession 2>/dev/null)
+}
+
+# busctl prints one line: a{ss} 14 "user_name" "jmelanso" ... "state" "RUNNING"
+sess() {
+    printf '%s\n' "$session" | awk -v k="$1" '
+        {
+            for (i = 1; i < NF; i++) {
+                gsub(/"/, "", $i)
+                if ($i == k) { gsub(/"/, "", $(i + 1)); print $(i + 1); exit }
+            }
+        }'
+}
+
+# Never leave the greeter unreachable, and never spin into it either.
+bail() {
+    elapsed=$(( $(date +%s) - started ))
+    if [ "$elapsed" -lt "$MIN_RUNTIME" ]; then
+        log "session lasted ${elapsed}s; pausing ${BOUNCE_SLEEP}s so autologin cannot spin"
+        sleep "$BOUNCE_SLEEP"
+    fi
+    exit "${1:-0}"
+}
+
+# Wait for the session manager to go, then stop pretending.
+#
+# It can be wedged rather than slow, and SIGTERM cannot reach it when it is:
+# `waydroid show-full-ui` runs justShow() from user_manager's unlocked callback,
+# and IPlatform.get_service() retries 1000 times at 1 Hz, blocking the GLib main
+# loop -- which is the only thing that dispatches the handler GLib.unix_signal_add
+# registered. The signal is queued and never delivered. Seen on the first cage
+# login: 20 s of black screen before the timeout expired (docs/25).
+#
+# So when the grace period runs out, do the host-side teardown ourselves before
+# resorting to SIGKILL. Killing it first would skip Container.Stop() entirely and
+# wedge the next login, which is the failure this script exists to prevent.
+reap_child() {
+    i=0
+    while kill -0 "$child" 2>/dev/null && [ "$i" -lt "$CHILD_WAIT" ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if kill -0 "$child" 2>/dev/null; then
+        log "session manager did not act on SIGTERM in ${CHILD_WAIT}s; tearing down without it"
+        release_session_record
+        kill -KILL "$child" 2>/dev/null
+    fi
+    wait "$child" 2>/dev/null
+}
+
+# The container service tracks exactly one session, in container_manager's
+# args.session, and only ITS OWN Stop clears it. If the record survives us, the
+# next login gets "Already tracking a session" from do_start() and the session
+# never starts -- the wedge this whole script exists to avoid.
+#
+# Stop(false), not `waydroid session stop`: with the session manager already gone
+# that call falls back to Stop(TRUE), which makes the daemon send SIGUSR1 to the
+# pid recorded at Start. Nothing rechecks that the pid is still that process, and
+# SIGUSR1's default disposition is terminate, so on a recycled pid it lands on
+# something unrelated. There is no session left to notify here, so don't ask.
+release_session_record() {
+    refresh_session
+    [ -n "$(sess state)" ] || return 0
+    log "container service is still tracking a session; releasing it"
+    "$BUSCTL" --system call id.waydro.Container /ContainerManager \
+        id.waydro.ContainerManager Stop b false >/dev/null 2>&1 ||
+        log "failed to release the session record"
+}
+
+# SDDM ending the session, or systemd stopping the scope, SIGTERMs the whole
+# cgroup -- this script AND the session manager, at the same instant. The session
+# manager's own handler is do_stop() followed by Container.Stop(), which reaches
+# lxc-stop -k: SIGKILL, no ACTION_SHUTDOWN. That is the race docs/24 accepted for
+# its systemd backstop, and it cannot be won outright.
+#
+# What can be done is to stop the racer. SIGSTOP is not catchable, so freezing the
+# session manager keeps GLib from dispatching the SIGTERM it already queued, which
+# buys the shutdown ladder its window. Afterwards it is resumed and terminated
+# normally, and its handler performs the host-side teardown: with the container
+# already STOPPED the daemon skips lxc-stop and goes straight to unmounting the
+# rootfs, tearing down the bridge and clearing args.session.
+#
+# --keep-session is what makes that division work: the ladder shuts Android down
+# and leaves the session alone, because here the session manager is our own child
+# and is about to release itself.
+on_signal() {
+    [ "$terminating" = 1 ] && return
+    terminating=1
+    log "session is being terminated; shutting Android down first"
+    [ -n "$child" ] && kill -STOP "$child" 2>/dev/null
+    if [ -x "$GRACEFUL_EXIT" ]; then
+        "$GRACEFUL_EXIT" --keep-session
+    else
+        log "$GRACEFUL_EXIT is missing; Android will be killed, not shut down"
+    fi
+    if [ -n "$child" ]; then
+        kill -CONT "$child" 2>/dev/null
+        kill -TERM "$child" 2>/dev/null
+        reap_child
+    fi
+    release_session_record
+    exit 0
+}
+
+trap on_signal HUP
+trap on_signal INT
+trap on_signal TERM
+
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    log "WAYLAND_DISPLAY is not set; this must run as a child of a compositor"
+    bail 1
+fi
+
+if ! container_service_up; then
+    log "nothing owns id.waydro.Container: the container service is not running."
+    log "check: systemctl status waydroid-container.service, and 'waydroid status'"
+    bail 1
+fi
+refresh_session
+
+# A session left over from a previous login is not reusable, however healthy it
+# looks. generate_session_lxc_config binds the compositor's Wayland socket by
+# INODE, and cage unlinks its socket when it exits, so the container is holding a
+# dead inode that a new cage at the same path does not restore. It has to go.
+if [ -n "$(sess state)" ]; then
+    owner=$(sess user_id)
+    if [ "$owner" != "$(id -u)" ]; then
+        log "a Waydroid session belongs to uid $owner; leaving it alone and giving up"
+        bail 1
+    fi
+    log "clearing a stale Waydroid session from an earlier login (container: $(sess state))"
+    # Up to ~20 s: the framework rung cannot work without the compositor that
+    # session was bound to, so this normally falls through to the init rung.
+    if [ -x "$GRACEFUL_EXIT" ]; then
+        "$GRACEFUL_EXIT"
+    else
+        "$WAYDROID" session stop >/dev/null 2>&1
+    fi
+    refresh_session
+    if [ -n "$(sess state)" ]; then
+        log "could not clear the stale session; giving up rather than wedging further"
+        bail 1
+    fi
+fi
+
+log "starting Waydroid on $WAYLAND_DISPLAY"
+"$WAYDROID" show-full-ui &
+child=$!
+
+# GetSession only answers once do_start() has finished, and args.session is its
+# last statement -- after lxc.start -- so a session that is visible at all is one
+# whose container has already been started. Until then an empty answer means
+# "still booting", not "gone", which is why the watchdog latches on first sight.
+seen_up=0
+stopped_polls=0
+android_shut_down=0
+
+while kill -0 "$child" 2>/dev/null; do
+    refresh_session
+    state=$(sess state)
+
+    if [ "$seen_up" = 0 ]; then
+        case "$state" in
+            RUNNING|FROZEN|FREEZING)
+                seen_up=1
+                log "Android is up (container: $state)"
+                ;;
+            *)
+                if [ $(( $(date +%s) - started )) -ge "$BOOT_WAIT" ]; then
+                    log "Android did not come up within ${BOOT_WAIT}s; ending the session"
+                    break
+                fi
+                ;;
+        esac
+    else
+        # FROZEN is normal, not an exit: this host runs suspend_action = freeze.
+        case "$state" in
+            STOPPED|"")
+                stopped_polls=$((stopped_polls + 1))
+                if [ "$stopped_polls" -ge "$STOP_CONFIRM" ]; then
+                    android_shut_down=1
+                    break
+                fi
+                ;;
+            *)
+                stopped_polls=0
+                ;;
+        esac
+    fi
+
+    sleep "$POLL"
+done
+
+# However the loop ended, if the session manager is still alive it has to be told
+# to go, and SIGTERM is the way that tears down BOTH halves: its handler runs
+# do_stop() and then Container.Stop(false), which is the host-side work nothing
+# else performs -- rootfs unmounted, waydroid0 down, args.session cleared. It then
+# exits, so this script exits, so cage exits, so SDDM gets the greeter back.
+#
+# Leaving it to reap_child's SIGKILL instead would skip all of that and wedge the
+# next login, which is what the boot-timeout path did before this was hoisted out
+# of the shutdown branch.
+if kill -0 "$child" 2>/dev/null; then
+    if [ "$android_shut_down" = 1 ]; then
+        log "Android has shut down; releasing the session"
+    else
+        log "ending the session"
+    fi
+    kill -TERM "$child" 2>/dev/null
+fi
+
+reap_child
+release_session_record
+
+elapsed=$(( $(date +%s) - started ))
+log "session ended after ${elapsed}s"
+bail 0

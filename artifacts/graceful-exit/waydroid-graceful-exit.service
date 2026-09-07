@@ -1,0 +1,30 @@
+# Backstop for logouts that do not go through the sway exit chord: sddm ending the
+# session, `swaymsg exit` typed by hand, the compositor crashing.
+#
+# Installed at /usr/local/lib/systemd/user/waydroid-graceful-exit.service, which is
+# in systemd's user unit search path, so one file covers every user on the host --
+# no per-user `systemctl --user enable`, no ~/.config. In an RPM this becomes
+# /usr/lib/systemd/user/.
+#
+# It is genuinely a backstop and not the primary trigger. sway-systemd only starts
+# sway-session-shutdown.target once sway's IPC "shutdown" event has fired, which is
+# sway already on its way out, so ExecStop here races the compositor's teardown.
+# When it loses that race the framework rung stalls and the wrapper falls through
+# to the init rung, which needs nothing from Wayland. Degraded, but still a real
+# Android shutdown rather than SIGKILL.
+
+[Unit]
+Description=Shut Android down gracefully when the graphical session ends
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=@BINDIR@/waydroid-graceful-exit
+# Worst case in the wrapper is FRAMEWORK_WAIT + INIT_WAIT + STOP_WAIT = 30 s.
+TimeoutStopSec=45
+
+[Install]
+WantedBy=graphical-session.target

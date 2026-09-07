@@ -161,6 +161,11 @@ By the time `lxc-stop` runs, both things Android's shutdown depends on are alrea
 session path graceful would mean triggering before `do_stop()`, which is inside
 `/usr/lib/waydroid` — read-only on this host, and not worth an overlay for. **The shim was removed.**
 
+That conclusion was right about the shim and wrong about the conclusion drawn from it. Triggering
+before `do_stop()` does not require patching `/usr/lib/waydroid` — it requires triggering before
+Waydroid is involved at all, which is what [24](24-graceful-logout.md) does from the compositor's
+exit binding.
+
 It did turn up one real bug worth recording. If Android has already exited, `lxc-stop` exits
 non-zero, and `container_manager.stop()` runs it with `check=True` inside a `try` that wraps *the
 rest of the teardown* — so a non-zero exit there silently skips unmounting the rootfs and tearing
@@ -198,8 +203,10 @@ saw it through. Seven seconds from trigger to container stopped, from a frozen s
 
 ## Known gaps
 
-- **Logout and `waydroid session stop` still hard-kill Android.** See above; not fixable from
-  outside `/usr/lib/waydroid`.
+- **Logout is now covered — see [24](24-graceful-logout.md).** It triggers from in front of the
+  sequence rather than behind it (the sway exit chord), which is the position the shim below could
+  not reach, and it does the whole thing unprivileged. `waydroid session stop` invoked directly
+  still hard-kills Android; that one remains not fixable from outside `/usr/lib/waydroid`.
 - **`InhibitDelayMaxSec` is 5 s, and the reboot above did hit it.** Left alone on purpose. The
   window only has to cover the framework half, which takes 0.8 s — a 5× margin — and the measured
   reboot shows the session surviving the full five seconds while `ExecStop` finished the rest. The

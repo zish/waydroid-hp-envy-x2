@@ -1,0 +1,269 @@
+#!/bin/sh
+# waydroid-graceful-exit -- ask Android to shut itself down, as an ordinary user.
+#
+# Installed at @BINDIR@/waydroid-graceful-exit.
+#
+# Companion to waydroid-shutdown-android (docs/23), which covers the host going
+# down. This one covers the other way Waydroid goes away: the user logs out of the
+# compositor. That path never reached the shutdown machinery -- logging out tears
+# the session down before anything can ask Android to stop -- and it cannot borrow
+# waydroid-shutdown-android either, because that script needs root for both
+# `waydroid shell` and `lxc-info`.
+#
+# So everything here is deliberately unprivileged. Verified on the host as an
+# ordinary user:
+#
+#   waydroid status         D-Bus GetSession on id.waydro.Container. The policy in
+#                           id.waydro.Container.conf grants send access to
+#                           context="default", so any user may ask. This is also
+#                           why lxc-info is not used: it is root-only and answers
+#                           "Insufficent privileges to control waydroid".
+#   busctl ... Unfreeze     same D-Bus interface, same policy.
+#   waydroid app intent     IPlatform over /dev/binder, which is mode 0666. The
+#                           intent is dispatched by the waydroidplatform service
+#                           inside system_server, so the caller Android sees is
+#                           the platform itself, which holds SHUTDOWN. An ordinary
+#                           app could not launch this activity.
+#   waydroid prop set       same binder service, transaction 2.
+#
+# No sudo, no polkit, no setuid, nothing owned by root at runtime.
+#
+# Best effort on purpose, and it ALWAYS exits 0 on the shutdown path: a logout must
+# not be blocked by a guest that will not go quietly.
+
+set -u
+
+WAYDROID=/usr/bin/waydroid
+BUSCTL=/usr/bin/busctl
+SWAYMSG=/usr/bin/swaymsg
+
+# docs/23 measured the framework half of an Android shutdown at 0.8 s, and the
+# container reaching STOPPED 6.2 s after the trigger, from a live session. These
+# are ~2x margins on that, kept small because a human is waiting at a logout.
+FRAMEWORK_WAIT=${WAYDROID_EXIT_FRAMEWORK_WAIT:-12}
+INIT_WAIT=${WAYDROID_EXIT_INIT_WAIT:-8}
+STOP_WAIT=${WAYDROID_EXIT_STOP_WAIT:-10}
+
+exit_sway=0
+keep_session=0
+notice_pid=
+trigger=
+status=
+
+usage() {
+    cat <<EOF
+Usage: waydroid-graceful-exit [--exit-sway] [--keep-session]
+
+Asks Android to shut itself down without root, and waits for the container to
+stop. With --exit-sway, runs 'swaymsg exit' afterwards, so this can stand in for
+the compositor's own exit action.
+
+With --keep-session, the host-side teardown is left to the caller: the session is
+neither released after a successful shutdown nor stopped as a last resort. Use it
+only when the caller owns the session manager and will release it -- which is the
+case under cage, where waydroid-cage-session runs it as its own child (docs/25).
+
+Environment: WAYDROID_EXIT_FRAMEWORK_WAIT (${FRAMEWORK_WAIT}s), WAYDROID_EXIT_INIT_WAIT
+(${INIT_WAIT}s), WAYDROID_EXIT_STOP_WAIT (${STOP_WAIT}s).
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --exit-sway) exit_sway=1 ;;
+        --keep-session) keep_session=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "waydroid-graceful-exit: unknown option '$1'" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+log() {
+    echo "waydroid-graceful-exit: $*" >&2
+    if command -v logger >/dev/null 2>&1; then
+        logger -t waydroid-graceful-exit -p user.notice -- "$*"
+    fi
+}
+
+# waydroid status prints tab-separated "Session:", "Container:", "Session user:".
+# With no session it prints only "Session:\tSTOPPED".
+refresh_status() {
+    status=$("$WAYDROID" status 2>/dev/null)
+}
+
+field() {
+    printf '%s\n' "$status" | awk -F'\t' -v k="$1:" '$1 == k { print $2; exit }'
+}
+
+# A stopped session took the container with it, so treat that as stopped too.
+container_stopped() {
+    refresh_status
+    case "$(field Session)" in
+        RUNNING) [ "$(field Container)" = STOPPED ] ;;
+        *) : ;;
+    esac
+}
+
+wait_stopped() {
+    i=0
+    while [ "$i" -lt "$1" ]; do
+        container_stopped && return 0
+        sleep 1
+        i=$((i + 1))
+    done
+    container_stopped
+}
+
+# A clean shutdown stops the container but leaves the HOST half standing. Measured
+# after the first successful run: the rootfs was still mounted (5 mounts), the
+# waydroid0 bridge was still up, waydroid-sensord was still running, and the session
+# still held the id.waydro.Session name -- so the next `waydroid session start`
+# would have refused with "Session is already running".
+#
+# Waydroid only tears that down from container_manager.stop(), and nothing calls it
+# here: when Android shuts itself down this way the guest never sends the
+# hardware-binder shutdown request, so hardware_manager's handler never runs (no
+# "Received transaction: 7" in waydroid.log, just "Service manager /dev/hwbinder has
+# died"). `waydroid session stop` does the teardown, and took 0.44 s with the
+# container already stopped.
+release_session() {
+    if [ "$keep_session" = 1 ]; then
+        log "leaving the session to the caller (--keep-session)"
+        return 0
+    fi
+    refresh_status
+    [ "$(field Session)" = RUNNING ] || return 0
+    log "releasing the session (rootfs, bridge, session name)"
+    "$WAYDROID" session stop >/dev/null 2>&1 &
+    i=0
+    while [ "$i" -lt "$STOP_WAIT" ]; do
+        refresh_status
+        [ "$(field Session)" = RUNNING ] || return 0
+        sleep 1
+        i=$((i + 1))
+    done
+    log "session still registered after ${STOP_WAIT}s"
+}
+
+# Only meaningful when run from inside the session being logged out of; the
+# systemd-user backstop runs after the compositor is already gone.
+start_notice() {
+    [ -n "${SWAYSOCK:-}" ] || return 0
+    command -v swaynag >/dev/null 2>&1 || return 0
+    swaynag -t warning -m 'Shutting Android down before exiting...' >/dev/null 2>&1 &
+    notice_pid=$!
+}
+
+# Killing the trigger here, rather than only on the failure paths, is the whole
+# point. Both triggers reach Android through IPlatform, and IPlatform.get_service()
+# retries 1000 times at 1 Hz before giving up -- so a trigger left running does not
+# fail, it WAITS, for up to ~17 minutes, and delivers its shutdown to whichever
+# session registers waydroidplatform next. See docs/24.
+finish() {
+    [ -n "$trigger" ] && kill "$trigger" 2>/dev/null
+    [ -n "$notice_pid" ] && kill "$notice_pid" 2>/dev/null
+    if [ "$exit_sway" = 1 ]; then
+        if [ -x "$SWAYMSG" ]; then
+            exec "$SWAYMSG" exit
+        fi
+        log "cannot exit sway: $SWAYMSG is missing"
+        exit 1
+    fi
+    exit "${1:-0}"
+}
+
+refresh_status
+if [ "$(field Session)" != RUNNING ]; then
+    log "no Waydroid session running, nothing to shut down"
+    finish 0
+fi
+
+# Never touch a session belonging to somebody else: the session service lives on
+# that user's bus, so it is both none of our business and out of reach. "Session
+# user:" reads as "name(uid)".
+owner=$(field 'Session user')
+owner=${owner%%(*}
+me=$(id -un)
+if [ "$owner" != "$me" ]; then
+    log "Waydroid session belongs to $owner, not $me; leaving it alone"
+    finish 0
+fi
+
+# Android may already be gone while the session record lives on: the user shut it
+# down from inside, or an earlier attempt succeeded. This image never sends the
+# hardware-binder shutdown request, so that state is normal here, not exceptional
+# (docs/25). Asking a container that is already STOPPED to shut down is not a
+# harmless no-op -- it arms the trigger described above against the *next* session.
+if container_stopped; then
+    log "Android is already stopped; nothing to shut down, releasing the session"
+    release_session
+    finish 0
+fi
+
+start_notice
+
+# A frozen container cannot run its own shutdown, and this host freezes it on
+# suspend (suspend_action = freeze). `waydroid app intent` would thaw it for us,
+# but `waydroid prop set` thaws it, sets the property, and then FREEZES IT AGAIN
+# if it found it frozen -- which would stall the very shutdown it just asked for.
+# So thaw once, up front, and leave it thawed.
+case "$(field Container)" in
+    FROZEN|FREEZING)
+        log "container is frozen, thawing it first"
+        "$BUSCTL" --system call id.waydro.Container /ContainerManager \
+            id.waydro.ContainerManager Unfreeze >/dev/null 2>&1 ||
+            log "unfreeze failed, trying anyway"
+        ;;
+esac
+
+# First choice: the framework path -- the same sequence `svc power shutdown` gets
+# as root. ShutdownActivity broadcasts ACTION_SHUTDOWN to apps, then shuts down
+# ActivityManager and PackageManager, which is the step that actually flushes
+# packages.xml and the settings providers, before handing over to init.
+#
+# The action name matters: on Android 10 and later it is the com.android.internal
+# one below. The older android.intent.action.ACTION_REQUEST_SHUTDOWN resolves to
+# nothing on this image ("No activity found") and would fail silently.
+log "asking Android to shut down (REQUEST_SHUTDOWN)"
+"$WAYDROID" app intent com.android.internal.intent.action.REQUEST_SHUTDOWN '' >/dev/null 2>&1 &
+trigger=$!
+
+if wait_stopped "$FRAMEWORK_WAIT"; then
+    log "Android shut down cleanly (framework)"
+    release_session
+    finish 0
+fi
+kill "$trigger" 2>/dev/null
+
+# Second choice: init's own shutdown. It SIGTERMs every service, sync()s and
+# unmounts. Less than the framework path, far more than SIGKILL -- and unlike the
+# framework path it needs nothing from the compositor, which is what makes it the
+# right fallback when this runs as the systemd-user backstop and sway has already
+# gone.
+log "no shutdown after ${FRAMEWORK_WAIT}s; falling back to init (sys.powerctl)"
+"$WAYDROID" prop set sys.powerctl shutdown >/dev/null 2>&1 &
+trigger=$!
+
+if wait_stopped "$INIT_WAIT"; then
+    log "Android shut down via init"
+    release_session
+    finish 0
+fi
+kill "$trigger" 2>/dev/null
+
+# Last resort. This is the hard kill -- lxc-stop -k, no ACTION_SHUTDOWN, the
+# behaviour we are trying to avoid -- but leaving the container running is worse:
+# once the compositor goes, its Wayland socket is unlinked, and the container has
+# that socket inode bind-mounted, so Android can never reconnect. It would sit
+# there crash-looping the composer until someone restarts the session.
+if [ "$keep_session" = 1 ]; then
+    log "Android is not shutting itself down; leaving the session to the caller"
+    finish 0
+fi
+
+log "Android is not shutting itself down; stopping the session"
+"$WAYDROID" session stop >/dev/null 2>&1 &
+wait_stopped "$STOP_WAIT" ||
+    log "session still up after $((FRAMEWORK_WAIT + INIT_WAIT + STOP_WAIT))s; giving up"
+
+finish 0
