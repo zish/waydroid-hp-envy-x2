@@ -75,6 +75,66 @@ resume throws `xhci_hcd ... xHC error in resume, Reinit` where s2idle resumes cl
 config file and run one command to finish it; docs/17 has both. **Bluetooth as a wake source** also
 looks achievable and untested — `1-4/power/wakeup` exists, so the hardware is capable.
 
+## Parked, and worth revisiting
+
+Side-quests from the 2026-09-06 sessions, none of them on the AGENTS.md goal list. Each is
+scoped and cheap to resume; none is blocking.
+
+### Bluetooth as a wake source — **deferred at the owner's request, 2026-09-06**
+
+The wish is to wake the laptop with the HP bluetooth keyboard. The hardware looks capable and
+nothing has been tried yet:
+
+```
+0000:00:14.0 (xHCI PCIe)  = enabled     <- already a wake source
+usb1         (root hub)   = disabled
+1-4          (bluetooth)  = disabled    <- Intel 8087:0a2a
+```
+
+`1-4/power/wakeup` **existing at all** is the signal — the kernel only creates that attribute for
+devices advertising USB remote wakeup. Two writes test it:
+
+```bash
+echo enabled | sudo tee /sys/bus/usb/devices/1-4/power/wakeup /sys/bus/usb/devices/usb1/power/wakeup
+```
+
+**Decide the conflict first, because it is a choice and not an addition.** An rfkill-blocked
+controller cannot wake anything, so bluetooth-as-wake-source and the "bluetooth off during sync
+windows" behaviour built into `waydroid-sync` are mutually exclusive. And enabling remote wake on
+a radio is a common source of spurious wakeups, so the standby figure in
+[docs/17](17-hybrid-sleep.md) would need re-measuring afterwards. Also note the controller is
+**USB**, and S3 resume throws `xhci_hcd ... xHC error in resume, Reinit` where s2idle does not —
+so this is probably an s2idle feature, which is a point for s2idle in the comparison below.
+
+### S3 versus s2idle standby power
+
+The substantive open measurement. Scoped, smoke-tested and deferred — one config file plus one
+command, both in [docs/17](17-hybrid-sleep.md). Genuinely undecided: the kernel's own default here
+was `deep` and the measured s2idle 0.6 W is high for standby, but S3 resume reinitialises the USB
+controller where s2idle resumes clean.
+
+### The `waydroid-sync` cycle has never actually run
+
+Both guards were exercised and correctly refused to act, which is the safe half. The half where it
+thaws Android, refreezes it and re-suspends the machine is **unproven**, which is why the timer is
+installed but disabled. Test it on battery, screen locked, with the machine genuinely asleep.
+
+### Power button long-press
+
+Configured as `poweroff`, **never tested**, and possibly unreachable — see
+[docs/15](15-power-button.md). [bin/powerbtn-probe.py](../bin/powerbtn-probe.py) settles the first
+of the two open questions; `HandlePowerKeyLongPress=lock` settles the second without risking a
+firmware power cut.
+
+### Display upside-down after a resume — unexplained
+
+Happened once, 2026-09-06, and corrected without intervention. sway reported `transform: normal`
+throughout and the kernel logged nothing about panel orientation. **A `transform 180` was tried
+and was wrong** — it put waybar at the bottom and inverted it, which is what 180 does to an
+already-correct display. If it recurs, capture `swaymsg -t get_outputs` *at that moment*; `grim`
+is useless here because it captures the compositor framebuffer, which looks correct whatever the
+panel is doing.
+
 ## The immediate next task
 
 **Goal 2's sensors are done** — the scoping that used to live here is superseded by

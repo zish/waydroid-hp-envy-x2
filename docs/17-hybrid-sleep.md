@@ -208,7 +208,7 @@ sudo install -m 0644 artifacts/power/20-s3-test.conf /etc/systemd/sleep.conf.d/
 self-corrects for an early wake by subtracting the awake seconds at 2.142 W and dividing by the
 time genuinely asleep. It re-suspends when done rather than leaving the machine awake.
 
-## Bluetooth as a wake source — plausible, untested
+## Bluetooth as a wake source — plausible, untested, **deferred by request 2026-09-06**
 
 The controller is `Intel 8087:0a2a` on USB `1-4`. The wake chain is half-armed:
 
