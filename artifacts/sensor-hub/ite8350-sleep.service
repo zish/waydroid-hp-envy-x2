@@ -1,0 +1,35 @@
+[Unit]
+Description=Arm the ITE8350 sensor-hub resume check
+Documentation=file:///usr/share/doc/waydroid-bigtab01/docs/19-sensor-hub-suspend-wedge.md
+
+# WHY THIS IS A UNIT AND NOT /etc/systemd/system-sleep/ite8350
+#
+# It was that hook, from 2026-09-06 until 2026-09-07, and it never ran once.
+# systemd 259 scans only /usr/lib/systemd/system-sleep, which is empty and
+# read-only on this rpm-ostree host. Measured: the previous boot had NINE
+# suspends and this hook fired on none of them -- its only journal appearances
+# are from the manual test one second after it was installed. So the safety net
+# docs/19 describes has never actually been deployed. See docs/27.
+#
+# systemd-suspend.service is Requires=sleep.target + After=sleep.target, so
+# Before=sleep.target puts this unit's stop -- which is what runs on resume --
+# in the right place, after the thaw.
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+
+# Nothing to do on the way down; the whole point is the leg on the way back.
+ExecStart=/bin/true
+
+# RemainAfterExit keeps the unit active across the suspend so that LEAVING
+# sleep.target is what triggers ExecStop.
+RemainAfterExit=yes
+
+# --no-block preserves the original hook's behaviour exactly: the check is
+# detached, so an 11 s probe never delays a resume by even a millisecond.
+ExecStop=/usr/bin/systemctl start --no-block ite8350-resume-check.service
+
+[Install]
+WantedBy=sleep.target

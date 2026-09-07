@@ -1,0 +1,18 @@
+[Unit]
+Description=Check the ITE8350 sensor hub survived resume
+Documentation=file:///usr/share/doc/waydroid-bigtab01/docs/19-sensor-hub-suspend-wedge.md
+
+# Started with --no-block by ite8350-sleep.service on every resume, so nothing
+# waits on it. Also runnable on demand: `systemctl start ite8350-resume-check`.
+[Service]
+Type=oneshot
+
+# The script sleeps 8 s before it even looks, deliberately -- a single suspend
+# usually recovers unaided and -121 on resume is common and self-healing, so
+# acting sooner would reprobe the hub on every wake for no reason. With the
+# check itself that comes to roughly 11 s, which is why this must never be
+# something a resume waits for.
+ExecStart=@BINDIR@/ite8350-resume-check
+
+# The reprobe path is bounded; anything longer than this is a wedge of its own.
+TimeoutStartSec=120

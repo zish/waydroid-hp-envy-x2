@@ -1,0 +1,31 @@
+[Unit]
+Description=Waydroid periodic-sync sleep and resume legs
+Documentation=file:///usr/share/doc/waydroid-bigtab01/docs/17-hybrid-sleep.md
+
+# Replaces /etc/systemd/system-sleep/50-waydroid-sync, which never ran: systemd
+# 259 scans only /usr/lib/systemd/system-sleep, empty and read-only on this
+# rpm-ostree host. /run/waydroid-sync.cycle had never once existed. See docs/27.
+#
+# systemd-suspend.service is Requires=sleep.target + After=sleep.target, so
+# Before=sleep.target puts ExecStart ahead of the suspend and ExecStop after the
+# resume -- the same two points the hook's pre and post legs would have had.
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+
+# Keeps the unit active across the suspend, so that leaving sleep.target is what
+# runs the post leg.
+RemainAfterExit=yes
+
+ExecStart=@BINDIR@/waydroid-sync-sleep pre
+ExecStop=@BINDIR@/waydroid-sync-sleep post
+
+# Both legs are a file touch and a systemd-run that returns immediately; neither
+# may ever hold a suspend or a resume.
+TimeoutStartSec=15
+TimeoutStopSec=15
+
+[Install]
+WantedBy=sleep.target

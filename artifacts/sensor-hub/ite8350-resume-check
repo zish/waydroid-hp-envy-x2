@@ -1,7 +1,12 @@
 #!/bin/bash
 # Revive the ITE8350 HID sensor hub if it failed to come back from suspend.
-# Installed at /usr/local/bin/ite8350-resume-check, launched by the
-# systemd-sleep hook in this directory. See docs/19-sensor-hub-suspend-wedge.md.
+# Installed at @BINDIR@/ite8350-resume-check and run by
+# ite8350-resume-check.service, which ite8350-sleep.service starts --no-block on
+# every resume. See docs/19-sensor-hub-suspend-wedge.md.
+#
+# It used to be launched by a /etc/systemd/system-sleep/ hook, which never once
+# ran: systemd 259 scans only /usr/lib/systemd/system-sleep, empty and read-only
+# on this host. Nine suspends in one boot, zero runs. See docs/27.
 #
 # The failure this exists for: after s2idle, accel_3d, dev_rotation and
 # incli_3d can stop publishing while gyro_3d and magn_3d keep going, and the

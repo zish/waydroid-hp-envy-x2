@@ -1,0 +1,32 @@
+#!/bin/sh
+# waydroid-sync-sleep -- the sleep/resume legs of the periodic sync feature.
+#
+# Installed at @BINDIR@/waydroid-sync-sleep and driven by
+# waydroid-sync-sleep.service as `pre` before sleep.target and `post` after.
+#
+# Marks the machine as being in a suspended cycle, and arms a deferred bluetooth
+# restore on every resume. waydroid-sync cancels that restore when the wake
+# belongs to a periodic sync window, so it only fires on a resume the user asked
+# for. See docs/17-hybrid-sleep.md.
+#
+# This was /etc/systemd/system-sleep/50-waydroid-sync until 2026-09-07, and in
+# that form it never ran: systemd 259 scans only /usr/lib/systemd/system-sleep,
+# which is empty and read-only here. /run/waydroid-sync.cycle had never once
+# existed. The logic below is unchanged -- only what invokes it. See docs/27.
+set -eu
+CYCLE=/run/waydroid-sync.cycle
+BT_RESTORE=waydroid-bt-restore
+
+case "${1:-}" in
+    pre)
+        : > "$CYCLE"
+        ;;
+    post)
+        systemd-run --unit="$BT_RESTORE" --on-active=15s \
+            @BINDIR@/waydroid-bt-restore >/dev/null 2>&1 || true
+        ;;
+    *)
+        echo "usage: waydroid-sync-sleep pre|post" >&2
+        exit 2
+        ;;
+esac

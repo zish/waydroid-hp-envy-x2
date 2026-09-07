@@ -95,6 +95,12 @@ usb1         (root hub)   = disabled
 1-4          (bluetooth)  = disabled    <- Intel 8087:0a2a
 ```
 
+Corroborated 2026-09-07 by watching a real suspend rather than reading sysfs: `bluetoothd:
+Controller resume with wake event 0x0`, and the keyboard's HID device is **destroyed and recreated**
+across the cycle (`input: HP Wireless … Keyboard as …/input34`, new input numbers). So today the
+keyboard is fully down in s2idle and costs nothing — which is also why it cannot wake the machine.
+See [27](27-android-power-button.md).
+
 `1-4/power/wakeup` **existing at all** is the signal — the kernel only creates that attribute for
 devices advertising USB remote wakeup. Two writes test it:
 
@@ -206,13 +212,19 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | Item | State |
 |---|---|
 | **`/usr/local/bin/waydroid-sync`**, **`waydroid-bt-restore`** | periodic sync-window scripts, mode `0755`. See [17](17-hybrid-sleep.md). Delete to revert |
-| **`/etc/systemd/system-sleep/50-waydroid-sync`** | writes the cycle marker, arms the deferred bluetooth restore, mode `0755` |
+| `/etc/systemd/system-sleep/50-waydroid-sync` | **REMOVED 2026-09-07** — it had never run. systemd 259 scans only `/usr/lib/systemd/system-sleep`, empty and read-only here; measured, 9 suspends in one boot and 0 hook runs, and `/run/waydroid-sync.cycle` had never existed. Replaced by `waydroid-sync-sleep.service` below. `/etc/systemd/system-sleep/` is now **empty and must stay that way** — anything put there is silently dead. See [27](27-android-power-button.md) |
 | **`/etc/systemd/system/waydroid-sync.{timer,service}`** | installed but the timer is **DISABLED**. Its guards were verified to refuse action, but the path where it *acts* has never run. Enable with `sudo systemctl enable --now waydroid-sync.timer` once tested |
 | `/etc/systemd/sleep.conf.d/20-s3-test.conf` | **not installed** — the S3 comparison was cancelled and the file removed, so the host is back on validated s2idle. Source in [artifacts/power/](../artifacts/power/) |
 | `/var/tmp/power-*.sh`, `/var/tmp/power-measure.log` | measurement harness and the raw session log. `/var/tmp` survives reboots; safe to delete |
 | sway output `eDP-1` transform | **back at `normal`, as found.** After a resume the display was reported upside-down; a `transform 180` was tried and was **wrong** — it put waybar at the bottom and inverted it, which is what 180 does to an already-correct display. Reverted. Cause never established, and sway reported `normal` throughout. Note `grim` cannot diagnose this: it captures the compositor framebuffer, so it looks correct whatever the panel is doing |
 | **`/etc/systemd/logind.conf.d/10-power-button.conf`** | **power button: short press suspends, long press powers off**, mode `0644`. Was previously unconfigured, i.e. a short press powered the machine off. Delete to revert. See [15](15-power-button.md) |
 | **`/etc/systemd/sleep.conf.d/10-s2idle.conf`** | `MemorySleepMode=s2idle`, mode `0644` — pins suspend to s2idle instead of the `deep` default. Delete to revert |
+| **`/usr/local/bin/waydroid-android-key`** | **injects a key into Android from the host**, mode `0755`. Writes an `input_event` into the guest's `/dev/input/wl_keyboard_events` FIFO, reached via `/proc/<container pid>/root`. See [27](27-android-power-button.md) |
+| **`/usr/local/bin/waydroid-android-lock`** | the `pre`/`post` policy: sleep + arm the keyguard, then wake. Drive **this**, not the unit, to test by hand, mode `0755` |
+| **`/etc/systemd/system/waydroid-android-lock.service`** | **enabled** via a `sleep.target.wants/` symlink. `Before=sleep.target` so the pre leg runs ahead of the `user.slice` freeze. Delete both to revert. **Not** a `system-sleep` hook, and [27](27-android-power-button.md) explains at length why it cannot be. Note the unit is in `/etc`, **not** under `/usr/local`: `/usr/local` is `/var/usrlocal`, which SELinux labels `lib_t`, and `init_t` may not *start* a `lib_t` service — measured, it fails with `avc: denied { start } … tclass=service` |
+| **`/usr/local/bin/ite8350-resume-check`** + **`/etc/systemd/system/ite8350-{sleep,resume-check}.service`** | **docs/19's sensor-hub safety net, finally actually running.** Was a `/etc/systemd/system-sleep/` hook that had never fired once; converted to units 2026-09-07 and it caught a real stale accelerometer on its first working resume. See [19](19-sensor-hub-suspend-wedge.md), [27](27-android-power-button.md) |
+| **`/usr/local/bin/waydroid-sync-sleep`** + **`/etc/systemd/system/waydroid-sync-sleep.service`** | the sync feature's sleep/resume legs, converted from the dead `50-waydroid-sync` hook. Runs now (`/run/waydroid-sync.cycle` finally exists), but the feature as a whole stays dormant while `waydroid-sync.timer` is disabled |
+| Android keyguard | **enabled 2026-09-07** — `locksettings set-disabled false` and `lock_screen_lock_after_timeout=0`. No credential set by us; the owner sets a PIN in Settings. Lost credential: stop the session and delete `~/.local/share/waydroid/data/system/locksettings.db` (host-visible, no root) |
 | **`/usr/local/bin/waydroid-shutdown-android`**, **`waydroid-shutdown-inhibitor`** | **graceful Android shutdown when the host goes down**, mode `0755`. See [23](23-graceful-shutdown.md) |
 | **`/etc/systemd/system/waydroid-shutdown-inhibitor.service`** | **enabled**. Holds a logind `shutdown`/`delay` lock and runs the shutdown on `PrepareForShutdown`. `systemctl disable --now` to revert |
 | **`waydroid-container.service.d/graceful-shutdown.conf`** | `ExecStop=` + `TimeoutStopSec=60`, mode `0644`. Delete to revert |

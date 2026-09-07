@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""waydroid-android-key -- deliver a key to Android from the host.
+
+Installed at @BINDIR@/waydroid-android-key. Run as root, on the host.
+
+    waydroid-android-key sleep    # Android's display off, keyguard arms
+    waydroid-android-key wakeup   # display on, keyguard shown
+    waydroid-android-key 116      # any raw evdev code
+
+WHY THIS EXISTS AT ALL
+
+The container gets no /dev/input and no /dev/uinput -- check config_nodes, there
+is nothing of the kind in it. All Android input arrives over the Wayland socket:
+the guest hwcomposer mkfifo()s three pipes and a patched InputFlinger reads them
+as ordinary input devices. From `dumpsys input`, verified on this host:
+
+    2: wayland_keyboard
+      Classes: KEYBOARD | ALPHAKEY | DPAD
+      Path: /dev/input/wl_keyboard_events
+      KeyLayoutFile: /system/usr/keylayout/Generic.kl
+
+That pipe is the injection point. Generic.kl carries `key 116 POWER`,
+`key 142 SLEEP` and `key 143 WAKEUP`, so a write here is indistinguishable from
+a real button as far as Android is concerned.
+
+The host cannot simply open the path: the container's /dev is a tmpfs in its own
+mount namespace. It is reachable as /proc/<any container pid>/root/dev/..., and
+that traversal needs root -- even though the FIFO itself is prwxrwxrwx and owned
+by uid 1000, which the host shares with the container.
+
+WHY SLEEP/WAKEUP AND NOT POWER
+
+Upstream's own doze work (android_hardware_waydroid, dev/lineage-23.2) injects
+this same pair through this same pipe, and states the reason: KEY_POWER is a
+toggle, so a lost or duplicated injection inverts the state and leaves the screen
+off with no way back. KEY_SLEEP and KEY_WAKEUP are absolute, so they are safe to
+send twice, and safe to send when Android is already in the target state. Every
+retry in this tool and in the sleep hook depends on that property.
+
+Note the guest drops KEY_POWER arriving over *Wayland* -- keyboard_handle_key()
+returns early on it, on every upstream branch. That filter is on the compositor
+path and does not apply to writes made here, so `waydroid-android-key power`
+does work. It is offered for completeness and should not be used in automation.
+
+THE FORMAT
+
+send_key_event() in wayland-hwc.cpp writes ONE bare struct input_event per
+transition -- no SYN_REPORT, unlike a real evdev device -- with a CLOCK_MONOTONIC
+timestamp. This matches that exactly. Writes are 24 bytes, well under PIPE_BUF,
+so they are atomic and cannot interleave with the hwcomposer's own.
+
+See docs/27.
+"""
+
+import os
+import struct
+import sys
+import time
+
+# struct input_event on 64-bit: struct timeval {long, long}, __u16, __u16, __s32
+EV_FMT = "llHHi"
+EV_KEY = 0x01
+assert struct.calcsize(EV_FMT) == 24
+
+PIPE = "dev/input/wl_keyboard_events"
+
+# Named for the two that are safe to automate; anything else takes a raw code.
+KEYS = {"sleep": 142, "wakeup": 143, "power": 116}
+
+# Any process inside the container will do -- all that is wanted is its mount
+# namespace. surfaceflinger first: it is up before Android can show anything at
+# all, and it is gone the moment the container is, so it never points at a stale
+# namespace. system_server covers the sliver of early boot before it starts.
+ANCHORS = ("surfaceflinger", "system_server", "zygote64", "init")
+
+
+def find_pipe():
+    """Return the host-visible path of the guest's keyboard FIFO, or None."""
+    for name in ANCHORS:
+        for pid in pids_named(name):
+            path = "/proc/{}/root/{}".format(pid, PIPE)
+            try:
+                if os.path.exists(path):
+                    return path
+            except OSError:
+                continue  # namespace vanished mid-scan; try the next one
+    return None
+
+
+def pids_named(comm):
+    """Every pid whose comm is exactly `comm`. /proc walk, so no pgrep needed."""
+    found = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open("/proc/{}/comm".format(entry)) as fh:
+                if fh.read().strip() == comm:
+                    found.append(entry)
+        except OSError:
+            continue
+    return found
+
+
+def send(path, code):
+    """Write the down/up pair. Raises OSError if the pipe will not take them."""
+    fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+    try:
+        now = time.clock_gettime(time.CLOCK_MONOTONIC)
+        sec, usec = int(now), int((now % 1) * 1e6)
+        for value in (1, 0):
+            os.write(fd, struct.pack(EV_FMT, sec, usec, EV_KEY, code, value))
+    finally:
+        os.close(fd)
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit("usage: waydroid-android-key sleep|wakeup|power|<evdev code>")
+
+    arg = sys.argv[1]
+    if arg in KEYS:
+        code = KEYS[arg]
+    elif arg.isdigit():
+        code = int(arg)
+    else:
+        sys.exit("unknown key: {} (try sleep, wakeup, power or a number)".format(arg))
+
+    path = find_pipe()
+    if path is None:
+        # Not an error: no container, or one too early in boot to have the pipe.
+        # Callers in the suspend path must be able to treat this as "nothing to
+        # do" without failing, so say so on stdout and exit 0.
+        print("waydroid-android-key: no running container, nothing to do")
+        return 0
+
+    try:
+        send(path, code)
+    except PermissionError:
+        sys.exit("waydroid-android-key: need root to reach {}".format(path))
+    except OSError as exc:
+        # ENXIO means the FIFO has no reader: InputFlinger has not opened it yet,
+        # or Android is on its way down. Neither is worth failing a suspend over.
+        print("waydroid-android-key: cannot write {}: {}".format(path, exc))
+        return 0
+
+    print("waydroid-android-key: sent {} ({}) via {}".format(arg, code, path))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

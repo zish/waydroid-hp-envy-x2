@@ -1,0 +1,34 @@
+[Unit]
+Description=Lock Android before suspend, wake it after resume
+Documentation=file:///usr/share/doc/waydroid-android-power/docs/27-android-power-button.md
+
+# systemd-suspend.service is Requires=sleep.target + After=sleep.target, so anything
+# ordered Before=sleep.target runs before the suspend proper -- and, importantly,
+# before systemd-suspend.service freezes user.slice. Android lives in user.slice, so
+# that ordering is what makes the pre leg able to reach it at all. A system-sleep
+# hook cannot: it runs inside systemd-suspend.service, after the freeze. See docs/27.
+Before=sleep.target
+
+# Ends the unit once sleep.target is no longer active, i.e. after resume, which is
+# what runs ExecStop. Without it the unit would stay active and the wake never fire.
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+
+# The unit has to stay "active" across the suspend so that leaving sleep.target is
+# what triggers ExecStop. Without RemainAfterExit the oneshot would go inactive as
+# soon as ExecStart returned, and there would be no stop to hang the wakeup on.
+RemainAfterExit=yes
+
+ExecStart=@BINDIR@/waydroid-android-lock pre
+ExecStop=@BINDIR@/waydroid-android-lock post
+
+# Neither leg may delay a suspend or a resume for long. The pre leg sleeps ~1 s by
+# design and the post leg ~2 s across its retries; ten seconds is a wide margin that
+# still guarantees a wedged call cannot hold the machine.
+TimeoutStartSec=10
+TimeoutStopSec=10
+
+[Install]
+WantedBy=sleep.target

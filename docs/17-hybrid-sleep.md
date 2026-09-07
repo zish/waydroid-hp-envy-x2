@@ -58,7 +58,7 @@ stopping Android from *asking* to suspend (a held wakelock), not changing this s
 |---|---|
 | `/usr/local/bin/waydroid-sync` | one sync window: thaw Android, wait, refreeze, re-suspend |
 | `/usr/local/bin/waydroid-bt-restore` | ends the cycle and restores bluetooth |
-| `/etc/systemd/system-sleep/50-waydroid-sync` | writes the cycle marker; arms the deferred bluetooth restore |
+| `/usr/local/bin/waydroid-sync-sleep` + `/etc/systemd/system/waydroid-sync-sleep.service` | writes the cycle marker; arms the deferred bluetooth restore. **Was `/etc/systemd/system-sleep/50-waydroid-sync` until 2026-09-07, and in that form it never ran** — systemd 259 scans only `/usr/lib/systemd/system-sleep`, empty and read-only here, so `/run/waydroid-sync.cycle` had never once existed. The logic is unchanged; only what invokes it. See [27](27-android-power-button.md) |
 | `/etc/systemd/system/waydroid-sync.{timer,service}` | fires `OnCalendar=*:0/15` with `WakeSystem=true` |
 
 Sources kept in [artifacts/power/](../artifacts/power/).

@@ -1,0 +1,124 @@
+#!/bin/sh
+# waydroid-android-lock -- put Android to sleep with the host, and wake it back.
+#
+# Installed at @BINDIR@/waydroid-android-lock and driven by
+# waydroid-android-lock.service, which calls it as
+#
+#     ExecStart=@BINDIR@/waydroid-android-lock pre     (before sleep.target)
+#     ExecStop=@BINDIR@/waydroid-android-lock post     (after resume)
+#
+# Safe to run by hand with the same two arguments; that is how it was tested.
+#
+# WHAT IT IS FOR
+#
+# The power button and the lid already suspend this host correctly (docs/15,
+# confirmed inside a cage session in docs/25). Both go through logind, which never
+# tells Android anything -- so the machine sleeps with Android still Awake, and
+# resumes straight back into an unlocked Android. On a kiosk whose only session is
+# Android, there is no host lock screen behind it either. This is what turns the
+# existing button into a tablet's button: press it, Android's keyguard arms and the
+# machine suspends; press it again, the machine resumes with the keyguard already up.
+#
+# It is also the fix for a hang that exists without it. When Android's display group
+# powers off, InputReader disables the touchscreen outright:
+#
+#     InputReader: Disabling wayland_touch (device 4) because the associated
+#                  viewport is not active
+#
+# and ordinary keys do not wake it (measured: KEY_SPACE injected while asleep left
+# it Asleep for 13 s; KEY_WAKEUP woke it in under 4 s). The one key that would wake
+# it, KEY_POWER, is dropped by the guest hwcomposer before Android sees it. So a
+# sleeping Android under cage has no in-band way back, and its own 60 s screen
+# timeout is enough to get there. The post leg injects a wakeup unconditionally,
+# which makes any suspend/resume cycle a recovery from that state.
+#
+# WHY THIS IS A UNIT AND NOT A system-sleep HOOK
+#
+# The obvious home for this is /etc/systemd/system-sleep/, and that was the first
+# attempt. It never ran once. Two independent reasons, both measured on this host:
+#
+#  1. systemd 259 does not look in /etc. The only hook directory compiled into the
+#     binary is /usr/lib/systemd/system-sleep:
+#
+#         $ grep -rhoa "[a-z/]*systemd/system-sleep" /usr/lib/systemd/
+#         /usr/lib/systemd/system-sleep
+#
+#     which is empty here and read-only, this being an rpm-ostree host. The
+#     evidence is not just the strings: the previous boot had NINE suspends and the
+#     two hooks already installed in /etc fired on none of them. See docs/27 --
+#     docs/19 and docs/23 both rely on hooks that have never run.
+#
+#  2. Even where it is scanned, a hook could not do this job. From systemd-sleep(8):
+#     "user.slice will be frozen while the executables are running ... this prevents
+#     the hooks ... from communicating with any user session process during sleep."
+#     Android is in user.slice. A KEY_SLEEP written to the pipe by a hook would sit
+#     there unread until the thaw, and be acted on after resume rather than before
+#     suspend -- the exact opposite of what is wanted.
+#
+# A unit ordered Before=sleep.target runs before systemd-suspend.service, and so
+# before the freeze, because that service is After=sleep.target. See the unit file.
+#
+# WHY IT CHECKS FOR A FROZEN CONTAINER
+#
+# Waydroid freezes the container in some conditions (suspend_action = freeze in
+# waydroid.cfg; IHardware transaction 3). A frozen container is not reading its
+# input pipe, so an injected event would sit in the FIFO and be delivered whenever
+# something thaws it -- putting Android to sleep at an arbitrary later moment. It is
+# also deliberate: it means nothing wants Android running right now. So both legs
+# no-op unless the container is RUNNING.
+#
+# Display sleep by itself does NOT cause a freeze here -- measured, the container
+# stayed RUNNING across every cycle and waydroid.log recorded no transaction 3. The
+# check is for freezes that arrive from elsewhere.
+#
+# See docs/27.
+set -u
+
+KEY=@BINDIR@/waydroid-android-key
+BUSCTL=/usr/bin/busctl
+
+# Measured on this host: goToSleep at .461, power group asleep at .976 -- 515 ms.
+# One second is that, doubled. The wait matters: without it the host can suspend
+# mid-transition, and the wakeup on the far side may then race the sleep that never
+# finished, leaving a black screen with no way back.
+KEYGUARD_WAIT=${WAYDROID_LOCK_WAIT:-1}
+
+# KEY_WAKEUP is absolute rather than a toggle, so sending it twice is harmless and
+# a lost first one is not. Cheap insurance on a path whose failure mode is a kiosk
+# nobody can wake.
+WAKE_TRIES=${WAYDROID_LOCK_WAKE_TRIES:-2}
+WAKE_RETRY_WAIT=${WAYDROID_LOCK_WAKE_RETRY_WAIT:-2}
+
+container_state() {
+    # 9 ms against 220 ms for `waydroid status`, which starts a Python interpreter
+    # to make this same call (docs/25). Prints nothing if the service is absent.
+    "$BUSCTL" --system call id.waydro.Container /ContainerManager \
+        id.waydro.ContainerManager GetSession 2>/dev/null |
+        tr ' ' '\n' | grep -A1 -m1 '"state"' | tail -1 | tr -d '"'
+}
+
+case "${1:-}" in
+    pre|post) ;;
+    *) echo "usage: waydroid-android-lock pre|post" >&2; exit 2 ;;
+esac
+
+state=$(container_state)
+if [ "$state" != "RUNNING" ]; then
+    echo "waydroid-android-lock: container is '${state:-absent}', nothing to do"
+    exit 0
+fi
+
+if [ "$1" = "pre" ]; then
+    "$KEY" sleep || :
+    sleep "$KEYGUARD_WAIT"
+else
+    n=0
+    while [ "$n" -lt "$WAKE_TRIES" ]; do
+        [ "$n" -gt 0 ] && sleep "$WAKE_RETRY_WAIT"
+        "$KEY" wakeup || :
+        n=$((n + 1))
+    done
+fi
+
+# A failure here must never be able to block a suspend or a resume.
+exit 0

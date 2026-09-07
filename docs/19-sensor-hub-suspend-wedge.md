@@ -122,13 +122,38 @@ Two files, both in [artifacts/sensor-hub/](../artifacts/sensor-hub):
 - **`/usr/local/bin/ite8350-resume-check`** — waits 8 s for the hub to recover unaided, tests the
   accelerometer for staleness over 3 s, and reprobes only if it is stuck. Logs to the journal
   under tag `ite8350-resume`.
-- **`/etc/systemd/system-sleep/ite8350`** — fires on `post`, and hands the work to a transient unit
-  with `systemd-run --no-block`. systemd *waits* for system-sleep scripts, and the check takes
-  about 11 s, so doing it inline would add that to every resume. This way resume is not delayed at
-  all.
+- **`/etc/systemd/system/ite8350-sleep.service`** — ordered `Before=sleep.target`, so its `ExecStop`
+  runs on resume, where it starts the check with `--no-block`. The check takes about 11 s, so
+  running it inline would add that to every resume; this way resume is not delayed at all.
+- **`/etc/systemd/system/ite8350-resume-check.service`** — wraps the script, and can be run on
+  demand: `systemctl start ite8350-resume-check`.
 
-`/usr` is read-only on this rpm-ostree host, so the hook lives in `/etc/systemd/system-sleep`,
-which systemd searches alongside `/usr/lib/systemd/system-sleep`. No layering, no reboot.
+> ### Correction, 2026-09-07: this was a `system-sleep` hook, and it never ran
+>
+> Until 2026-09-07 the second file was **`/etc/systemd/system-sleep/ite8350`**, on the stated
+> assumption that "`/usr` is read-only on this rpm-ostree host, so the hook lives in `/etc/systemd/
+> system-sleep`, which systemd searches alongside `/usr/lib/systemd/system-sleep`."
+>
+> **That assumption is false on this host.** systemd 259 has only one hook directory compiled in,
+> `/usr/lib/systemd/system-sleep`, which is empty here and read-only. Measured: the previous boot
+> had **nine suspends and zero hook runs**. Every journal appearance of `ite8350-resume-check` came
+> from the manual test one second after the script was installed. So the safety net described in
+> this note was never actually deployed — for its entire first day.
+>
+> Converted to the two units above and verified on a real suspend, where it immediately earned its
+> keep: `accelerometer stale after resume -- reprobing i2c-ITE8350:00`, then `accelerometer
+> recovered at /sys/bus/iio/devices/iio:device0`. **The wedge is real and it fired on the first
+> cycle the check was alive for.** It also retroactively explains the loose end in
+> [25](25-waydroid-in-cage.md), where the accelerometer returned bit-identical values after a
+> suspend and was charitably read as a filtered sensor sitting still.
+>
+> Note the units are in `/etc/systemd/system`, not under `/usr/local`: `/usr/local` is
+> `/var/usrlocal`, which SELinux labels `lib_t`, and `init_t` may not *start* a service whose unit
+> file is `lib_t` — the first attempt failed exactly that way. Full account in
+> [27](27-android-power-button.md).
+
+Installed by [artifacts/sensor-hub/install.sh](../artifacts/sensor-hub/install.sh), which also
+removes the dead hook if it finds one. No layering, no reboot.
 
 For manual use there is [`bin/sensor-hub-reset.sh`](../bin/sensor-hub-reset.sh): `--check` reports
 staleness and changes nothing, bare reprobes, `--restart` also restarts the container and session
