@@ -110,12 +110,32 @@ keycode differs:
 
 **3. The one key that would wake it is filtered**, per the hwcomposer code above.
 
-Put together: **a sleeping Android under cage cannot be woken from inside the session.** Android's
-screen timeout here is `mScreenOffTimeoutSetting=60000` with `Wake Locks: size=0`, so a cage session
-that idles for a minute goes black and stays black until someone reaches the host over SSH. That is
-a worse failure than the freeze gap [25](25-waydroid-in-cage.md) records, because it needs no freeze
-— just inactivity. The unit below fixes it as a side effect: every resume injects a wakeup, so any
-suspend/resume cycle is a recovery.
+Put together: **a sleeping Android under cage cannot be woken from inside the session.** Whatever
+puts it to sleep, the way back is host-side. The unit below fixes that as a side effect: every
+resume injects a wakeup, so any suspend/resume cycle is a recovery.
+
+### How easily it is reached: less easily than first claimed
+
+The obvious trigger is Android's own screen timeout, which read `mScreenOffTimeoutSetting=60000`.
+This note originally called that a live hazard — "a cage session that idles for a minute goes black"
+— on the strength of the setting alone. **Tested directly, it does not happen.** With the timeout
+lowered to **15 s** and the machine left strictly idle for 50 s, Android stayed `Awake`, and the
+reason was visible in `dumpsys power`:
+
+```
+Wake Locks: size=1
+  SCREEN_BRIGHT_WAKE_LOCK 'UndimDetectorWakeLock' ON_AFTER_RELEASE ACQ=-40s305ms (uid=1000 pid=310)
+```
+
+`system_server`'s undim detector takes a screen-bright wake lock at about the moment the screen
+would dim, and holds it. That matches every earlier observation too — hours of cage session at a
+60 s timeout, never once asleep unprompted. `stay_on_while_plugged_in` is `0`, so that is not the
+cause.
+
+So the trap is **real in mechanism and unproven in trigger**: nothing observed here has put Android
+to sleep except a deliberate injection. It is not safe to conclude the timeout can never fire —
+one wake lock held in one state is not a guarantee across all of them — but the risk is much
+smaller than first written, and the recovery is proven either way (below).
 
 ## What does *not* happen: display sleep does not freeze the container
 
@@ -436,10 +456,31 @@ checked by diffing the two lists rather than by reading. The `License:` tag is a
   nothing checks that Android actually reached `Asleep` before the suspend proceeds. A cheap
   host-side readback does not exist; `waydroid shell` costs ~2 s and would be worse than the margin
   it buys.
-- **Android's own 60 s screen timeout is still live.** The unit recovers from it on the next
-  suspend/resume, but between times a kiosk left idle still goes black with no in-band way back.
-  The proper fix is either a wake lock while the kiosk session runs, or `persist.waydroid.suspend`
-  — both untested.
+- **The screen timeout was raised to 30 minutes** (`settings put system screen_off_timeout
+  1800000`, was 60 s) as belt and braces. It is no longer load-bearing, given the timeout has never
+  been observed to fire, and it is worth knowing what it does *not* buy: Android's screen-off saves
+  no display power here at all — the panel stays lit at full backlight — so the timeout's only real
+  benefit is idle guest CPU. 30 minutes keeps that and puts the black-screen state far out of
+  normal reach. Note this is an Android-wide setting, so it applies to windowed sway sessions too.
+
+### Recovering a black screen, verified
+
+If Android is ever asleep with the host awake, **tapping the power button twice — suspend, then
+resume — brings it back**, and lands on the lock screen. Tested by simulating the blackout and
+then suspending:
+
+```
+18:43:43  (injected sleep; Android Asleep, host awake, panel still lit at 937)
+18:43:56  waydroid-android-lock: sent sleep (142)     <-- to an ALREADY-asleep Android
+18:44:27  sent wakeup (143)
+18:44:29  sent wakeup (143)
+          -> mWakefulness=Awake, keyguard showing=true
+```
+
+The middle line is the whole reason `KEY_SLEEP` was chosen over `KEY_POWER`. Sleeping an
+already-asleep Android is a no-op, so the first tap does no harm. `KEY_POWER` would have toggled it
+awake and the resume's wakeup would have been the second toggle — black again, and the recovery
+would have made things worse rather than better.
 - **The wedge may not be intermittent at all.** The ITE8350 check has now caught a stale
   accelerometer on **both** resumes it has been alive for — 17:49 and 18:32 — where
   [19](19-sensor-hub-suspend-wedge.md) describes the fault as occasional. Two samples is not a
