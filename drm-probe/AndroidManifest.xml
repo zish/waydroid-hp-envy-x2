@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DRM Probe - dumps every MediaDrm property, for every registered crypto scheme,
+  so "what does a DRM client actually see on this device?" is answerable from
+  data. Written to settle why Netflix self-terminates (docs/21).
+
+  Same house style as sensor-app and quat-monitor: depends on NOTHING but the
+  platform. No AndroidX, no Compose, no coroutines, no Gradle. See build.sh.
+
+  No permissions are declared. Every call this makes is available to an ordinary
+  app, which is the point: it sees exactly what Netflix sees, with exactly
+  Netflix's privileges.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="lan.syshlt.drmprobe"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:launchMode="singleTop"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -137,7 +137,9 @@ and the reasoning behind each change.
   installed and layering a package on an Atomic host costs a reboot, plus the sensor tools
   (`iio-probe.py`, `hid-decode.py`, `sensors-test.sh`, `sensor-hub-reset.sh`) and
   `powerbtn-probe.py`, which measures
-  whether the power button reports a *held* press at all
+  whether the power button reports a *held* press at all, and `netflix-trace.sh`, which straces a
+  container app **from the host** — the trick that settled the Netflix question when every
+  in-container avenue had run out
 - `sensors/` — source for `waydroid-sensord`, the host-side sensors daemon (goal 2). Build with
   `sensors/build.sh`; see the header comment for why it is a host daemon and not a guest HAL
 - `sensor-app/` — "Sensor Info", a dependency-free Kotlin app that displays every sensor live,
@@ -152,6 +154,13 @@ and the reasoning behind each change.
   no-Gradle build as `sensor-app/`; `--install` deploys and grants, `--pull` retrieves the CSVs.
   See [docs/20-quat-monitor.md](docs/20-quat-monitor.md), and read its "interpretation traps"
   before drawing conclusions from the data
+- `drm-probe/` — "DRM Probe", a dependency-free Kotlin app that dumps every `MediaDrm` property
+  for every registered crypto scheme, plus session and decoder capability. Written to settle what
+  a DRM client actually sees here instead of inferring it from Netflix's silence; it declares **no
+  permissions on purpose**, so it sees what an ordinary app sees. Same no-Gradle build as
+  `sensor-app/`; `drm-probe/build.sh --install` deploys, runs and prints the report. See
+  [docs/21-netflix-widevine.md](docs/21-netflix-widevine.md) for the Widevine fix and
+  [docs/22-netflix-container-detection.md](docs/22-netflix-container-detection.md) for why Netflix still refuses to run
 - `artifacts/` — configs pulled from or staged for the host, with originals kept alongside
 
 Record what was *ruled out* and why, not just what worked. Distinguish clearly between what has

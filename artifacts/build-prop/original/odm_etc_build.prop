@@ -1,0 +1,29 @@
+####################################
+# from generate-common-build-props
+# These properties identify this partition image.
+####################################
+ro.product.odm.brand=waydroid
+ro.product.odm.device=waydroid_x86_64
+ro.product.odm.manufacturer=Waydroid
+ro.product.odm.model=WayDroid x86_64 Device
+ro.product.odm.name=lineage_waydroid_x86_64
+ro.odm.product.cpu.abilist=x86_64,x86
+ro.odm.product.cpu.abilist32=x86
+ro.odm.product.cpu.abilist64=x86_64
+ro.odm.build.date=Tue Apr 28 22:57:23 CEST 2026
+ro.odm.build.date.utc=1777409843
+ro.odm.build.fingerprint=waydroid/lineage_waydroid_x86_64/waydroid_x86_64:13/TQ3A.230901.001/aleasto04282257:userdebug/test-keys
+ro.odm.build.id=TQ3A.230901.001
+ro.odm.build.tags=test-keys
+ro.odm.build.type=userdebug
+ro.odm.build.version.incremental=eng.aleast.20260428.225853
+ro.odm.build.version.release=13
+ro.odm.build.version.release_or_codename=13
+ro.odm.build.version.sdk=33
+####################################
+# from variable ADDITIONAL_ODM_PROPERTIES
+####################################
+####################################
+# from variable PRODUCT_ODM_PROPERTIES
+####################################
+# end of file
