@@ -1,0 +1,15 @@
+#!/bin/sh
+# End the automated sleep cycle and put bluetooth back as the user had it.
+#
+# Armed on every resume by the system-sleep hook with a short delay, and
+# cancelled by waydroid-sync when the wake turns out to be a periodic sync
+# window. So it only fires on a resume the user actually asked for.
+set -eu
+CYCLE=/run/waydroid-sync.cycle
+BT_STATE=/run/waydroid-sync.btstate
+
+if [ -f "$BT_STATE" ] && [ "$(cat "$BT_STATE")" = "unblocked" ]; then
+    rfkill unblock bluetooth 2>/dev/null || true
+fi
+rm -f "$BT_STATE" "$CYCLE"
+logger -t waydroid-sync -- "user resume - bluetooth restored, cycle ended"

@@ -1,0 +1,20 @@
+#!/bin/sh
+# /etc/systemd/system-sleep/50-waydroid-sync
+#
+# Marks the machine as being in a suspended cycle, and arms a deferred
+# bluetooth restore on every resume. waydroid-sync cancels that restore when
+# the wake belongs to a periodic sync window, so it only fires on a resume the
+# user asked for.
+set -eu
+CYCLE=/run/waydroid-sync.cycle
+BT_RESTORE=waydroid-bt-restore
+
+case "$1" in
+    pre)
+        : > "$CYCLE"
+        ;;
+    post)
+        systemd-run --unit="$BT_RESTORE" --on-active=15s \
+            /usr/local/bin/waydroid-bt-restore >/dev/null 2>&1 || true
+        ;;
+esac

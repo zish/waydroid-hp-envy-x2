@@ -1,0 +1,76 @@
+#!/bin/sh
+# waydroid-sync — one periodic sync window for Waydroid while the machine sleeps.
+#
+# Installed at /usr/local/bin/waydroid-sync and driven by waydroid-sync.timer,
+# which carries WakeSystem=true so it wakes the machine out of s2idle.
+#
+# One cycle: wake -> keep bluetooth off -> thaw Android -> let it sync briefly
+# -> freeze Android -> go back to sleep.
+#
+# Two guards decide whether this run is an automated cycle. BOTH must hold, and
+# either failing means we touch nothing:
+#
+#   1. the cycle marker exists. Written by the sleep hook at "pre suspend" and
+#      removed by waydroid-bt-restore on a user-initiated resume. This is the
+#      authority on "the machine is in a suspended cycle" -- a locked screen
+#      alone does not mean it ever slept, e.g. a locked laptop sitting awake.
+#   2. swaylock is still running. swayidle runs `before-sleep swaylock -f`, so
+#      swaylock exiting means the user came back and unlocked. This covers the
+#      15 s window before waydroid-bt-restore clears the marker.
+#
+# logind's IdleHint is NOT usable as a presence signal here -- it reads "no" on
+# an active sway session even when idle.
+#
+# Note there is deliberately no AC check. The marker preserves whatever the
+# user chose: if they suspended on AC, we sync and put it back to sleep rather
+# than silently leaving the machine awake. The "stay awake on AC" half of the
+# hybrid is a matter of not suspending in the first place, not this timer's job.
+#
+# Rationale and measurements: docs/17-hybrid-sleep.md
+set -eu
+
+SYNC_WINDOW="${SYNC_WINDOW:-30}"        # seconds Android is allowed to run
+CYCLE=/run/waydroid-sync.cycle
+BT_STATE=/run/waydroid-sync.btstate
+BT_RESTORE=waydroid-bt-restore
+
+log() { logger -t waydroid-sync -- "$*"; }
+
+# --- guard 1: are we inside a suspended cycle? ----------------------------
+if [ ! -f "$CYCLE" ]; then
+    log "no cycle marker - machine is awake by the user's choice, skipping"
+    exit 0
+fi
+
+# --- guard 2: has the user come back? -------------------------------------
+if ! pgrep -x swaylock >/dev/null 2>&1; then
+    log "session unlocked - user present, not touching the machine"
+    exit 0
+fi
+
+# This wake is ours, so cancel the deferred bluetooth restore the hook armed.
+systemctl stop "${BT_RESTORE}.timer" >/dev/null 2>&1 || true
+
+# --- bluetooth stays off for the whole automated cycle --------------------
+# Record the user's setting once per cycle so it can be put back when they
+# return. If the file exists we are mid-cycle; do not overwrite it.
+if [ ! -f "$BT_STATE" ]; then
+    if rfkill list bluetooth 2>/dev/null | grep -q "Soft blocked: yes"; then
+        echo blocked > "$BT_STATE"
+    else
+        echo unblocked > "$BT_STATE"
+    fi
+fi
+rfkill block bluetooth 2>/dev/null || true
+
+# --- the sync window ------------------------------------------------------
+log "sync window: thawing Android for ${SYNC_WINDOW}s"
+waydroid container unfreeze >/dev/null 2>&1 || log "WARN: unfreeze failed"
+sleep "$SYNC_WINDOW"
+waydroid container freeze >/dev/null 2>&1 || log "WARN: freeze failed"
+
+# --- back to sleep --------------------------------------------------------
+# --no-block so this oneshot exits before the suspend transaction runs;
+# a blocking call from inside the unit risks deadlocking against sleep.target.
+log "sync window done - suspending again"
+systemctl --no-block suspend

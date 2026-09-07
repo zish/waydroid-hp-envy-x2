@@ -1,0 +1,9 @@
+[Unit]
+Description=Waydroid periodic sync window
+Documentation=https://github.com/waydroid/waydroid
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/waydroid-sync
+# Must exceed SYNC_WINDOW with room for thaw/freeze to complete.
+TimeoutStartSec=180

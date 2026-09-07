@@ -1,0 +1,16 @@
+[Unit]
+Description=Periodic Waydroid sync window while the machine sleeps
+
+[Timer]
+OnCalendar=*:0/15
+# WakeSystem arms an RTC alarm, so this fires the machine out of s2idle.
+# It needs CAP_WAKE_ALARM, which a system unit has.
+WakeSystem=true
+# AccuracySec must stay well under the interval or systemd will coalesce the
+# wakeups and the cadence drifts.
+AccuracySec=1min
+# Never fire a backlog of missed windows after a long power-off.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
