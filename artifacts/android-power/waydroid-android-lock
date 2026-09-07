@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # waydroid-android-lock -- put Android to sleep with the host, and wake it back.
 #
 # Installed at @BINDIR@/waydroid-android-lock and driven by
@@ -46,7 +49,8 @@
 #     which is empty here and read-only, this being an rpm-ostree host. The
 #     evidence is not just the strings: the previous boot had NINE suspends and the
 #     two hooks already installed in /etc fired on none of them. See docs/27 --
-#     docs/19 and docs/23 both rely on hooks that have never run.
+#     docs/19 and docs/17 both relied on hooks that had never run, and both have
+#     since been converted to units on this same pattern.
 #
 #  2. Even where it is scanned, a hook could not do this job. From systemd-sleep(8):
 #     "user.slice will be frozen while the executables are running ... this prevents

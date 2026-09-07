@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # Install the periodic-sync sleep/resume unit. Run on the host, as root.
 #
 # SCOPE: this installs only the sleep/resume legs of the sync feature -- the

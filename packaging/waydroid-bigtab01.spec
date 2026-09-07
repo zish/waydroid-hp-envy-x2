@@ -19,8 +19,18 @@
 # DESTDIR is set. That keeps exactly one description of the layout, used by both the
 # manual install on the immutable host and the package. See docs/25 and docs/27.
 #
-# FIXME: the repository has no LICENSE file. The tag below is a PLACEHOLDER and must
-# be confirmed before this is built or distributed anywhere.
+# The licence matches Waydroid's own source headers exactly -- 31 files under
+# /usr/lib/waydroid/tools carry `SPDX-License-Identifier: GPL-3.0-or-later` -- so
+# anything that migrates from this repository into Waydroid upstream raises no
+# licensing question. Note Fedora's waydroid package tags itself GPL-3.0-only, which
+# appears to understate upstream's own "or later"; the source headers are the
+# authority on upstream's intent.
+#
+# None of the packaged content is derived from Waydroid: it is original shell and
+# Python that calls waydroid and busctl. The licence is a choice, not an obligation.
+# That is NOT true of everything in this repository -- sensors/waydroid-sensord keeps
+# upstream's libgbinder ISensors server (docs/14) and is a derivative work -- but none
+# of that is packaged here.
 
 Name:           waydroid-bigtab01
 Version:        1.0.0
@@ -104,6 +114,7 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} SESSIONDIR=%{_datadir}/wayland-sessions \
 # none of it. Add it here together with the rest when that feature is finished.
 
 %files
+%license LICENSE
 %doc docs/27-android-power-button.md docs/19-sensor-hub-suspend-wedge.md
 %{_bindir}/waydroid-android-key
 %{_bindir}/waydroid-android-lock
@@ -117,6 +128,7 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} SESSIONDIR=%{_datadir}/wayland-sessions \
 %{waydroid_units}/sleep.target.wants/ite8350-sleep.service
 
 %files graceful-exit
+%license LICENSE
 %doc docs/24-graceful-logout.md
 %{_bindir}/waydroid-graceful-exit
 %{_prefix}/lib/systemd/user/waydroid-graceful-exit.service
@@ -125,6 +137,7 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} SESSIONDIR=%{_datadir}/wayland-sessions \
 %{_datadir}/sway/config.d/95-waydroid-graceful-exit.conf
 
 %files cage
+%license LICENSE
 %doc docs/25-waydroid-in-cage.md
 %{_bindir}/waydroid-cage-session
 %{_datadir}/wayland-sessions/waydroid-cage.desktop

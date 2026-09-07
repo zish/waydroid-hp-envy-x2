@@ -1,3 +1,6 @@
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 [Unit]
 Description=Waydroid periodic-sync sleep and resume legs
 Documentation=file:///usr/share/doc/waydroid-bigtab01/docs/17-hybrid-sleep.md

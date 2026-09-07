@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 """waydroid-android-key -- deliver a key to Android from the host.
 
 Installed at @BINDIR@/waydroid-android-key. Run as root, on the host.

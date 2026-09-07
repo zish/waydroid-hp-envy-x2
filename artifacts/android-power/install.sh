@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # Install the Android sleep/lock unit. Run on the host, as root.
 #
 # Everything lands under $PREFIX (default /usr/local, an ostree symlink to

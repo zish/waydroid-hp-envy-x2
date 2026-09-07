@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # Install the ITE8350 sensor-hub resume check. Run on the host, as root.
 #
 # This is docs/19's safety net for the suspend wedge: after s2idle the hub can

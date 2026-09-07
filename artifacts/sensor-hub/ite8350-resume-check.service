@@ -1,3 +1,6 @@
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 [Unit]
 Description=Check the ITE8350 sensor hub survived resume
 Documentation=file:///usr/share/doc/waydroid-bigtab01/docs/19-sensor-hub-suspend-wedge.md
