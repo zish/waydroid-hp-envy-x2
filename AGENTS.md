@@ -223,7 +223,9 @@ and the reasoning behind each change.
   everything below it speaks to whatever owns the radio on the host, and `NmBackend` is the first
   implementation. `NativeScanResult.cpp` is the awkward corner — it marshals a custom parcelable
   whose layout exists only as bytecode, and synthesises the 802.11 beacon elements Android insists
-  on parsing its security out of. Build with `wifi/build.sh`
+  on parsing its security out of. Build with `wifi/build.sh`; `--unit` also installs the
+  systemd unit, the `waydroid-wifi-nudge` restart workaround and the `waydroid-wifi-sync`
+  credential reconciler, all of which live in `artifacts/wifi/`
 - `sensor-app/` — "Sensor Info", a dependency-free Kotlin app that displays every sensor live,
   with an attitude panel above it: a compass dial and a software-rendered 3-D view of the
   machine's orientation. Built without Gradle (`aapt2` + `kotlinc` + `d8` + `apksigner`);
