@@ -478,6 +478,51 @@ Supplicant::onSupplicant(GBinderLocalObject* obj, GBinderRemoteRequest* req,
     return ((Supplicant*) user)->handleSupplicant(req, code, status);
 }
 
+
+/*
+ * Ask for a credential sync, because Android has just brought Wi-Fi up and is
+ * about to go looking for networks it knows.
+ *
+ * waydroid-wifi-sync normally runs on a timer, which means a network added on
+ * the host can be up to five minutes away from appearing in Android. Enabling
+ * Wi-Fi is the moment a person actually cares, so nudge it then as well.
+ *
+ * Deliberately fire-and-forget, and deliberately through systemd rather than by
+ * running the script directly:
+ *
+ *   - It must not block. This runs on a binder thread inside the transaction
+ *     Android is waiting on, and the sync shells out to `waydroid shell` for a
+ *     second or more. g_spawn_async() without G_SPAWN_DO_NOT_REAP_CHILD
+ *     double-forks, so there is nothing to wait for and no zombie to reap.
+ *   - systemd already serialises the unit, applies its SELinuxContext, and puts
+ *     its output in the journal next to every other run. Repeated start jobs for
+ *     one unit are merged, so the repeated setup attempts Android makes when
+ *     something goes wrong cannot pile up syncs.
+ *   - Failure is silent by design. A host with no unit installed, or no sync
+ *     script at all, must still bring Wi-Fi up normally.
+ */
+static void
+requestCredentialSync(void)
+{
+    const gchar* argv[] = {
+        (gchar*) "systemctl", (gchar*) "start", (gchar*) "--no-block",
+        (gchar*) "waydroid-wifi-sync.service", nullptr
+    };
+    GError* err = nullptr;
+
+    if (!g_spawn_async(nullptr, (gchar**) argv, nullptr,
+                       (GSpawnFlags) (G_SPAWN_SEARCH_PATH |
+                                      G_SPAWN_STDOUT_TO_DEV_NULL |
+                                      G_SPAWN_STDERR_TO_DEV_NULL),
+                       nullptr, nullptr, nullptr, &err)) {
+        GDEBUG("no credential sync requested: %s", err ? err->message : "?");
+        g_clear_error(&err);
+    } else {
+        GINFO("Wi-Fi came up; asked waydroid-wifi-sync to reconcile "
+              "NetworkManager's networks into Android");
+    }
+}
+
 GBinderLocalReply*
 Supplicant::handleSupplicant(GBinderRemoteRequest* req, guint code, int* status)
 {
@@ -509,6 +554,14 @@ Supplicant::handleSupplicant(GBinderRemoteRequest* req, guint code, int* status)
         ensureStaIface();
         GINFO("addStaInterface(%s) -> serving ISupplicantStaIface",
               mIfaceName.c_str());
+
+        /*
+         * This call, and not createClientInterface(), is the signal that Android
+         * has real Wi-Fi up: scan-only mode never reaches the supplicant at all
+         * (docs/31-wifi-stage2.md), so triggering here does not fire on every
+         * scan-only transition.
+         */
+        requestCredentialSync();
 
         GBinderLocalReply* reply = beginReply(mSupplicant, &writer, status);
         gbinder_writer_append_local_object(&writer, mStaIface);

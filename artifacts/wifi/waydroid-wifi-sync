@@ -54,6 +54,21 @@ ash() {
 
 [ "$(id -u)" -eq 0 ] || { log "must run as root"; exit 1; }
 
+# One at a time.  The timer and the daemon's Wi-Fi-enable trigger can fire
+# together, and two runs racing would interleave their reads of the state file
+# -- the file that licenses DELETIONS.  A second run simply drops out; there is
+# nothing useful for it to do that the first is not already doing.
+LOCK=/run/waydroid-wifi-sync.lock
+# Braces, not a bare `exec 9>... 2>/dev/null`. A redirection on a bare `exec`
+# applies to the SHELL for the rest of its life, so that form silently sent every
+# log line of this script to /dev/null -- runs completed correctly and reported
+# nothing at all. Scoping it to the group keeps stderr intact.
+{ exec 9>"$LOCK"; } 2>/dev/null || true
+if ! flock -n 9 2>/dev/null; then
+	log "another sync is already running"
+	exit 0
+fi
+
 if [ ! -r "$SHARE_CONF" ]; then
 	log "no $SHARE_CONF -- nothing is opted in, so there is nothing to do"
 	exit 0
@@ -69,8 +84,38 @@ fi
 
 # ----------------------------------------------------------------- allow-list
 
-mapfile -t WANTED < <(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-                          "$SHARE_CONF" | grep -v '^$')
+# A line is an SSID, optionally followed by whitespace and the word "nodelete".
+# Everything before that keyword is the SSID, so an SSID with spaces still works.
+NODELETE=()
+WANTED=()
+while IFS= read -r line; do
+	line=${line%%#*}
+	line=${line#"${line%%[![:space:]]*}"}
+	line=${line%"${line##*[![:space:]]}"}
+	[ -n "$line" ] || continue
+	case "$line" in
+	*[[:space:]]nodelete)
+		ssid=${line%nodelete}
+		ssid=${ssid%"${ssid##*[![:space:]]}"}
+		WANTED+=("$ssid")
+		NODELETE+=("$ssid")
+		;;
+	*)
+		WANTED+=("$line")
+		;;
+	esac
+done < "$SHARE_CONF"
+
+# Marked "nodelete": share it with Android, but never let a forget in Android
+# remove the host's profile.  The right setting for any network the host itself
+# depends on -- the active-profile guard below protects a profile that is up at
+# that moment, and a profile the host has merely brought down for a minute is
+# not protected by anything else.
+nodelete_contains() {
+	local s
+	for s in ${NODELETE[@]+"${NODELETE[@]}"}; do [ "$s" = "$1" ] && return 0; done
+	return 1
+}
 if [ "${#WANTED[@]}" -eq 0 ]; then
 	log "$SHARE_CONF names no networks"
 	exit 0
@@ -105,10 +150,21 @@ ANDROID_LIST=$(android_ssids)
 if [ -z "$ANDROID_LIST" ]; then
 	# Distinguish "Android has no saved networks" from "we could not ask".
 	# Guessing wrong here deletes host profiles, so refuse rather than assume.
-	if ! ash cmd wifi list-networks | grep -q "Network Id"; then
+	#
+	# Both answers must be recognised, and missing one of them is not a small
+	# bug: with nothing saved Android prints the bare words "No networks" and no
+	# "Network Id" header at all, so testing only for the header treats an EMPTY
+	# Android as an unreadable one -- and empty is exactly the state in which
+	# importing matters most. It made the first version a silent no-op after the
+	# user forgot their last network.
+	probe=$(ash cmd wifi list-networks)
+	case "$probe" in
+	*"Network Id"*|*"No networks"*) ;;
+	*)
 		log "could not read Android's saved networks -- doing nothing"
 		exit 0
-	fi
+		;;
+	esac
 fi
 
 android_has() {
@@ -161,6 +217,11 @@ for ssid in ${PREV[@]+"${PREV[@]}"}; do
 	[ -n "$ssid" ] || continue
 	wanted_contains "$ssid" || continue
 	android_has "$ssid" && continue
+	if nodelete_contains "$ssid"; then
+		log "\"$ssid\" was forgotten in Android, but it is marked nodelete;" \
+		    "leaving the host's profile alone"
+		continue
+	fi
 	forgotten+=("$ssid")
 done
 

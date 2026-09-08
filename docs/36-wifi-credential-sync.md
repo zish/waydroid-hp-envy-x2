@@ -141,6 +141,64 @@ Deleting NM profiles from inside a container is the dangerous half, so:
   is a wiped `WifiConfigStore.xml` — a factory reset or container reinstall — not a person
   forgetting networks one at a time. It logs and deletes nothing.
 
+## Triggered when Android enables Wi-Fi, not only on the timer
+
+A five-minute timer means a network added on the host can be five minutes away from appearing in
+Android, and enabling Wi-Fi is the moment a person actually cares. So the daemon asks for a sync
+then too, from `SUPPLICANT_addStaInterface` in [Supplicant.cpp](../wifi/Supplicant.cpp):
+
+```
+19:33:05 waydroid-wifid: addStaInterface(wlan0) -> serving ISupplicantStaIface
+19:33:05 waydroid-wifid: Wi-Fi came up; asked waydroid-wifi-sync to reconcile ...
+19:33:05 systemd[1]: Starting waydroid-wifi-sync.service ...
+```
+
+**`addStaInterface` and not `createClientInterface`**, because scan-only mode never reaches the
+supplicant at all ([31](31-wifi-stage2.md)) — so this fires when Android has real Wi-Fi up rather
+than on every scan-only transition.
+
+It goes through `systemctl start --no-block` rather than running the script directly, for three
+reasons: it must not block, because this runs on a binder thread inside a transaction Android is
+waiting on; systemd already serialises the unit, applies its `SELinuxContext` and puts the output in
+the journal beside every other run; and repeated start jobs for one unit are merged, so the repeated
+setup attempts Android makes when something goes wrong cannot pile up syncs. `g_spawn_async()`
+without `G_SPAWN_DO_NOT_REAP_CHILD` double-forks, so there is nothing to wait for and no zombie.
+
+Failure is silent by design — a host with no unit installed must still bring Wi-Fi up normally.
+
+## `nodelete`: sharing a network without risking the host's profile
+
+An allow-list line may be followed by `nodelete`:
+
+```
+vidiot	nodelete
+```
+
+which shares the network with Android but never lets a forget in Android remove the host's profile.
+
+This exists because the active-profile guard is weaker than it first looks. It protects a profile
+that is up *at the moment the sync runs* — and the machine's owner had `vidiot` deliberately down
+for a few minutes while changing its key-mgmt to `sae`. A forget in Android during that window would
+have deleted the host's own profile with nothing to stop it. `nodelete` is the right setting for any
+network the host itself depends on.
+
+## Two bugs, both mine, both silent
+
+**A bare `exec` redirection applies to the shell, not to the `exec`.** The single-instance lock was
+written `exec 9>"$LOCK" 2>/dev/null`, which set fd 9 *and* pointed stderr at `/dev/null` for the
+whole script — so every run worked correctly and logged absolutely nothing. Scoping it with braces
+(`{ exec 9>"$LOCK"; } 2>/dev/null`) keeps stderr intact.
+
+**"No networks" is an answer, not a failure.** Deleting host profiles on a bad reading is the worst
+thing this script can do, so it refuses to act unless it is sure it read Android's list — and the
+first version tested for the `Network Id` header alone. With nothing saved, Android prints the bare
+words `No networks` and no header, so an **empty** Android was indistinguishable from an unreadable
+one. That made the whole thing a silent no-op in exactly the state where importing matters most:
+right after the user forgot their last network. Both forms are now recognised.
+
+Neither was caught by the round-trip test below, because that test always ran with at least one
+network already saved.
+
 ## Verified round trip
 
 With a throwaway profile and a fake SSID, against the fixed ordering:
@@ -171,7 +229,12 @@ auto-upgrade, so one saved network prints as *two* rows with the same id — `wp
 ```bash
 # on bigtab01 -- opt a network in
 sudo sh -c 'echo "my-network" >> /etc/waydroid-wifi-share.conf'
-sudo systemctl start waydroid-wifi-sync          # or wait up to 5 minutes
+
+# ... or share it without letting Android's forget delete the host's profile,
+# which is what any network the host itself depends on should use
+sudo sh -c 'printf "my-network\tnodelete\n" >> /etc/waydroid-wifi-share.conf'
+
+sudo systemctl start waydroid-wifi-sync   # or enable Wi-Fi, or wait 5 minutes
 journalctl -u waydroid-wifi-sync -n 20
 ```
 
