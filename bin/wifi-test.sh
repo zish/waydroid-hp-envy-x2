@@ -38,9 +38,15 @@ else
 fi
 
 echo "### is wlan0 present in the container?"
+# Reported, not required. Stage 2 assumed the framework needs wlan0 to exist
+# before it will finish bringing a client interface up; on 2026-09-08 a
+# container that never had wlan0 set one up and scanned anyway, so that is not
+# a precondition in scan-only mode. It will be one in Stage 4, when IpClient
+# starts running DHCP on it -- hence still worth reporting.
 LINK=$(sh_ 'ip -brief link show wlan0' | head -1)
 if [ -n "$LINK" ]; then say "OK   $LINK"; else
-  say "FAIL no wlan0 in the container -- run bin/wifi-wlan0.sh up"; FAIL=1
+  say "WARN no wlan0 in the container. Not fatal for scanning; Stage 4 will"
+  say "     need it -- bin/wifi-wlan0.sh up"
 fi
 
 echo "### does the container see the service?"

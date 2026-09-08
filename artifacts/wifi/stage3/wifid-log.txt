@@ -63,3 +63,50 @@
 [waydroid-wifid] NM finished a scan (LastScan 50696509)
 [waydroid-wifid] -> IScanEvent.OnScanResultReady
 [waydroid-wifid] getScanResults() -> 23 access points
+[gbinder] WARNING: Service manager /dev/binder has died
+[waydroid-wifid] Service manager has died
+[gbinder] Service manager /dev/binder has appeared
+[waydroid-wifid] Service manager reappeared, re-registering
+[waydroid-wifid] Registered "wifinl80211"
+[gbinder] WARNING: Service manager /dev/binder has died
+[waydroid-wifid] Service manager has died
+[gbinder] Service manager /dev/binder has appeared
+[waydroid-wifid] Service manager reappeared, re-registering
+[waydroid-wifid] Registered "wifinl80211"
+[waydroid-wifid] registerWificondEventCallback()
+[waydroid-wifid] tearDownInterfaces()
+[waydroid-wifid] createClientInterface(wlan0) -> serving IClientInterface
+[waydroid-wifid] getWifiScannerImpl()
+[waydroid-wifid] subscribeScanEvents()
+[waydroid-wifid] subscribePnoScanEvents()
+[waydroid-wifid] unsubscribeScanEvents()
+[waydroid-wifid] tearDownClientInterface(wlan0)
+[waydroid-wifid] tearDownInterfaces()
+[waydroid-wifid] createClientInterface(wlan0) -> serving IClientInterface
+[waydroid-wifid] getWifiScannerImpl()
+[waydroid-wifid] subscribeScanEvents()
+[waydroid-wifid] subscribePnoScanEvents()
+[gbinder] WARNING: Service manager /dev/binder has died
+[waydroid-wifid] Service manager has died
+[gbinder] WARNING: Unknown handle 1 binder
+[gbinder] Service manager /dev/binder has appeared
+[waydroid-wifid] Service manager reappeared, re-registering
+[waydroid-wifid] Registered "wifinl80211"
+[waydroid-wifid] registerWificondEventCallback()
+[waydroid-wifid] tearDownInterfaces()
+[waydroid-wifid] createClientInterface(wlan0) -> serving IClientInterface
+[waydroid-wifid] getWifiScannerImpl()
+[waydroid-wifid] subscribeScanEvents()
+[waydroid-wifid] subscribePnoScanEvents()
+[waydroid-wifid] scan() -> true
+[waydroid-wifid] NM finished a scan (LastScan 79680925)
+[waydroid-wifid] -> IScanEvent.OnScanResultReady
+[waydroid-wifid] getScanResults() -> 18 access points
+[waydroid-wifid] scan() -> true
+[waydroid-wifid] NM finished a scan (LastScan 79758554)
+[waydroid-wifid] -> IScanEvent.OnScanResultReady
+[waydroid-wifid] getScanResults() -> 24 access points
+[waydroid-wifid] scan() -> true
+[waydroid-wifid] NM finished a scan (LastScan 79838466)
+[waydroid-wifid] -> IScanEvent.OnScanResultReady
+[waydroid-wifid] getScanResults() -> 18 access points

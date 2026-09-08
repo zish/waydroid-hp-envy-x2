@@ -148,9 +148,17 @@ interfaces in Stage 4.
 ## Why wlan0 is a dummy
 
 Android's `WifiNative` registers a netd observer on the interface and calls `isInterfaceUp()`, so
-`wlan0` has to exist as a netdev before the framework will finish. It does **not** have to be a
-real 802.11 device, because Path U means nothing in this design talks to nl80211 — that is the
-whole point of replacing wificond rather than patching `virt_wifi`.
+`wlan0` was assumed to have to exist as a netdev before the framework would finish. It does **not**
+have to be a real 802.11 device, because Path U means nothing in this design talks to nl80211 —
+that is the whole point of replacing wificond rather than patching `virt_wifi`.
+
+**Correction, 2026-09-08: it does not have to exist at all, in scan-only mode.** `system_server`
+was later seen coming up in a container that never had a `wlan0`, setting up a client interface
+named `wlan0` against the daemon and scanning successfully, with `ip link show wlan0` reporting
+`Device "wlan0" does not exist` throughout. The netd observer failure is not fatal for
+`ROLE_CLIENT_SCAN_ONLY`; Stage 2's original failure was the missing wificond service, not the
+missing netdev. Stage 4 will need a real one, because `IpClient` runs DHCP on it. See
+[32-wifi-stage3.md](32-wifi-stage3.md).
 
 `bin/wifi-wlan0.sh up` creates `wlan0` as a `dummy` inside the container's network namespace;
 `down` removes it. Nothing survives a reboot. Stage 4 replaces this by renaming the container's

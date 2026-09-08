@@ -51,6 +51,15 @@ that line is still valid.
 - **Waydroid has overlays enabled** (`mount_overlays = True`). Override files inside the
   Android images by dropping them in `/var/lib/waydroid/overlay/{system,vendor}/` instead of
   modifying the read-only images. Reversible by deleting one file — always prefer this.
+  **Dropping the file is not enough, and `waydroid container restart` will not pick it up.** The
+  overlay is an overlayfs mount whose lowerdir is that directory, created once by
+  `waydroid-container.service`; adding a file to a mounted lowerdir is undefined behaviour and here
+  it is simply invisible. Deploying means `sudo systemctl restart waydroid-container.service` and
+  then starting a session again — which **drops the kiosk session back to the SDDM greeter**, so it
+  needs someone at the machine. Always confirm a file is in effect by reading it from *inside* the
+  container, never by `ls`-ing the overlay directory. See
+  [docs/32-wifi-stage3.md](docs/32-wifi-stage3.md); this bit a Stage 0 file that had silently not
+  been in effect for a day.
 
 ### Where builds happen
 

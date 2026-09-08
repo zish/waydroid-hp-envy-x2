@@ -307,10 +307,37 @@ plan the cutover, do not stumble into it.
 
 ### Stage 5 — hardening *(before calling it done)*
 
-- **Survive a `system_server` restart.** [16-waydroid-network.md](16-waydroid-network.md) is a
-  direct warning here: a stale binder registration surviving a restart deadlocked the network stack
-  for 38 minutes. `waydroid-wifid` must detect the restart and re-register rather than leaving a
-  dead service name behind.
+- **Survive a `system_server` restart. Re-registering is necessary and *not* sufficient — this was
+  measured on 2026-09-08 and it corrects what this bullet used to say.**
+  [16-waydroid-network.md](16-waydroid-network.md) is the reason the requirement exists: a stale
+  binder registration surviving a restart deadlocked the network stack for 38 minutes. The daemon's
+  half now works and is no longer hypothetical — a `waydroid container restart` was watched end to
+  end and the servicemanager presence handler did exactly its job:
+
+  ```
+  [gbinder] WARNING: Service manager /dev/binder has died
+  [waydroid-wifid] Service manager has died
+  [gbinder] Service manager /dev/binder has appeared
+  [waydroid-wifid] Service manager reappeared, re-registering
+  [waydroid-wifid] Registered "wifinl80211"
+  ```
+
+  **But the framework does not come back by itself, and that is the part still to build.** When the
+  daemon went away, `WifiNl80211Manager` cached the failure (`Failed to get reference to wificond`)
+  and `WifiClientModeManager` logged `Failed to create ClientInterface. Sit in Idle` — and then sat
+  there indefinitely, even after the name was re-registered. Nothing retries on its own. Today it
+  takes a hand:
+
+  ```bash
+  sudo waydroid shell -- cmd wifi set-scan-always-available disabled
+  sudo waydroid shell -- cmd wifi set-scan-always-available enabled
+  ```
+
+  which makes `ActiveModeWarden` restart the scan-only manager and re-resolve the service. So this
+  stage owns two jobs, not one: keep the registration honest (done), **and** provoke the framework
+  into retrying afterwards. The blunt instrument above works from the host; whether there is a
+  cleaner trigger — an `IWificondEventCallback` the framework already listens on, or the same effect
+  through `IInterfaceEventCallback` — is worth reading out of the dex before writing anything.
 - Signal strength and state transitions that Android's UI believes.
 - Saved networks synced both ways — forget in Android should forget in NM.
 - Cleanly report P2P, SoftAP, RTT and NAN as unsupported rather than letting them fail oddly.

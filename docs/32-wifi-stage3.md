@@ -189,3 +189,54 @@ symptom of the same gap Stage 5 has to close for `system_server` restarts, seen 
 direction — see [16-waydroid-network.md](16-waydroid-network.md).
 
 There is still **no autostart**; packaging is Stage 5.
+
+## Two corrections found while closing this out (2026-09-08)
+
+### Overlay files need the container *service* restarted, not `waydroid container restart`
+
+This is a correction to the method AGENTS.md documents for every overlay in this repo, and it cost
+a session to find. Dropping a file in `/var/lib/waydroid/overlay/{system,vendor}/` and running
+`waydroid container restart` **does nothing**. The overlay is an overlayfs mount whose lowerdir is
+`/var/lib/waydroid/overlay`, and it is created once by `waydroid container start` — the systemd
+service — not per container restart:
+
+```
+overlay /var/lib/waydroid/rootfs overlay ro,...,lowerdir=/var/lib/waydroid/overlay:/var/lib/waydroid/rootfs,...
+```
+
+Adding a file to a mounted overlayfs lowerdir is explicitly undefined behaviour in the kernel, and
+here it behaves as "invisible". The mount was made when the service started; every file added after
+that is not there as far as the container is concerned.
+
+Two things follow, and the second is the alarming one:
+
+- The deployment procedure is `sudo systemctl restart waydroid-container.service`, then start a
+  session again. **That drops the Waydroid session**, so on a kiosk host it returns the display to
+  the SDDM greeter and somebody has to log back in.
+- **Check what is actually in effect rather than what is in the overlay directory.** Stage 0's
+  `overlay/system/etc/permissions/android.hardware.wifi.xml` was written on 2026-09-07 20:18, after
+  the container service started at 11:49 that morning — so it has not been in effect since. The
+  `android.hardware.wifi` feature the framework is using comes from
+  `/vendor/etc/permissions/android.hardware.wifi.xml` instead. The system-overlay copy is currently
+  dead weight, and the way to tell is to read the file from inside the container, not to `ls` the
+  overlay directory on the host.
+
+### `wlan0` is not required for scan-only mode
+
+[31](31-wifi-stage2.md) states that `WifiNative` registers a netd observer and calls
+`isInterfaceUp()`, "so `wlan0` has to EXIST as a netdev before the Wi-Fi framework will finish".
+That turns out not to hold. After the container service restart above, `system_server` came up in a
+container that **never had a `wlan0`** — and it set up a client interface named `wlan0` against the
+daemon and scanned successfully anyway:
+
+```
+mClientInterfaceName: wlan0
+[waydroid-wifid] getScanResults() -> 24 access points
+```
+
+with `ip link show wlan0` reporting `Device "wlan0" does not exist` throughout. So the netd observer
+failure is not fatal in `ROLE_CLIENT_SCAN_ONLY`; Stage 2's original failure was the missing wificond
+service, not the missing netdev, and the dummy was treating a symptom.
+
+`bin/wifi-wlan0.sh` is kept, and `bin/wifi-test.sh` still reports on `wlan0` — but as a warning now,
+not a failure. Stage 4 genuinely will need a real netdev, because `IpClient` runs DHCP on it.

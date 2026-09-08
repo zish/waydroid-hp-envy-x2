@@ -2,36 +2,25 @@
   OK   waydroid-wifid is running (pid 241657 )
   OK   stock wificond is not running
 ### is wlan0 present in the container?
-  OK   wlan0            UNKNOWN        2e:1f:b7:32:46:f2 <BROADCAST,NOARP,UP,LOWER_UP> 
+  OK   wlan0            UNKNOWN        5e:c0:ea:1d:f1:ac <BROADCAST,NOARP,UP,LOWER_UP> 
 ### does the container see the service?
   Service wifinl80211: found
 ### what the framework did with it
   Wi-Fi is disabled
   mClientInterfaceName: wlan0
 ### recent wificond/WifiNative log
-  09-08 01:53:19.551   260   475 D WifiActiveModeWarden: Starting primary ClientModeManager in scan only mode
-  09-08 01:53:19.551   260   475 D WifiClientModeManager[unknown]: entering IdleState
-  09-08 01:53:19.551   260   475 I WifiNative: Vendor Hal not supported, ignoring start.
-  09-08 01:53:19.551   260   475 I WifiNative: Vendor Hal not supported, ignoring createStaIface.
-  09-08 01:53:19.551   260   475 D WifiNl80211Manager: Setting up interface for client mode: wlan0
-  09-08 01:53:19.553   260   475 I WifiNative: Interface state changed on Iface:{Name=wlan0,Id=9,Type=STA_SCAN}, isUp=true
-  09-08 01:53:19.553   260   475 I WifiNative: Successfully setup Iface:{Name=wlan0,Id=9,Type=STA_SCAN}
-  09-08 01:53:19.553   260   475 D WifiClientModeManager[wlan0]: entering StartedState
-  09-08 01:53:19.553   260   475 D WifiClientModeManager[wlan0]: entering ScanOnlyModeState
-  09-08 01:53:19.553   260   475 V WifiClientModeManager[wlan0]: ClientModeManager started in role: Role: ROLE_CLIENT_SCAN_ONLY, RequestorWs: WorkSource{1010}, ModeListener: com.android.server.wifi.ActiveModeWarden$ClientListener@f806b07
-  09-08 01:53:19.553   260   475 D WifiCountryCode: evaluateAllCmmStateAndApplyIfAllReady: {ConcreteClientModeManager{id=50645068 iface=wlan0 role=ROLE_CLIENT_SCAN_ONLY}=true}
 ### does the host backend see access points? (below the contract)
   backend: networkmanager, radio: wlp1s0, enabled: yes
   scan: completed
-  OK   the host backend sees 24 access points
+  OK   the host backend sees 18 access points
 ### do they reach Android? (above the contract)
-  OK   Android has 17 scan results, freshest 4s old
+  OK   Android has 14 scan results, freshest 7s old
       BSSID              Frequency      RSSI           Age(sec)     SSID                                 Flags
-    ac:db:48:84:e1:4d       2462        -80              4.907    AdventurousEagle                  [WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]
-    ac:db:48:84:e1:4e       5220        -93              4.907    AdventurousEagle                  [WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]
-    3c:bd:c5:fa:1e:cd       2437        -80              4.907    Verizon_3QHQT9                    [WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]
-    f8:3e:b0:02:71:5e       2442        -91              4.907    ErayDennis                        [WPA2-PSK-CCMP][RSN-PSK+SAE-CCMP][ESS][MFPC]
-    a8:b0:88:51:68:46       2437        -88              4.907    b214c9                            [RSN-SAE-CCMP][ESS][MFPR][MFPC]
+    ac:db:48:84:e1:4e       5220        -95              7.545    AdventurousEagle                  [WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]
+    c8:a7:0a:a3:d8:d6       2462        -90              8.545    TheAlbatross                      [WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]
+    1e:9d:72:2b:df:91       2462        -88              8.545    My WiFi                           [WPA2-PSK-CCMP][RSN-PSK+SAE-CCMP][ESS][MFPC]
+    5e:22:da:f0:9a:0e       2462        -84              8.545                                      [WPA2-EAP/SHA1-CCMP][RSN-EAP/SHA1-CCMP][ESS]
+    76:bd:71:0f:a5:c2       2412        -64              8.545    vidiot                            [WPA2-PSK-CCMP][RSN-PSK+SAE-CCMP][ESS][MFPC]
 ### are the synthesised security flags being parsed?
   OK   13 results carry RSN/WPA/WEP flags
 ### the Stage 1 failure must be absent

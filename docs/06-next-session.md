@@ -254,15 +254,24 @@ statically and must be settled at runtime, exactly as `IScanEvent`'s were in Sta
 has to start carrying traffic; plan that cutover rather than stumbling into it, since it costs the
 container its network for a window.
 
-Three things to know before touching it:
+Four things to know before touching it:
 
 - **Restarting the daemon does not silently reconnect.** `WifiNl80211Manager` caches its failure and
   `ClientModeManager` sits in Idle. Kick it with `cmd wifi set-scan-always-available disabled` then
-  `enabled`. Stage 5 has to close this properly.
+  `enabled`. The daemon's own half is fine — the servicemanager presence handler was watched
+  re-registering across a container restart, so that Stage 5 item is proven. The framework's half
+  is the one still to build; Stage 5 in [29](29-wifi-plan.md) now says so.
+
+- **An overlay file is not deployed until the container *service* restarts.**
+  `waydroid container restart` does nothing for it — see [32](32-wifi-stage3.md). This already bit a
+  Stage 0 file that had not been in effect for a day without anyone noticing. Verify from inside the
+  container, not by listing the overlay directory.
+
+- **`wlan0` is not needed for scanning.** [31](31-wifi-stage2.md)'s claim that it must exist was
+  disproven on 2026-09-08. Stage 4 will need it for real, when `IpClient` runs DHCP.
 
 - **Nothing autostarts `waydroid-wifid`** — unlike `waydroid-sensord`, the name means nothing to
-  Waydroid. Start it by hand (`sudo waydroid-wifid --verbose &`) and put `wlan0` in the container
-  first with `bin/wifi-wlan0.sh up`. Packaging is Stage 5.
+  Waydroid. Start it by hand (`sudo waydroid-wifid --verbose &`). Packaging is Stage 5.
 - **Stock wificond has to be out of the way**, because both register the same name and the last
   writer wins. It is currently stopped by hand; `artifacts/overlay/system/etc/init/wificond.rc`
   makes that permanent but is **not deployed** — it needs a `waydroid container restart`.
