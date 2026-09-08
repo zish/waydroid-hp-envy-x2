@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Declares the Wi-Fi supplicant HAL, so that Android takes the AIDL path to it.
+
+  WHY THIS FILE IS THE THING THAT SWITCHES THE PATH
+
+  service-wifi.jar ships BOTH implementations, SupplicantStaIfaceHalAidlImpl and
+  SupplicantStaIfaceHalHidlImpl, and chooses between them in
+  SupplicantStaIfaceHal.initialize(), which asks
+  SupplicantStaIfaceHalAidlImpl.serviceDeclared().  That is
+  ServiceManager.isDeclared("android.hardware.wifi.supplicant.ISupplicant/default"),
+  and isDeclared() reads the VINTF manifest.  It does NOT check whether anything
+  has registered the service.  So registering waydroid-wifid's supplicant object
+  without this file leaves Android taking the HIDL path to a HIDL service that
+  does not exist, and the master toggle stays off exactly as it did in Stage 3.
+
+  The instance name is "default", which with the interface name makes the
+  registered service name ISupplicant/default: the string SUPPLICANT_SERVICE_NAME
+  in wifi/Supplicant.h, and they have to agree.
+
+  Version 1 is not a guess.  The frozen aidl_api snapshot this shim implements is
+  android.hardware.wifi.supplicant version 1.  See docs/30-wifi-aidl-surface.md,
+  finding 1.
+
+  Same mechanism, same directory, as the widevine fragment in artifacts/widevine/,
+  so this is a well trodden path on this host.
+
+  Stage 4 of docs/29-wifi-plan.md.  Deployed to
+  /var/lib/waydroid/overlay/vendor/etc/vintf/manifest/ and reversible by deleting
+  it, but NOTE that adding or removing it needs
+  "systemctl restart waydroid-container.service" rather than
+  "waydroid container restart": the overlay is an overlayfs mount whose lowerdir
+  is that directory, and files added to a mounted lowerdir are invisible.  See
+  docs/32-wifi-stage3.md.
+
+  One more trap, met while writing this file: an XML comment may not contain a
+  double hyphen.  libvintf rejects the whole manifest if it does, and a rejected
+  manifest declares nothing, which looks exactly like this file not being
+  deployed at all.
+-->
+<manifest version="1.0" type="device">
+    <hal format="aidl">
+        <name>android.hardware.wifi.supplicant</name>
+        <version>1</version>
+        <fqname>ISupplicant/default</fqname>
+    </hal>
+</manifest>

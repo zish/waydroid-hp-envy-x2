@@ -123,8 +123,8 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [docs/10-battery-fixed.md](docs/10-battery-fixed.md); verify with `bin/battery-test.sh`.
    Temperature is still unreported — that needs an NDK rebuild of the HAL (battery temp) or a new
    thermal HAL (system temps); both are scoped in docs/10.
-4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** **In progress: Stages 0, 2 and 3
-   done, 4–5 outstanding.** The whole Android Wi-Fi framework was already present and dormant in
+4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** **In progress: Stages 0, 2, 3 and 4
+   done; Stage 5 (hardening) outstanding.** The whole Android Wi-Fi framework was already present and dormant in
    the image (`com.android.wifi` APEX, `wificond`); what was missing was the feature XML, a
    supplicant, and any vendor HAL. Direct hardware access was considered and **rejected**: `wlp1s0`
    is this machine's only network interface, so handing `phy0` to the container costs the host its
@@ -149,10 +149,24 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    because NM keeps the conclusions and discards the beacon; and `tsf` is load-bearing, since
    results older than the scan Android asked for are dropped without a word. See
    [docs/32-wifi-stage3.md](docs/32-wifi-stage3.md); verify both stages with `bin/wifi-test.sh`.
-   **Next is Stage 4, the supplicant.** The Wi-Fi **master toggle still does not stay on** and
-   cannot until then — `ROLE_CLIENT_PRIMARY` calls `startSupplicant()` before it ever reaches
-   wificond — so the Settings picker still shows nothing even though the scan data behind it is
-   real.
+   **Stage 4 is done**: Android drives a real access point end to end and has **validated internet**
+   over a Wi-Fi network it controls itself. A second radio — a TP-Link Archer T3U on
+   `rtw88_8822bu` — was added so Android can never strand the host, which also falsifies
+   [docs/28](docs/28-wifi-feasibility.md)'s premise that `wlp1s0` is the only interface. The
+   supplicant shim is in [wifi/Supplicant.cpp](wifi/Supplicant.cpp); the control plane goes through
+   NetworkManager to the T3U while the data plane still goes over `waydroid0`.
+   Three bugs of ours were found and fixed on the way, the worst of which —
+   `getConnectionCapabilities` writing a parcelable without `readTypedObject()`'s non-null marker —
+   **killed `system_server` on every successful association**, which is why nothing could have
+   worked before. What finally produced a routable network was the uplink rename
+   (`lxc.net.0.name = wlan0`) that [docs/29](docs/29-wifi-plan.md) had always prescribed and
+   [docs/33](docs/33-wifi-stage4.md) had deferred; it also retires `bin/wifi-wlan0.sh`
+   and kills the Ethernet-outscores-Wi-Fi trap for good. The wificond name race is now closed
+   durably by an overlay `.rc` that execs `/system/bin/true`. See
+   [docs/34-wifi-second-radio.md](docs/34-wifi-second-radio.md).
+   **Stage 5 remains**: no systemd unit, so the daemon does not survive a reboot; and the T3U can
+   wedge into a state where it scans but will not associate, recovered manually with
+   `bin/wifi-radio-reset.sh`.
 5. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.
    Exposing the user's `/run/media/<username>` directory is probably sufficient. **Deprioritised
    below Wi-Fi on 2026-09-07** at the owner's request.

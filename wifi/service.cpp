@@ -10,8 +10,12 @@
  * its own IPlatform / IUserMonitor / IClipboard services are host-side
  * python-gbinder objects registered in the container's servicemanager.
  *
- * Stage 2 registers "wifinl80211" (IWificond).  Stage 4 adds the supplicant,
- * which is AIDL on the same device -- see docs/30-wifi-aidl-surface.md.
+ * Two services are registered on the same device, both AIDL: "wifinl80211"
+ * (IWificond, Stage 2) and the supplicant (Stage 4).  They are one process
+ * because they share a backend and, more importantly, a lifetime -- Android
+ * caches a failure to reach either, so a daemon that could lose one half
+ * without the other would have two ways to end up half-connected.  See
+ * docs/30-wifi-aidl-surface.md for the interface surface.
  *
  * Usage:
  *   waydroid-wifid [--device IFNAME] [--verbose] [/dev/binder]
@@ -22,6 +26,7 @@
 
 #include "NativeScanResult.h"
 #include "NmBackend.h"
+#include "Supplicant.h"
 #include "Wificond.h"
 
 #include <gutil_log.h>
@@ -74,6 +79,8 @@ typedef struct app {
     GMainLoop* loop;
     GBinderServiceManager* sm;
     Wificond* service;
+    Supplicant* supplicant;
+    int registered;             /* how many of the two names we hold */
     int ret;
 } App;
 
@@ -153,11 +160,43 @@ app_add_service_done(GBinderServiceManager* sm, int status, void* user_data)
 
     if (status == GBINDER_STATUS_OK) {
         GINFO("Registered \"%s\"", SERVICE_NAME);
+        app->registered++;
         app->ret = RET_OK;
     } else {
         GERR("Failed to register \"%s\" (%d)", SERVICE_NAME, status);
         g_main_loop_quit(app->loop);
     }
+}
+
+/*
+ * The supplicant's registration is NOT fatal if it fails, unlike wificond's.
+ * Losing it costs the master toggle and leaves scan-only mode working, which
+ * is exactly where Stage 3 ended and is a much better outcome than exiting and
+ * taking wificond down with it.
+ */
+static void
+app_add_supplicant_done(GBinderServiceManager* sm, int status, void* user_data)
+{
+    App* app = (App*) user_data;
+
+    if (status == GBINDER_STATUS_OK) {
+        GINFO("Registered \"%s\"", SUPPLICANT_SERVICE_NAME);
+        app->registered++;
+    } else {
+        GERR("Failed to register \"%s\" (%d) -- scan-only mode will still "
+             "work, but the Wi-Fi toggle will not stay on",
+             SUPPLICANT_SERVICE_NAME, status);
+    }
+}
+
+static void
+app_register_all(App* app)
+{
+    app->registered = 0;
+    gbinder_servicemanager_add_service(app->sm, SERVICE_NAME,
+        app->service->object(), app_add_service_done, app);
+    gbinder_servicemanager_add_service(app->sm, SUPPLICANT_SERVICE_NAME,
+        app->supplicant->object(), app_add_supplicant_done, app);
 }
 
 /*
@@ -173,8 +212,7 @@ app_sm_presence_handler(GBinderServiceManager* sm, void* user_data)
 
     if (gbinder_servicemanager_is_present(app->sm)) {
         GINFO("Service manager reappeared, re-registering");
-        gbinder_servicemanager_add_service(app->sm, SERVICE_NAME,
-            app->service->object(), app_add_service_done, app);
+        app_register_all(app);
     } else {
         GINFO("Service manager has died");
     }
@@ -190,8 +228,7 @@ app_run(App* app)
 
     app->loop = g_main_loop_new(nullptr, TRUE);
 
-    gbinder_servicemanager_add_service(app->sm, SERVICE_NAME,
-        app->service->object(), app_add_service_done, app);
+    app_register_all(app);
 
     GINFO("waydroid-wifid ready.");
     g_main_loop_run(app->loop);
@@ -302,11 +339,28 @@ main(int argc, char* argv[])
     }
 
     std::unique_ptr<WifiBackend> backend(new NmBackend());
-    if (want_dev) {
-        backend->selectDevice(want_dev);
-    }
     if (!backend->init()) {
         GERR("backend \"%s\" failed to start", backend->name());
+        return RET_ERR;
+    }
+
+    /*
+     * --device is applied AFTER init(), because selectDevice() has to ask the
+     * backend whether the device exists and the backend has no connection to
+     * ask over until init() has built one.  Applied before, the check inside
+     * selectDevice() failed every time, warned "NetworkManager has no Wi-Fi
+     * device called ...", and then kept the name regardless -- so --device
+     * appeared to work while its validation did precisely nothing.
+     *
+     * A named device that does not exist is fatal, not a fallback.  By this
+     * point init() has already auto-selected some radio, and carrying on with
+     * THAT one after the operator explicitly named another is how Android ends
+     * up driving the host's only link -- trap 5 of docs/33-wifi-stage4.md, and
+     * the whole reason the name was given.  Refusing to start is the safe
+     * failure; picking a radio behind the operator's back is not.
+     */
+    if (want_dev && !backend->selectDevice(want_dev)) {
+        GERR("no Wi-Fi device called \"%s\" -- refusing to start", want_dev);
         return RET_ERR;
     }
 
@@ -370,7 +424,10 @@ main(int argc, char* argv[])
     GINFO("waiting for the container's service manager on %s", device);
     if (gbinder_servicemanager_wait(app.sm, -1)) {
         app.service = new Wificond(app.sm, backend.get());
+        app.supplicant = new Supplicant(app.sm, backend.get());
         app_run(&app);
+        delete app.supplicant;
+        app.supplicant = nullptr;
         delete app.service;
         app.service = nullptr;
         gbinder_servicemanager_unref(app.sm);

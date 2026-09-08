@@ -13,6 +13,18 @@
 # The scan checks run the host side first, so a failure lands on one side of
 # the WifiBackend contract or the other rather than "Wi-Fi is broken". They
 # take up to a minute: a real scan has to happen, twice.
+#
+# Stage 4 adds the supplicant. Its checks are ordered by what breaks first, so
+# the first FAIL names the layer at fault rather than the symptom:
+#
+#   1. is the service DECLARED?   the VINTF fragment, and therefore whether
+#                                 Android takes the AIDL path at all
+#   2. is it REGISTERED?          waydroid-wifid's binder object
+#   3. did the framework USE it?  the toggle staying on, which is the whole
+#                                 point of the stage
+#
+# It does NOT connect to anything. Association needs a password and a decision
+# about which network, so it is driven by hand -- see docs/33-wifi-stage4.md.
 set -u
 
 FAIL=0
@@ -46,7 +58,7 @@ echo "### is wlan0 present in the container?"
 LINK=$(sh_ 'ip -brief link show wlan0' | head -1)
 if [ -n "$LINK" ]; then say "OK   $LINK"; else
   say "WARN no wlan0 in the container. Not fatal for scanning; Stage 4 will"
-  say "     need it -- bin/wifi-wlan0.sh up"
+  say "     need it -- it is created by LXC (lxc.net.0.name = wlan0)"
 fi
 
 echo "### does the container see the service?"
@@ -66,6 +78,61 @@ echo "### recent wificond/WifiNative log"
 sh_ 'logcat -d -t 400' |
   grep -iE 'wificond|WifiNl80211|WifiNative|ClientModeManager|ActiveModeWarden' |
   tail -25 | sed 's/^/  /'
+
+echo "### is the supplicant DECLARED? (the VINTF fragment)"
+# isDeclared() reads the vendor VINTF manifest and nothing else. It is what
+# picks the AIDL path over HIDL, and it is a separate question from whether
+# anything has registered the service -- getting this wrong leaves Android
+# looking for a HIDL supplicant that does not exist, with no obvious symptom
+# beyond the toggle refusing to stay on.
+VINTF=$(sh_ 'cat /vendor/etc/vintf/manifest/manifest_android.hardware.wifi.supplicant.xml 2>/dev/null')
+if printf '%s' "$VINTF" | grep -q 'ISupplicant/default'; then
+  say "OK   the VINTF fragment is in effect inside the container"
+else
+  say "FAIL no supplicant VINTF fragment inside the container."
+  say "     Deploy artifacts/overlay/vendor/etc/vintf/manifest/ and then"
+  say "     'systemctl restart waydroid-container.service' -- a plain"
+  say "     'waydroid container restart' will NOT pick it up (docs/32)."
+  FAIL=1
+fi
+
+echo "### is the supplicant REGISTERED? (waydroid-wifid's binder object)"
+SUPSVC=$(sh_ 'service check android.hardware.wifi.supplicant.ISupplicant/default')
+say "$SUPSVC"
+case "$SUPSVC" in *"not found"*)
+  say "FAIL the supplicant service is not registered -- is waydroid-wifid the"
+  say "     build with Stage 4 in it?"; FAIL=1 ;;
+esac
+
+echo "### did the framework take the AIDL path and keep the interface?"
+# The positive form matters here for the same reason it did in Stage 2: the
+# Stage 3 failure was silent. 'Failed to start supplicant' is the exact line
+# that used to appear, so its absence is checked alongside a positive signal.
+SUPLOG=$(sh_ 'logcat -d -t 600' | grep -iE 'supplicant|SupplicantStaIfaceHal')
+printf '%s\n' "$SUPLOG" | tail -12 | sed 's/^/  /'
+BADSUP=$(printf '%s\n' "$SUPLOG" | grep -cE 'Failed to start supplicant|Unable to obtain ISupplicant|Failed to setup iface in supplicant')
+chk "supplicant setup failures" 0 "$BADSUP"
+
+if printf '%s' "$D" | grep -q 'Wi-Fi is enabled'; then
+  say "OK   the master toggle is on and has stayed on"
+else
+  say "WARN the master toggle is off. That is not a failure by itself -- it is"
+  say "     a setting -- but Stage 4's point is that it CAN now stay on."
+  say "     Turn it on with: cmd wifi set-wifi-enabled enabled"
+fi
+
+echo "### can wlan0 carry traffic? (Stage 4 needs DHCP on it)"
+WLAN=$(sh_ 'ip -brief addr show wlan0' | head -1)
+if printf '%s' "$WLAN" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+  say "OK   $WLAN"
+elif [ -n "$WLAN" ]; then
+  say "WARN wlan0 exists but has no IPv4 address yet: $WLAN"
+  say "     Not yet connected, or the association failed. If the SSID is"
+  say "     visible in a scan but will not associate: bin/wifi-radio-reset.sh"
+else
+  say "WARN no wlan0 in the container -- check lxc.net.0.name = wlan0 in"
+  say "     /var/lib/waydroid/lxc/waydroid/config, then restart the container"
+fi
 
 echo "### does the host backend see access points? (below the contract)"
 HOSTSCAN=$(sudo -n waydroid-wifid --scan 2>/dev/null)

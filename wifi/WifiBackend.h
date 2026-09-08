@@ -96,6 +96,30 @@ struct LinkState {
     std::string ipv4;
 };
 
+/*
+ * Why the association is in the state it is in.
+ *
+ * This is separate from LinkState because "not associated" is one state with
+ * several very different meanings, and the layer above cannot guess which.
+ * Android in particular renders a rejected password quite differently from a
+ * failed association -- and it will only do so if it is told specifically, in
+ * a specific sequence.  A backend that collapses the two turns "wrong
+ * password" into a silent retry loop, so the distinction is carried here
+ * rather than reconstructed later.
+ *
+ * Every host that owns a radio knows this much: NetworkManager reports it as
+ * the `reason` argument of Device.StateChanged, iwd as an agent error.
+ */
+enum class LinkEvent {
+    Associated,     /* an association is up and usable */
+    Associating,    /* an attempt is in progress */
+    AuthFailed,     /* credentials were rejected -- the password is wrong */
+    Failed,         /* everything else: no such AP, timed out, radio off */
+    Disconnected,   /* an established association ended */
+};
+
+const char* linkEventName(LinkEvent e);
+
 /* Bands, in the shape wificond's getAvailable*Channels() asks for them. */
 enum class Band {
     Band2g,
@@ -134,7 +158,16 @@ public:
     virtual bool disconnect() = 0;
     virtual bool forget(const std::string& ssid) = 0;
     virtual LinkState state() = 0;
-    virtual void onStateChanged(std::function<void(LinkState)> cb) = 0;
+
+    /*
+     * Association progress.  One callback carrying both what is true now and
+     * why, because that is the shape the host reports it in -- NM's
+     * StateChanged emits (new state, old state, reason) together, and splitting
+     * them here would only invite the layer above to correlate two streams that
+     * arrived as one.
+     */
+    virtual void onLinkEvent(
+        std::function<void(const LinkState&, LinkEvent)> cb) = 0;
 
     /*
      * Radio selection.  Android sees exactly one interface, so if the host has

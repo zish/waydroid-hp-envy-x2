@@ -1,22 +1,63 @@
-# Stock /system/etc/init/wificond.rc with one word added: "disabled".
+# Stock /system/etc/init/wificond.rc, neutered: the service still EXISTS by name
+# but execs a no-op, so starting it does nothing at all.
 #
-# Both stock wificond and waydroid-wifid register the same servicemanager name,
-# "wifinl80211", and addService() simply overwrites -- so whichever started
-# last owns it.  That is a race, not a design.  Marking the init service
-# disabled stops init auto-starting it at class main, leaving the name to the
-# host daemon unambiguously.
+# WHY NOT JUST "disabled" -- THE PREVIOUS VERSION OF THIS FILE
 #
-# Nothing else asks init to start wificond: WifiNative never issues
-# "ctl.start wificond", it only looks the service up.  Verified on this image.
+# Both stock wificond and waydroid-wifid register the servicemanager name
+# "wifinl80211", and addService() overwrites, so whichever registered last owns
+# it.  The first attempt at closing that race added one word, "disabled", to the
+# stock definition.  That was verified at the time and it was not enough.
+#
+# "disabled" means only "do not auto-start this at class main".  It does not
+# stop anything from asking init to start the service later, and on this image
+# something does: with the file in effect and confirmed by reading it from
+# inside the container, getprop init.svc.wificond still reported "running", and
+# wificond appeared within 1 ms of
+#
+#   WifiNl80211Manager: Setting up interface for client mode: wlan0
+#
+# So the on-demand start beat us every time, wificond took the name, and Android
+# then talked to a wificond that answers "No wiphy is found" and fails the
+# interface setup.  The reason Stages 2 and 3 never saw this is that only the
+# connectivity-mode path Stage 4 reaches asks for the interface that way.
+#
+# Killing it in a loop is WORSE, not better: init restarts a dead service on a
+# 5 s backoff, and a registered-then-dead binder makes Android report
+# "Failed to get reference to wificond", which is a different and more confusing
+# failure than the one being chased.
+#
+# Hence this shape.  Three deliberate parts:
+#
+#   /system/bin/true  execs and exits immediately, so it can never reach
+#                     addService() and can never take the name.  It is a toybox
+#                     symlink present in this image; checked, not assumed.
+#   oneshot           init must NOT restart it when it exits.  Without this the
+#                     no-op would respawn forever on the same 5 s backoff.
+#   disabled          kept, so it is not started at class main either.
+#
+# The capabilities and supplementary groups are dropped with the real binary:
+# /system/bin/true has no use for NET_RAW or NET_ADMIN, and a service definition
+# should not carry privileges its executable does not need.
+#
+# Effect: waydroid-wifid owns "wifinl80211" from whenever it starts, and nothing
+# ever overwrites it.  This removes the start-ordering requirement that the
+# workaround needed (wificond first, daemon last) -- with this in place the
+# daemon may start at any time.
+#
+# Reverting is deleting this file; that restores stock wificond, which will then
+# fight the daemon for the name again.
 #
 # Deploy to /var/lib/waydroid/overlay/system/etc/init/wificond.rc (0644
-# root:root) and `waydroid container restart`.  Delete the file to revert.
+# root:root).  Dropping the file in is NOT enough: the overlay lowerdir is
+# already mounted, so it needs `systemctl restart waydroid-container.service`
+# and a fresh session.  See AGENTS.md and 32-wifi-stage3.md.
 #
 # Original for comparison: artifacts/overlay/system/etc/init/wificond.rc.orig
+# Evidence and full reasoning: docs/34-wifi-second-radio.md
 
-service wificond /system/bin/wificond
+service wificond /system/bin/true
     class main
     user wifi
-    group wifi net_raw net_admin
-    capabilities NET_RAW NET_ADMIN
+    group wifi
     disabled
+    oneshot

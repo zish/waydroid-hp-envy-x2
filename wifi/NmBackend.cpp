@@ -17,7 +17,45 @@ namespace wifi {
 #define NM_AP       "org.freedesktop.NetworkManager.AccessPoint"
 #define DBUS_PROPS  "org.freedesktop.DBus.Properties"
 
+#define NM_SETTINGS         "org.freedesktop.NetworkManager.Settings"
+#define NM_SETTINGS_PATH    "/org/freedesktop/NetworkManager/Settings"
+#define NM_CONNECTION       "org.freedesktop.NetworkManager.Settings.Connection"
+#define NM_ACTIVE           "org.freedesktop.NetworkManager.Connection.Active"
+
 #define NM_DEVICE_TYPE_WIFI     2
+
+/*
+ * Ours, not NM's: the route metric for profiles this daemon creates.  Chosen to
+ * sit above NM's Wi-Fi default (600) so the host's own radio always outranks
+ * the one Android drives.  See buildSettings() for why that matters.
+ */
+#define WAYDROID_ROUTE_METRIC   1000
+
+/* NMDeviceState */
+#define NM_STATE_UNKNOWN        0
+#define NM_STATE_UNMANAGED      10
+#define NM_STATE_UNAVAILABLE    20
+#define NM_STATE_DISCONNECTED   30
+#define NM_STATE_PREPARE        40
+#define NM_STATE_CONFIG         50
+#define NM_STATE_NEED_AUTH      60
+#define NM_STATE_IP_CONFIG      70
+#define NM_STATE_IP_CHECK       80
+#define NM_STATE_SECONDARIES    90
+#define NM_STATE_ACTIVATED      100
+#define NM_STATE_DEACTIVATING   110
+#define NM_STATE_FAILED         120
+
+/*
+ * NMDeviceStateReason.  Only the credential ones are named, because they are
+ * the only ones the layer above draws a distinction on -- everything else is
+ * "it did not work", which Android renders identically however it happened.
+ */
+#define NM_REASON_NO_SECRETS            7
+#define NM_REASON_SUPPLICANT_DISCONNECT 8
+#define NM_REASON_SUPPLICANT_FAILED     10
+#define NM_REASON_SUPPLICANT_TIMEOUT    11
+#define NM_REASON_SSID_NOT_FOUND        53
 
 /* NM80211ApSecurityFlags */
 #define NM_SEC_PAIR_WEP40       0x00000001
@@ -53,6 +91,19 @@ securityName(Security s)
     return "?";
 }
 
+const char*
+linkEventName(LinkEvent e)
+{
+    switch (e) {
+    case LinkEvent::Associated:   return "associated";
+    case LinkEvent::Associating:  return "associating";
+    case LinkEvent::AuthFailed:   return "auth-failed";
+    case LinkEvent::Failed:       return "failed";
+    case LinkEvent::Disconnected: return "disconnected";
+    }
+    return "?";
+}
+
 /* ------------------------------------------------------------- lifecycle */
 
 NmBackend::NmBackend() = default;
@@ -61,6 +112,9 @@ NmBackend::~NmBackend()
 {
     if (mScanPollId) {
         g_source_remove(mScanPollId);
+    }
+    if (mStateSignalId && mBus) {
+        g_dbus_connection_signal_unsubscribe(mBus, mStateSignalId);
     }
     if (mBus) {
         g_object_unref(mBus);
@@ -88,19 +142,60 @@ NmBackend::init()
     GINFO("NetworkManager %s", g_variant_get_string(v, nullptr));
     g_variant_unref(v);
 
-    /* Pick a radio if the caller did not name one. */
+    /*
+     * Pick a radio if the caller did not name one -- and prefer one that is not
+     * carrying the host's own default route.
+     *
+     * Android sees exactly one radio, so something has to choose.  Taking the
+     * first NM happened to list was fine while this machine had a single
+     * adapter and unacceptable once it had two: NM's order is not stable or
+     * meaningful, so a coin flip decided whether Android drove the spare or the
+     * link this daemon is administered over.  Trap 5 of 33-wifi-stage4.md is
+     * what losing that flip costs -- a trip to the console.
+     *
+     * "Carries the default route" is NM's own judgement (Connection.Active's
+     * Default/Default6), not ours, so it stays right as the host's routing
+     * changes underneath us.
+     *
+     * This is a guard, not a guarantee.  If the host's radio is down at the
+     * moment we look, nothing is carrying a default route and the first entry
+     * wins again -- which is why --device exists and why anything unattended
+     * should pass it.
+     */
     if (mIfname.empty()) {
         std::vector<std::string> devs = devices();
         if (devs.empty()) {
             GWARN("NetworkManager reports no Wi-Fi device");
         } else {
-            if (devs.size() > 1) {
-                GINFO("%zu Wi-Fi devices; Android sees exactly one, choosing %s",
-                      devs.size(), devs[0].c_str());
+            std::string pick;
+            for (const std::string& d : devs) {
+                if (!carriesHostDefaultRoute(d)) {
+                    pick = d;
+                    break;
+                }
             }
-            selectDevice(devs[0]);
+            if (pick.empty()) {
+                pick = devs[0];
+                GWARN("every Wi-Fi device carries the host's default route; "
+                      "falling back to %s -- pass --device to be sure",
+                      pick.c_str());
+            } else if (devs.size() > 1) {
+                GINFO("%zu Wi-Fi devices; choosing %s (not carrying the host's "
+                      "default route)", devs.size(), pick.c_str());
+            }
+            selectDevice(pick);
         }
     }
+
+    /*
+     * Watch the device's state changes.  No path filter: the device path is
+     * resolved lazily and NM may not have one yet at init time, so the handler
+     * checks rather than the subscription.
+     */
+    mStateSignalId = g_dbus_connection_signal_subscribe(mBus, NM_BUS, NM_DEV,
+        "StateChanged", nullptr, nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+        onNmSignal, this, nullptr);
+
     return true;
 }
 
@@ -263,6 +358,44 @@ NmBackend::wifiDevicePath()
 }
 
 bool
+NmBackend::carriesHostDefaultRoute(const std::string& ifname)
+{
+    GVariant* res = call(NM_PATH, NM_IFACE, "GetDeviceByIpIface",
+        g_variant_new("(s)", ifname.c_str()), "(o)");
+
+    if (!res) {
+        return false;
+    }
+
+    const char* path = nullptr;
+    g_variant_get(res, "(&o)", &path);
+    std::string devPath = path ? path : "";
+    g_variant_unref(res);
+
+    if (devPath.empty()) {
+        return false;
+    }
+
+    /* No active connection means no routes of any kind. */
+    std::string active = propString(devPath.c_str(), NM_DEV, "ActiveConnection");
+    if (active.empty() || active == "/") {
+        return false;
+    }
+
+    bool isDefault = false;
+    for (const char* prop : { "Default", "Default6" }) {
+        GVariant* v = getProp(active.c_str(), NM_ACTIVE, prop);
+        if (v) {
+            if (g_variant_is_of_type(v, G_VARIANT_TYPE_BOOLEAN)) {
+                isDefault = isDefault || g_variant_get_boolean(v);
+            }
+            g_variant_unref(v);
+        }
+    }
+    return isDefault;
+}
+
+bool
 NmBackend::selectDevice(const std::string& ifname)
 {
     mIfname = ifname;
@@ -349,13 +482,16 @@ NmBackend::scanPollTick(gpointer user)
     if (last > self->mScanBaseline) {
         GDEBUG("NM finished a scan (LastScan %" G_GINT64_FORMAT ")", last);
         self->mScanPollId = 0;
+        self->mScanSuppressed = false;
         self->scanFinished(true);
         return G_SOURCE_REMOVE;
     }
     if (--self->mScanPollsLeft <= 0) {
         self->mScanPollId = 0;
-        if (self->mScanBlind) {
-            /* Nothing to watch on this host, so take the scan on trust. */
+        if (self->mScanBlind || self->mScanSuppressed) {
+            /* Nothing to watch on this host, or we deliberately did not scan:
+             * either way the cached results are the honest answer. */
+            self->mScanSuppressed = false;
             self->scanFinished(true);
         } else {
             GWARN("no scan from NetworkManager after %d ms",
@@ -407,6 +543,44 @@ NmBackend::startScan()
             mScanBaseline = g_variant_get_int64(v);
         }
         g_variant_unref(v);
+    }
+
+    /*
+     * Do not ask the radio to scan while it is trying to associate.
+     *
+     * PRECAUTIONARY, AND HONESTLY LABELLED: this guard was written to explain a
+     * run of failed associations where the supplicant sat in "scanning" until
+     * NetworkManager's 25 s activation timeout fired, and its log filled with
+     * "Reject scan trigger since one is already pending" without ever reaching
+     * "SME: Trying to authenticate".  The theory was that Android's
+     * disconnected-state scanning, forwarded through here, kept restarting
+     * wpa_supplicant's scan cycle so it never settled on a BSS.
+     *
+     * THAT THEORY DID NOT SURVIVE.  The next failure was captured with this
+     * guard in place and it never fired once -- no scan() arrived during the
+     * association at all -- and the real cause turned out to be a wedged
+     * rtw88_8822bu, which a driver reprobe cleared (see 34-wifi-second-radio.md).
+     * So nothing here is known to have fixed anything.
+     *
+     * It is kept because it is correct on its own terms -- asking a radio to
+     * go off-channel while it is mid-authentication is not something to do on
+     * purpose, and the scan-rejection spam in the supplicant log was real --
+     * but it should not be credited with a fix it did not make, and if it ever
+     * gets in the way it can be removed without regret.
+     *
+     * The scan is still ANSWERED, just not performed: getScanResults() returns
+     * NM's existing list, which is real data a few seconds old rather than
+     * invented.  Refusing outright would be worse -- WifiScannerImpl treats a
+     * failed scan as a reason to tear the interface down.
+     */
+    guint32 devState = propUint(path.c_str(), NM_DEV, "State");
+    if (devState >= NM_STATE_PREPARE && devState < NM_STATE_ACTIVATED) {
+        GDEBUG("association in progress (NM state %u); answering the scan from "
+               "cache rather than disturbing the radio", devState);
+        mScanSuppressed = true;
+        mScanPollsLeft = 1;
+        mScanPollId = g_timeout_add(SCAN_POLL_MS, scanPollTick, this);
+        return true;
     }
 
     GVariantBuilder b;
@@ -580,24 +754,393 @@ NmBackend::scanResults()
 /* ---------------------------------------------------------- association */
 
 /*
- * Stage 4.  Deliberately not faked: returning false here makes an unfinished
- * connect path visible in the log rather than silently doing nothing.
+ * Build the connection profile NM will store and activate.
+ *
+ * The awkward part is not the dictionary, it is that NM and the supplicant
+ * interface disagree about what a "network" is.  Android hands over a dozen
+ * separately-set properties -- key management mask, proto mask, pairwise and
+ * group ciphers, auth algorithms -- because that is wpa_supplicant's network
+ * block.  NM takes a key-mgmt string and works the rest out from the AP's own
+ * beacon.  So most of what Android carefully set is deliberately dropped here:
+ * passing NM a pairwise-cipher restriction derived from Android's defaults is
+ * a good way to fail an association that would otherwise have worked.
+ *
+ * What survives is what NM cannot infer: the SSID, the key management family,
+ * and the secret.
+ */
+GVariant*
+NmBackend::buildSettings(const NetworkRequest& req)
+{
+    GVariantBuilder conn, wireless, security, ipv4, ipv6, outer;
+    const char* keyMgmt = nullptr;
+
+    switch (req.security) {
+    case Security::Open:
+        keyMgmt = nullptr;
+        break;
+    case Security::WpaPsk:
+    case Security::Wpa2Psk:
+    case Security::Wpa2Wpa3Psk:
+        /*
+         * "wpa-psk" and not "sae" even for the transition case: NM negotiates
+         * the strongest the AP offers from this setting, whereas pinning "sae"
+         * would refuse the WPA2 leg outright if the AP turned out not to do
+         * WPA3 after all.
+         */
+        keyMgmt = "wpa-psk";
+        break;
+    case Security::Wpa3Sae:
+        keyMgmt = "sae";
+        break;
+    case Security::Wep:
+    case Security::Wpa2Eap:
+        GWARN("connect(%s): %s is not carried across this backend yet",
+              req.ssid.c_str(), securityName(req.security));
+        return nullptr;
+    }
+
+    if (keyMgmt && req.passphrase.empty()) {
+        GWARN("connect(%s): %s needs a passphrase and none arrived",
+              req.ssid.c_str(), securityName(req.security));
+        return nullptr;
+    }
+
+    g_variant_builder_init(&conn, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&conn, "{sv}", "id",
+        g_variant_new_string(connectionId(req.ssid).c_str()));
+    /* Identity; the id above is only a label.  See findConnection(). */
+    g_variant_builder_add(&conn, "{sv}", "uuid",
+        g_variant_new_string(connectionUuid(req.ssid).c_str()));
+    g_variant_builder_add(&conn, "{sv}", "type",
+        g_variant_new_string("802-11-wireless"));
+    g_variant_builder_add(&conn, "{sv}", "interface-name",
+        g_variant_new_string(mIfname.c_str()));
+    /*
+     * No NM-level autoconnect on profiles we own.  Android has its own
+     * reconnect logic -- WifiConnectivityManager calls connectToNetwork() when
+     * it wants to rejoin -- so autoconnect here would be a second, invisible
+     * scheduler competing with it.
+     *
+     * It also matters for failure.  A profile of ours with a bad password and
+     * autoconnect on would be retried by NM ahead of the host's own working
+     * profile for the same network, delaying the fallback that is the only
+     * thing keeping a mistyped password from stranding this machine.  With it
+     * off, a failed attempt leaves the field immediately.
+     */
+    g_variant_builder_add(&conn, "{sv}", "autoconnect",
+        g_variant_new_boolean(FALSE));
+
+    g_variant_builder_init(&wireless, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&wireless, "{sv}", "ssid",
+        g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, req.ssid.data(),
+                                  req.ssid.size(), 1));
+    g_variant_builder_add(&wireless, "{sv}", "mode",
+        g_variant_new_string("infrastructure"));
+
+    /*
+     * DHCP, but never at the host's expense.
+     *
+     * The radio Android drives is a second adapter; the host reaches the world
+     * over its own.  Both are likely to be on the SAME AP and therefore the
+     * same subnet, so without a guard NM would install two competing sets of
+     * routes and the host's default could land on the radio Android is free to
+     * disconnect at any moment.  That is trap 5 of 33-wifi-stage4.md wearing a
+     * different hat: the outage there came from Android's control of a radio
+     * reaching further than Android's own session.
+     *
+     * Two settings, because they stop two different things:
+     *
+     *   never-default  keeps this profile from ever supplying a DEFAULT route.
+     *   route-metric   keeps its ON-LINK subnet route from outranking the
+     *                  host's.  never-default does not cover this, and on a
+     *                  shared subnet it is the one that matters: a lower metric
+     *                  here would send replies to the host's own traffic out of
+     *                  the wrong interface, with a source address belonging to
+     *                  the other one.
+     *
+     * WAYDROID_ROUTE_METRIC sits well above NM's Wi-Fi default (600 on this
+     * host) so the host's radio always wins.  Android's traffic does not flow
+     * over this link today anyway -- wlan0 is a veth onto waydroid0 -- so this
+     * profile carries no route worth preferring.
+     */
+    g_variant_builder_init(&ipv4, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&ipv4, "{sv}", "method",
+        g_variant_new_string("auto"));
+    g_variant_builder_add(&ipv4, "{sv}", "never-default",
+        g_variant_new_boolean(TRUE));
+    g_variant_builder_add(&ipv4, "{sv}", "route-metric",
+        g_variant_new_int64(WAYDROID_ROUTE_METRIC));
+    g_variant_builder_init(&ipv6, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&ipv6, "{sv}", "method",
+        g_variant_new_string("auto"));
+    g_variant_builder_add(&ipv6, "{sv}", "never-default",
+        g_variant_new_boolean(TRUE));
+    g_variant_builder_add(&ipv6, "{sv}", "route-metric",
+        g_variant_new_int64(WAYDROID_ROUTE_METRIC));
+
+    g_variant_builder_init(&outer, G_VARIANT_TYPE("a{sa{sv}}"));
+    g_variant_builder_add(&outer, "{sa{sv}}", "connection", &conn);
+    g_variant_builder_add(&outer, "{sa{sv}}", "802-11-wireless", &wireless);
+    if (keyMgmt) {
+        g_variant_builder_init(&security, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(&security, "{sv}", "key-mgmt",
+            g_variant_new_string(keyMgmt));
+        g_variant_builder_add(&security, "{sv}", "psk",
+            g_variant_new_string(req.passphrase.c_str()));
+        /*
+         * Secret flag 0 is NM_SETTING_SECRET_FLAG_NONE: the passphrase is
+         * stored in the profile and owned by the system.  It has to be, or NM
+         * asks a secret agent for it at association time -- and there is no
+         * agent in the kiosk session to ask, so the connection would hang in
+         * NEED_AUTH rather than failing in a way we could report.
+         */
+        g_variant_builder_add(&security, "{sv}", "psk-flags",
+            g_variant_new_uint32(0));
+        g_variant_builder_add(&outer, "{sa{sv}}", "802-11-wireless-security",
+            &security);
+    }
+    g_variant_builder_add(&outer, "{sa{sv}}", "ipv4", &ipv4);
+    g_variant_builder_add(&outer, "{sa{sv}}", "ipv6", &ipv6);
+
+    return g_variant_builder_end(&outer);
+}
+
+/*
+ * Our OWN profile for an SSID, or "" if we have not made one.
+ *
+ * The important word is "own".  An earlier version of this matched on the SSID
+ * and updated whatever profile it found, so that Android and the host's
+ * desktop would share one profile per network -- which is tidy, and which is
+ * also a way to brick the machine.  wlp1s0 is this host's ONLY network
+ * interface (docs/28-wifi-feasibility.md).  Overwriting the psk of a working
+ * host profile with a password mistyped in Android therefore destroys the
+ * machine's only route off itself, and the repair is a trip to the physical
+ * console.
+ *
+ * So profiles we create are ours alone, and we never read, write or delete
+ * anything else.  The host's own saved networks are left exactly alone, which
+ * also leaves NM's autoconnect able to fall back to them when one of ours fails
+ * -- that fallback is what makes a wrong password recoverable rather than
+ * terminal.
+ *
+ * OWNERSHIP IS BY UUID, NOT BY NAME.  connection.id is a display string: the
+ * user can rename any profile from the desktop GUI, NM does not require it to
+ * be unique, and matching on it makes the guarantee above only as strong as a
+ * label nobody promised to leave alone.  Someone naming a profile
+ * "coffeeshop (Waydroid)" would hand us write access to it, and renaming ours
+ * would orphan it and silently accumulate duplicates -- the first of those is
+ * exactly the failure this rule exists to prevent.
+ *
+ * connection.uuid is NM's real primary key: unique, and immutable across
+ * renames.  We derive ours from the SSID (RFC 4122 v5, our own namespace) so it
+ * is reproducible from nothing but the SSID -- this daemon keeps no state
+ * between runs and must still recognise its own profile after a restart, which
+ * a randomly generated UUID could not do.
+ *
+ * The id is still set, because a human reading `nmcli connection` deserves to
+ * know where the profile came from.  It is a label now, not an identity.
+ *
+ * The cost is a duplicate profile for a network the host already knows.  That
+ * is a fair price.
+ */
+std::string
+NmBackend::connectionId(const std::string& ssid)
+{
+    return ssid + " (Waydroid)";
+}
+
+std::string
+NmBackend::connectionUuid(const std::string& ssid)
+{
+    /* Namespace for waydroid-wifid profile UUIDs.  Randomly generated once and
+     * fixed forever after: changing it orphans every profile we have made. */
+    static const guint8 kNamespace[16] = {
+        0x7f, 0x86, 0x2e, 0xff, 0x2c, 0xb3, 0x41, 0xe0,
+        0xad, 0xa9, 0x31, 0x51, 0x20, 0x0e, 0xf9, 0x7f
+    };
+
+    guint8 digest[20];
+    gsize len = sizeof(digest);
+    GChecksum* sha1 = g_checksum_new(G_CHECKSUM_SHA1);
+
+    g_checksum_update(sha1, kNamespace, sizeof(kNamespace));
+    g_checksum_update(sha1, (const guchar*) ssid.data(), ssid.size());
+    g_checksum_get_digest(sha1, digest, &len);
+    g_checksum_free(sha1);
+
+    digest[6] = (digest[6] & 0x0f) | 0x50;  /* version 5 */
+    digest[8] = (digest[8] & 0x3f) | 0x80;  /* RFC 4122 variant */
+
+    char out[37];
+    g_snprintf(out, sizeof(out),
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5],
+        digest[6], digest[7], digest[8], digest[9], digest[10], digest[11],
+        digest[12], digest[13], digest[14], digest[15]);
+    return std::string(out);
+}
+
+std::string
+NmBackend::findConnection(const std::string& ssid)
+{
+    const std::string want = connectionUuid(ssid);
+    GVariant* res = call(NM_SETTINGS_PATH, NM_SETTINGS, "ListConnections",
+        nullptr, "(ao)");
+
+    if (!res) {
+        return "";
+    }
+
+    GVariantIter* iter = nullptr;
+    gchar* path = nullptr;
+    std::string found;
+
+    /* _next rather than _loop: this loop exits early on a match, and
+     * g_variant_iter_loop leaks its last value if you break out of it. */
+    g_variant_get(res, "(ao)", &iter);
+    while (found.empty() && g_variant_iter_next(iter, "o", &path)) {
+        GVariant* settings = call(path, NM_CONNECTION, "GetSettings", nullptr,
+            "(a{sa{sv}})");
+        if (!settings) {
+            g_free(path);
+            continue;
+        }
+
+        GVariant* dict = g_variant_get_child_value(settings, 0);
+        GVariant* conn = g_variant_lookup_value(dict, "connection",
+            G_VARIANT_TYPE("a{sv}"));
+        if (conn) {
+            GVariant* v = g_variant_lookup_value(conn, "uuid",
+                G_VARIANT_TYPE_STRING);
+            if (v) {
+                if (want == g_variant_get_string(v, nullptr)) {
+                    found = path;
+                }
+                g_variant_unref(v);
+            }
+            g_variant_unref(conn);
+        }
+        g_variant_unref(dict);
+        g_variant_unref(settings);
+        g_free(path);
+    }
+    g_variant_iter_free(iter);
+    g_variant_unref(res);
+    return found;
+}
+
+/*
+ * Associate.  Returns whether NM ACCEPTED the request, not whether it worked
+ * -- the outcome arrives asynchronously through onLinkEvent(), which is what
+ * the supplicant interface above needs anyway.
  */
 bool
 NmBackend::connect(const NetworkRequest& req)
 {
-    GWARN("connect(%s): not implemented yet -- Stage 4", req.ssid.c_str());
-    return false;
+    std::string dev = wifiDevicePath();
+
+    if (dev.empty()) {
+        GWARN("connect(%s): no Wi-Fi device", req.ssid.c_str());
+        return false;
+    }
+
+    GVariant* settings = buildSettings(req);
+    if (!settings) {
+        return false;
+    }
+    g_variant_ref_sink(settings);
+
+    std::string existing = findConnection(req.ssid);
+    GVariant* res = nullptr;
+
+    if (!existing.empty()) {
+        GINFO("connect(%s): updating our profile %s",
+              req.ssid.c_str(), existing.c_str());
+        GVariant* upd = call(existing.c_str(), NM_CONNECTION, "Update",
+            g_variant_new("(@a{sa{sv}})", settings), "()");
+        if (!upd) {
+            GWARN("connect(%s): could not update the profile", req.ssid.c_str());
+            g_variant_unref(settings);
+            return false;
+        }
+        g_variant_unref(upd);
+        mOurSettingsPath = existing;
+        res = call(NM_PATH, NM_IFACE, "ActivateConnection",
+            g_variant_new("(ooo)", existing.c_str(), dev.c_str(), "/"), "(o)");
+    } else {
+        GINFO("connect(%s): adding our profile \"%s\"", req.ssid.c_str(),
+              connectionId(req.ssid).c_str());
+        res = call(NM_PATH, NM_IFACE, "AddAndActivateConnection",
+            g_variant_new("(@a{sa{sv}}oo)", settings, dev.c_str(), "/"),
+            "(oo)");
+    }
+
+    g_variant_unref(settings);
+    if (!res) {
+        GWARN("connect(%s): NetworkManager refused the activation",
+              req.ssid.c_str());
+        return false;
+    }
+    /* AddAndActivateConnection returns (settings, active); ActivateConnection
+     * returns just (active).  Only the first tells us a NEW settings path. */
+    if (existing.empty()) {
+        const char* added = nullptr;
+        g_variant_get_child(res, 0, "&o", &added);
+        mOurSettingsPath = added ? added : "";
+    }
+    g_variant_unref(res);
+
+    mConnectingSsid = req.ssid;
+    return true;
 }
 
+/*
+ * Disconnect ONLY a connection we activated, and do it by deactivating that
+ * connection rather than by disconnecting the device.
+ *
+ * Both halves of that sentence were learned the hard way, in the same outage.
+ *
+ * Device.Disconnect() is not "drop this association", it is "the user wants
+ * this device down", and NM honours it by BLOCKING autoconnect until something
+ * explicitly activates a connection again.  So calling it does not merely take
+ * the host off the network -- it pins it there, defeating the fallback to the
+ * host's own profile that is the entire safety net on a machine whose only
+ * network interface is this radio.  The device state that followed said so
+ * exactly: 110 -> 30, reason 39, "user-requested".
+ *
+ * And Android must not be able to disconnect something it did not connect.  If
+ * the active connection is the host's own profile, "turn Wi-Fi off in Android"
+ * has no business taking the host off its network, so this does nothing and
+ * says why.
+ */
 bool
 NmBackend::disconnect()
 {
     std::string dev = wifiDevicePath();
+
     if (dev.empty()) {
         return false;
     }
-    GVariant* res = call(dev.c_str(), NM_DEV, "Disconnect", nullptr, "()");
+
+    std::string active = propString(dev.c_str(), NM_DEV, "ActiveConnection");
+    if (active.empty() || active == "/") {
+        GDEBUG("disconnect(): nothing is active");
+        return true;
+    }
+
+    /* Is the active connection one of ours?  Compare by the settings object
+     * it was made from, which is what findConnection() returns. */
+    std::string settings = propString(active.c_str(), NM_ACTIVE, "Connection");
+    if (settings.empty() || settings != mOurSettingsPath) {
+        std::string id = propString(active.c_str(), NM_ACTIVE, "Id");
+        GINFO("disconnect(): the active connection \"%s\" is not ours -- "
+              "leaving the host's own network alone", id.c_str());
+        return true;
+    }
+
+    GINFO("disconnect(): deactivating our connection %s", active.c_str());
+    GVariant* res = call(NM_PATH, NM_IFACE, "DeactivateConnection",
+        g_variant_new("(o)", active.c_str()), "()");
     if (!res) {
         return false;
     }
@@ -605,11 +1148,30 @@ NmBackend::disconnect()
     return true;
 }
 
+/*
+ * Delete OUR profile for an SSID.  A profile the host made for the same
+ * network survives, so "forget" in Android does not silently unsave a network
+ * from the host's desktop -- see findConnection().  The host may therefore go
+ * on autoconnecting to a network Android has forgotten, which is the correct
+ * outcome: they are different users of one radio, and only one of them asked.
+ */
 bool
 NmBackend::forget(const std::string& ssid)
 {
-    GWARN("forget(%s): not implemented yet -- Stage 5", ssid.c_str());
-    return false;
+    std::string path = findConnection(ssid);
+
+    if (path.empty()) {
+        GDEBUG("forget(%s): we have no profile for it", ssid.c_str());
+        return true;
+    }
+
+    GINFO("forget(%s): deleting our profile %s", ssid.c_str(), path.c_str());
+    GVariant* res = call(path.c_str(), NM_CONNECTION, "Delete", nullptr, "()");
+    if (!res) {
+        return false;
+    }
+    g_variant_unref(res);
+    return true;
 }
 
 LinkState
@@ -658,14 +1220,111 @@ NmBackend::state()
 }
 
 void
-NmBackend::onStateChanged(std::function<void(LinkState)> cb)
+NmBackend::onLinkEvent(std::function<void(const LinkState&, LinkEvent)> cb)
 {
-    /*
-     * Stage 4 wires this to NM's StateChanged / PropertiesChanged signals.
-     * Stored now so the contract is honoured and the call site can already
-     * be written above the line.
-     */
-    mStateCb = std::move(cb);
+    mLinkCb = std::move(cb);
+}
+
+/*
+ * NM's Device.StateChanged, translated.
+ *
+ * Two things here are not obvious from the state numbers:
+ *
+ *   - DISCONNECTED is not a failure and usually is not even an ending.  NM
+ *     passes through it on the way INTO every association, so forwarding it
+ *     as a disconnect would tear down a connection that is being set up.  It
+ *     only means something when it follows ACTIVATED.
+ *
+ *   - NEED_AUTH is where a wrong password shows up first, but not reliably:
+ *     with the secret stored in the profile (psk-flags 0) NM retries and lands
+ *     in FAILED/NO_SECRETS, whereas with an agent in the picture it can sit in
+ *     NEED_AUTH instead.  Both are treated as a credential rejection, because
+ *     to the person who just typed a password they are the same event.
+ */
+void
+NmBackend::deviceStateChanged(guint32 newState, guint32 oldState, guint32 reason)
+{
+    LinkEvent ev;
+
+    if (!mLinkCb) {
+        return;
+    }
+
+    switch (newState) {
+    case NM_STATE_ACTIVATED:
+        ev = LinkEvent::Associated;
+        mConnectingSsid.clear();
+        break;
+
+    case NM_STATE_PREPARE:
+    case NM_STATE_CONFIG:
+    case NM_STATE_IP_CONFIG:
+    case NM_STATE_IP_CHECK:
+    case NM_STATE_SECONDARIES:
+        ev = LinkEvent::Associating;
+        break;
+
+    case NM_STATE_NEED_AUTH:
+        /*
+         * NOT a failure, however much it reads like one.  NM passes through
+         * NEED_AUTH on the way into a perfectly ordinary association -- it is
+         * "I am about to need the secret", not "the secret was wrong" -- and
+         * the successful association that recovered this machine on 2026-09-08
+         * went 50 -> 60 -> 40 -> 50 -> 70 -> ... -> 100 straight through it.
+         *
+         * Reporting AuthFailed here cost an outage.  The layer above turned it
+         * into Android's "wrong password" sequence mid-association, Android
+         * gave up and called disconnect(), and the host -- whose only network
+         * interface is this radio -- went offline while NM was still busy
+         * succeeding.  A credential rejection is FAILED with NO_SECRETS, and
+         * nothing else is.
+         */
+        ev = LinkEvent::Associating;
+        break;
+
+    case NM_STATE_FAILED:
+        ev = (reason == NM_REASON_NO_SECRETS) ?
+            LinkEvent::AuthFailed : LinkEvent::Failed;
+        mConnectingSsid.clear();
+        break;
+
+    case NM_STATE_DISCONNECTED:
+    case NM_STATE_DEACTIVATING:
+    case NM_STATE_UNAVAILABLE:
+    case NM_STATE_UNMANAGED:
+        /* Only an ending if something had actually started. */
+        if (oldState < NM_STATE_IP_CONFIG && !mConnectingSsid.empty()) {
+            return;
+        }
+        ev = LinkEvent::Disconnected;
+        break;
+
+    default:
+        return;
+    }
+
+    GDEBUG("NM device state %u -> %u (reason %u) = %s", oldState, newState,
+           reason, linkEventName(ev));
+
+    LinkState st = state();
+    mLinkCb(st, ev);
+}
+
+void
+NmBackend::onNmSignal(GDBusConnection* bus, const gchar* sender,
+    const gchar* path, const gchar* iface, const gchar* signal,
+    GVariant* params, gpointer user)
+{
+    NmBackend* self = (NmBackend*) user;
+    guint32 newState = 0, oldState = 0, reason = 0;
+
+    /* Subscribed without a path filter, because the device path is not known
+     * until NM has one; check here instead of assuming. */
+    if (self->wifiDevicePath() != path) {
+        return;
+    }
+    g_variant_get(params, "(uuu)", &newState, &oldState, &reason);
+    self->deviceStateChanged(newState, oldState, reason);
 }
 
 /* -------------------------------------------------------------- channels */

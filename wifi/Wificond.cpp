@@ -433,14 +433,26 @@ Wificond::handleClientInterface(GBinderRemoteRequest* req, guint code,
     case CLIENT_signalPoll: {
         /*
          * WifiNl80211Manager insists on exactly four ints and returns null
-         * otherwise:  rssi dBm, tx Mbps, rx Mbps, association frequency MHz.
+         * otherwise.  The ORDER is rssi dBm, tx Mbps, association frequency
+         * MHz, rx Mbps -- frequency third, NOT last.
+         *
+         * That is not the order the field names suggest, and getting it wrong
+         * is silent: every value is a plausible small integer, so nothing
+         * throws and nothing logs.  It surfaced only as a WifiInfo dump reading
+         * "Frequency: 130MHz, Rx Link speed: 2412Mbps" -- a 130 MHz channel and
+         * a 2.4 Gbps link on 802.11ac, both obviously impossible, and both
+         * exactly the other field's value.
+         *
+         * The authority is wificond's own client_interface_binder.cpp, which
+         * pushes rssi, tx_bitrate, associate_freq, rx_bitrate in that order;
+         * WifiNl80211Manager.SignalPollResult just reads positionally.
          */
         LinkState st = mBackend->state();
         std::vector<int32_t> v = {
             st.rssiDbm,
             st.txRateKbps / 1000,
-            st.rxRateKbps / 1000,
             st.freqMhz,
+            st.rxRateKbps / 1000,
         };
         GBinderLocalReply* reply = beginReply(mClient, &writer, status);
         writeInt32Array(&writer, v);
