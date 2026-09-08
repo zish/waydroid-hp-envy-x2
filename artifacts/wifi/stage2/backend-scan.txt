@@ -1,0 +1,13 @@
+[waydroid-wifid] NetworkManager 1.56.1
+[waydroid-wifid] using host radio wlp1s0 (/org/freedesktop/NetworkManager/Devices/2)
+backend: networkmanager, radio: wlp1s0, enabled: yes
+8 access points
+  vidiot                           76:bd:71:0f:a5:c2   2412 MHz   -67 dBm  wpa3-sae
+  my-wifi-can-beat-up-your-wifi    a4:2b:8c:16:5d:0e   2427 MHz   -68 dBm  wpa2-psk
+  f48fc5                           7c:7e:f9:aa:33:04   2462 MHz   -88 dBm  wpa3-sae
+  OffToDisney                      7c:7e:f9:aa:33:06   2462 MHz   -90 dBm  wpa2-psk
+  (hidden)                         b6:db:48:84:e1:4d   2462 MHz   -80 dBm  wpa-eap
+  AdventurousEagle                 ac:db:48:84:e1:4d   2462 MHz   -82 dBm  wpa2-psk
+  (hidden)                         d6:6c:6d:4e:3a:5f   2412 MHz   -89 dBm  wpa-eap
+  OffToDisney                      c8:9e:43:9e:96:5e   2462 MHz   -88 dBm  wpa2-psk
+link: associated to vidiot

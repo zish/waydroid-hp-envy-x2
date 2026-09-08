@@ -1,0 +1,24 @@
+[waydroid-wifid] NetworkManager 1.56.1
+[waydroid-wifid] using host radio wlp1s0 (/org/freedesktop/NetworkManager/Devices/2)
+[waydroid-wifid] holding /var/lib/waydroid/waydroid-wifid.pid
+[gbinder] Opened /dev/binder version 8
+[gbinder] Starting looper binder#1
+[gbinder] Looper binder#1 running
+[gbinder] /dev/binder has service manager
+[waydroid-wifid] waiting for the container's service manager on /dev/binder
+[waydroid-wifid] waydroid-wifid ready.
+[waydroid-wifid] Registered "wifinl80211"
+[waydroid-wifid] registerWificondEventCallback()
+[waydroid-wifid] createClientInterface(wlan0) -> serving IClientInterface
+[waydroid-wifid] getWifiScannerImpl()
+[waydroid-wifid] subscribeScanEvents()
+[waydroid-wifid] subscribePnoScanEvents()
+[waydroid-wifid] unsubscribeScanEvents()
+[waydroid-wifid] tearDownClientInterface(wlan0)
+[waydroid-wifid] tearDownInterfaces()
+[waydroid-wifid] createClientInterface(wlan0) -> serving IClientInterface
+[waydroid-wifid] getWifiScannerImpl()
+[waydroid-wifid] subscribeScanEvents()
+[waydroid-wifid] subscribePnoScanEvents()
+[waydroid-wifid] scan() -> true
+[waydroid-wifid] -> IScanEvent.OnScanResultReady

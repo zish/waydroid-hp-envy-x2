@@ -114,17 +114,29 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [docs/10-battery-fixed.md](docs/10-battery-fixed.md); verify with `bin/battery-test.sh`.
    Temperature is still unreported — that needs an NDK rebuild of the HAL (battery temp) or a new
    thermal HAL (system temps); both are scoped in docs/10.
-4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** Scoped 2026-09-07, nothing built
-   yet. The whole Android Wi-Fi framework is present and dormant in the image (`com.android.wifi`
-   APEX, `wificond`); what is missing is the feature XML, a supplicant, and any vendor HAL — the
-   image declares no Wi-Fi HAL in VINTF at all. Direct hardware access was considered and
-   **rejected**: `wlp1s0` is this machine's only network interface, so handing `phy0` to the
-   container costs the host its network while saving almost none of the software work. The design
-   is a host daemon serving the supplicant interface over libgbinder — the
-   [docs/14](docs/14-sensors.md) pattern — behind a **pluggable host backend**, so NetworkManager
-   is one implementation among several and others can add iwd or connman. Findings in
-   [docs/28-wifi-feasibility.md](docs/28-wifi-feasibility.md), staged plan in
-   [docs/29-wifi-plan.md](docs/29-wifi-plan.md).
+4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** **In progress: Stages 0 and 2
+   done, 3–5 outstanding.** The whole Android Wi-Fi framework was already present and dormant in
+   the image (`com.android.wifi` APEX, `wificond`); what was missing was the feature XML, a
+   supplicant, and any vendor HAL. Direct hardware access was considered and **rejected**: `wlp1s0`
+   is this machine's only network interface, so handing `phy0` to the container costs the host its
+   network while saving almost none of the software work. The design is a host daemon over
+   libgbinder — the [docs/14](docs/14-sensors.md) pattern — behind a **pluggable host backend**, so
+   NetworkManager is one implementation among several and others can add iwd or connman. Findings
+   in [docs/28-wifi-feasibility.md](docs/28-wifi-feasibility.md), plan in
+   [docs/29-wifi-plan.md](docs/29-wifi-plan.md), wire format pinned against this image in
+   [docs/30-wifi-aidl-surface.md](docs/30-wifi-aidl-surface.md).
+   **Stage 0** (one overlay file) woke the framework up and proved the no-vendor-HAL path works.
+   **Stage 1** — a real nl80211 phy via `virt_wifi` — is blocked and was routed around: the module
+   namespaces its netdev but pins its wiphy to `init_net`, so the fork was decided in favour of
+   replacing `wificond` in userspace rather than patching the kernel.
+   **Stage 2 is done**: `waydroid-wifid` (source in [wifi/](wifi)) registers `wifinl80211` on
+   `/dev/binder` and serves `IWificond`, `IClientInterface` and `IWifiScannerImpl`, and Android now
+   brings a client interface up and keeps it in `ScanOnlyModeState` against it. See
+   [docs/31-wifi-stage2.md](docs/31-wifi-stage2.md); verify with `bin/wifi-test.sh`.
+   **Next is Stage 3**, and it is one job — the `NativeScanResult` parcelable layout. The host half
+   already works (`waydroid-wifid --scan` lists the real access points). The Wi-Fi **master toggle
+   still does not stay on**, and cannot until Stage 4's supplicant: `ROLE_CLIENT_PRIMARY` calls
+   `startSupplicant()` before it ever reaches wificond.
 5. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.
    Exposing the user's `/run/media/<username>` directory is probably sufficient. **Deprioritised
    below Wi-Fi on 2026-09-07** at the owner's request.
@@ -151,9 +163,14 @@ and the reasoning behind each change.
   `powerbtn-probe.py`, which measures
   whether the power button reports a *held* press at all, and `netflix-trace.sh`, which straces a
   container app **from the host** — the trick that settled the Netflix question when every
-  in-container avenue had run out
+  in-container avenue had run out, plus the Wi-Fi pair (`wifi-wlan0.sh`, which puts a netdev
+  in the container's network namespace, and `wifi-test.sh`)
 - `sensors/` — source for `waydroid-sensord`, the host-side sensors daemon (goal 2). Build with
   `sensors/build.sh`; see the header comment for why it is a host daemon and not a guest HAL
+- `wifi/` — source for `waydroid-wifid`, the host-side wificond replacement (goal 4). Same shape as
+  `sensors/`. `WifiBackend.h` is the pluggable seam: everything above it speaks AIDL to Android,
+  everything below it speaks to whatever owns the radio on the host, and `NmBackend` is the first
+  implementation. Build with `wifi/build.sh`
 - `sensor-app/` — "Sensor Info", a dependency-free Kotlin app that displays every sensor live,
   with an attitude panel above it: a compass dial and a software-rendered 3-D view of the
   machine's orientation. Built without Gradle (`aapt2` + `kotlinc` + `d8` + `apksigner`);

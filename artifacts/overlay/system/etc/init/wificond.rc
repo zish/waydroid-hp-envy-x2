@@ -1,0 +1,22 @@
+# Stock /system/etc/init/wificond.rc with one word added: "disabled".
+#
+# Both stock wificond and waydroid-wifid register the same servicemanager name,
+# "wifinl80211", and addService() simply overwrites -- so whichever started
+# last owns it.  That is a race, not a design.  Marking the init service
+# disabled stops init auto-starting it at class main, leaving the name to the
+# host daemon unambiguously.
+#
+# Nothing else asks init to start wificond: WifiNative never issues
+# "ctl.start wificond", it only looks the service up.  Verified on this image.
+#
+# Deploy to /var/lib/waydroid/overlay/system/etc/init/wificond.rc (0644
+# root:root) and `waydroid container restart`.  Delete the file to revert.
+#
+# Original for comparison: artifacts/overlay/system/etc/init/wificond.rc.orig
+
+service wificond /system/bin/wificond
+    class main
+    user wifi
+    group wifi net_raw net_admin
+    capabilities NET_RAW NET_ADMIN
+    disabled

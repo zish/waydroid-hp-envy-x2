@@ -1,0 +1,30 @@
+09-07 23:34:40.353   260   281 I WifiService: setWifiEnabled package=com.android.shell uid=0 enable=true isPrivileged=true
+09-07 23:34:40.353   260   475 D WifiActiveModeWarden: Switching all client mode managers
+09-07 23:34:40.354   260   475 E WifiNative: Failed to connect to supplicant
+09-07 23:34:40.354   260   475 E WifiNative: Failed to start supplicant
+09-07 23:34:40.354   260   475 I WifiNative: Vendor Hal not supported, ignoring removeStaIface.
+09-07 23:34:40.354   260   475 D WifiNl80211Manager: tearing down interfaces in wificond
+09-07 23:34:40.355   260   475 I WifiNative: Vendor Hal not supported, ignoring stop.
+09-07 23:34:40.355   260   475 I WifiNative: Successfully torn down Iface:{Name=wlan0,Id=4,Type=STA_SCAN}
+09-07 23:34:40.355   260   475 I WifiNative: Successfully initiated teardown for iface=wlan0
+09-07 23:34:40.355   260   475 E WifiActiveModeWarden: ClientModeManager start failed!ConcreteClientModeManager{id=42323256 iface=wlan0 role=ROLE_CLIENT_SCAN_ONLY}
+09-07 23:34:40.355   260   481 E WifiNl80211Manager: No valid wificond scanner interface handler for iface=wlan0
+09-07 23:34:40.356   260   475 I WifiCountryCode: No active mode, call onDriverCountryCodeChanged with Null
+09-07 23:34:46.664   260   379 I WifiService: setWifiEnabled package=com.android.shell uid=0 enable=false isPrivileged=true
+09-07 23:34:46.664   260   475 D WifiActiveModeWarden: Starting primary ClientModeManager in scan only mode
+09-07 23:34:46.664   260   475 D WifiClientModeManager[unknown]: entering IdleState
+09-07 23:34:46.664   260   475 I WifiNative: Vendor Hal not supported, ignoring start.
+09-07 23:34:46.664   260   475 I WifiNative: Vendor Hal not supported, ignoring createStaIface.
+09-07 23:34:46.664   260   475 D WifiNl80211Manager: Setting up interface for client mode: wlan0
+09-07 23:34:46.665   260   475 I WifiNative: Interface state changed on Iface:{Name=wlan0,Id=5,Type=STA_SCAN}, isUp=true
+09-07 23:34:46.665   260   475 I WifiNative: Successfully setup Iface:{Name=wlan0,Id=5,Type=STA_SCAN}
+09-07 23:34:46.665   260   475 D WifiClientModeManager[wlan0]: entering StartedState
+09-07 23:34:46.665   260   475 D WifiClientModeManager[wlan0]: entering ScanOnlyModeState
+09-07 23:34:46.665   260   475 V WifiClientModeManager[wlan0]: ClientModeManager started in role: Role: ROLE_CLIENT_SCAN_ONLY, RequestorWs: WorkSource{0 com.android.shell}, ModeListener: com.android.server.wifi.ActiveModeWarden$ClientListener@ee0f510
+09-07 23:34:46.666   260   475 D WifiCountryCode: evaluateAllCmmStateAndApplyIfAllReady: {ConcreteClientModeManager{id=42332181 iface=wlan0 role=ROLE_CLIENT_SCAN_ONLY}=true}
+09-07 23:34:46.666   260   475 D WifiCountryCode: Reading country code from telephony
+09-07 23:34:46.666   260   475 D WifiCountryCode: Set telephony country code to: 
+09-07 23:34:46.666   260   475 D WifiCountryCode: updateCountryCode to null
+09-07 23:34:52.969   260   281 I WifiService: startScan uid=0
+09-07 23:34:52.972   260   281 D WifiNl80211Manager: Scan result ready event
+09-07 23:34:52.972   260   281 D WifiNative: Scan result ready event

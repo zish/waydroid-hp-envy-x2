@@ -95,6 +95,16 @@ NetworkManager is one implementation among several. `/dev/binder` turns out to b
 the host alongside `/dev/hwbinder`, so the AIDL side is reachable from a host daemon too. Wi-Fi is
 now goal 4; removable media is goal 5. [28](28-wifi-feasibility.md), [29](29-wifi-plan.md).
 
+**Session of 2026-09-08 built the first half of it.** `waydroid-wifid` — a host daemon in `wifi/` —
+now serves Android's `wifinl80211` over libgbinder on `/dev/binder`, replacing the container's own
+wificond entirely, and the Wi-Fi framework brings a client interface up and keeps it up against it:
+`Successfully setup Iface:{Name=wlan0,...}`, `entering ScanOnlyModeState`. Stage 1's blocker
+evaporated exactly as Path U predicted, because nothing in this design talks to nl80211 and `wlan0`
+only has to be a netdev. The NetworkManager backend behind the pluggable contract already reads the
+host's real access points (`waydroid-wifid --scan`); what is not connected yet is the parcelable
+that carries them into Android, and the supplicant, without which the master toggle cannot stay on.
+[31](31-wifi-stage2.md), verify with `bin/wifi-test.sh`.
+
 ## Parked, and worth revisiting
 
 Side-quests from the 2026-09-06 sessions, none of them on the AGENTS.md goal list. Each is
@@ -191,8 +201,8 @@ done and is in [docs/30-wifi-aidl-surface.md](30-wifi-aidl-surface.md): both HID
 supplicant paths ship in this image, selection is by VINTF declaration, the AIDL is version 1, and
 **both halves of the shim are AIDL on `/dev/binder`** — one dialect, no `hwservicemanager`. Watch
 the jarjar trap recorded there. Path U also kills the prebuilt-supplicant shortcut, because a stock
-`wpa_supplicant` needs a real phy; **the next milestone is Stage 2**, a `waydroid-wifid` skeleton
-that registers `wifinl80211` and gets the Wi-Fi toggle to stay on.
+`wpa_supplicant` needs a real phy; the next milestone was Stage 2, a `waydroid-wifid` skeleton
+that registers `wifinl80211`.
 
 **The AIDL surface is now pinned and cross-checked** — [docs/30](30-wifi-aidl-surface.md).
 `IWificond`'s 18 transaction codes were read out of this image's own `framework.jar` bytecode and
@@ -205,19 +215,33 @@ android.googlesource.com — no repo clone. The supplicant got the same cross-ch
 renumbered. The two **callback** interfaces remain unverified — the framework holds their `Stub`,
 not a `Proxy`, so there is nothing to read; that is deliberately deferred to runtime in Stage 4.
 
-**As of 2026-09-07 the active goal is 4, Wi-Fi** — Android's own Wi-Fi settings driving the
-host's NetworkManager. Scoped in that session; nothing is built yet. Removable media was explicitly
-deprioritised below it by the owner and is now goal 5.
+**Stage 2 landed on 2026-09-08 and works** — [docs/31-wifi-stage2.md](31-wifi-stage2.md).
+`waydroid-wifid` is a host daemon (`wifi/` in the repo) that registers `wifinl80211` on
+`/dev/binder` and serves `IWificond`, `IClientInterface` and `IWifiScannerImpl` over libgbinder,
+behind the pluggable `WifiBackend` contract with NetworkManager as the first backend. Android now
+logs `Successfully setup Iface:{Name=wlan0,...}` and `entering ScanOnlyModeState` — the exact
+inverse of Stage 1's failure. Verify with `bin/wifi-test.sh`; evidence in `artifacts/wifi/stage2/`.
 
-Start with [docs/29-wifi-plan.md](29-wifi-plan.md) and its **Stage 0**, which is one overlay file
-and a container restart. The findings behind the plan are in
-[docs/28-wifi-feasibility.md](28-wifi-feasibility.md); the headline is that the whole Android Wi-Fi
-framework is already in the image and dormant, so this is native plumbing rather than framework
-surgery.
+**One correction the plan needed: the Wi-Fi master toggle does not turn on yet, and could not
+have.** `ROLE_CLIENT_PRIMARY` runs `startSupplicant()` *before* it reaches wificond, so a
+wificond-only shim tops out at scan-only mode. The toggle is Stage 4's, with the supplicant.
 
-Three of that plan's open questions can be answered **offline on the dev box, with no host changes
-at all** — extract `service-wifi.jar` from the `com.android.wifi` APEX and read which supplicant
-interface Android 13 actually binds. That is free and it shapes the largest stage, so do it first.
+**The next milestone is Stage 3, and it is now one job: the `NativeScanResult` parcelable layout.**
+Both sides of that gap already exist — `IWifiScannerImpl.getScanResults()` is wired up and returns
+an empty array, and `waydroid-wifid --scan` prints the host's real AP list (15 of them, with
+correct security types) through the backend contract with no container involved. Read the layout
+out of this image's `framework.jar` with the same bytecode technique
+[docs/30](30-wifi-aidl-surface.md) used for the transaction codes, and real SSIDs appear in
+Android's own Wi-Fi picker.
+
+Two things to know before touching it:
+
+- **Nothing autostarts `waydroid-wifid`** — unlike `waydroid-sensord`, the name means nothing to
+  Waydroid. Start it by hand (`sudo waydroid-wifid --verbose &`) and put `wlan0` in the container
+  first with `bin/wifi-wlan0.sh up`. Packaging is Stage 5.
+- **Stock wificond has to be out of the way**, because both register the same name and the last
+  writer wins. It is currently stopped by hand; `artifacts/overlay/system/etc/init/wificond.rc`
+  makes that permanent but is **not deployed** — it needs a `waydroid container restart`.
 
 The other two candidates, both still open:
 
@@ -300,6 +324,12 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | **`/var/tmp/waydroid-install/`** | staged sources for the two installers above (`cage`, `graceful-exit`). `/var/tmp` survives reboots; safe to delete |
 | **`/etc/wayland-sessions/waydroid-cage.desktop`** | the SDDM session entry, `cage -s -- …/waydroid-cage-session`, mode `0644`. Pre-existing file; restore the one-line `Exec=cage -- waydroid show-full-ui` to revert |
 | `/var/tmp/powerbtn-probe.py` | copy of [bin/powerbtn-probe.py](../bin/powerbtn-probe.py), for the untested button-hold question in [15](15-power-button.md). `/var/tmp` survives reboots; safe to delete |
+| **`overlay/system/etc/permissions/android.hardware.wifi.xml`** | **Wi-Fi Stage 0** — the one file that brings Android's whole Wi-Fi framework out of dormancy, mode `0644`. Delete to revert. See [29](29-wifi-plan.md) |
+| **`/usr/local/bin/waydroid-wifid`** | **Wi-Fi Stage 2 — the host-side wificond replacement**, 688 KB, mode `0755`. Nothing starts it automatically; run it by hand. Delete to revert. See [31](31-wifi-stage2.md) |
+| `wlan0` in the container | a `dummy` netdev added by `bin/wifi-wlan0.sh up` so netd's observer has something to watch. **Does not survive a reboot**; `bin/wifi-wlan0.sh down` removes it |
+| stock `wificond` | **stopped by hand** (`ctl.stop` then `kill -9`; the ctl.stop alone left it in `stopping` forever). It and `waydroid-wifid` register the same name, so the last one to register wins. A `waydroid container restart` brings it back. `artifacts/overlay/system/etc/init/wificond.rc` makes the suppression permanent but is **not deployed** |
+| `/var/lib/waydroid/waydroid-wifid.pid` | the wifi daemon's single-instance lock. Recreated on demand, safe to delete |
+| `/tmp/wifid.log`, `/tmp/wifi-test.sh`, `/tmp/wifi-wlan0.sh` | Stage 2 working files; `/tmp` clears on reboot |
 | **`/usr/local/bin/waydroid-sensord`** | **the sensors fix**, 663 KB, mode `0755`. `/usr/local` is a symlink to `/var/usrlocal`, so no layering and no reboot. **Delete to revert** — waydroid then restores `waydroid.stub_sensors_hal=1` by itself |
 | `/var/lib/waydroid/waydroid-sensord.pid` | the daemon's single-instance lock. Recreated on demand, safe to delete |
 | `/etc/waydroid-sensors.conf` | **not installed.** Optional; documented sample in [artifacts/sensors/](../artifacts/sensors/) |

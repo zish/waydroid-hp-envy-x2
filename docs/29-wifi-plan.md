@@ -1,7 +1,9 @@
 # Plan — Android Wi-Fi settings driving NetworkManager
 
-**Date:** 2026-09-07. **Status:** plan only, nothing built. Findings it rests on are in
-[28-wifi-feasibility.md](28-wifi-feasibility.md); read that first.
+**Date:** 2026-09-07, updated 2026-09-08. **Status:** Stages 0 and 2 done, Stage 1 blocked and
+routed around, Stages 3–5 outstanding. Findings it rests on are in
+[28-wifi-feasibility.md](28-wifi-feasibility.md); read that first, then
+[31-wifi-stage2.md](31-wifi-stage2.md) for what is actually running.
 
 ## Goal
 
@@ -101,6 +103,10 @@ public:
 Fourteen methods. `NmBackend` implements them against NetworkManager's D-Bus API —
 `RequestScan`, the `AccessPoint` objects under each wireless device, `AddAndActivateConnection`,
 and `StateChanged` signals. Nothing in the Android-facing half ever learns which backend it has.
+
+*As built (`wifi/WifiBackend.h`) this grew a fifteenth, `frequencies(Band)`: `IWificond` has five
+`getAvailable*Channels()` calls and the answer is a property of the host radio, which is exactly
+what lives below the line.*
 
 ## Stages
 
@@ -223,21 +229,48 @@ Two consequences of that choice, both worth stating plainly:
 - **Everything is AIDL on `/dev/binder`.** Both halves speak one dialect to `servicemanager` — see
   [30](30-wifi-aidl-surface.md). Simpler than the mixed HIDL/AIDL design this plan first assumed.
 
-### Stage 2 — `waydroid-wifid` skeleton, and Wi-Fi that turns *on*
+### Stage 2 — `waydroid-wifid` skeleton, and a client interface that stays up — **DONE, 2026-09-08**
 
 Host daemon, C++ over libgbinder on `/dev/binder`, registering **`wifinl80211`** and implementing
-enough of `IWificond` that `WifiNative` gets a `ClientInterface` back. A netdev named `wlan0` must
-exist for netd's observer, but at this stage it carries no traffic — `ip link add wlan0 type dummy`
-inside the container's netns is enough.
+`IWificond`, `IClientInterface` and `IWifiScannerImpl`. A netdev named `wlan0` must exist for netd's
+observer, but at this stage it carries no traffic — `bin/wifi-wlan0.sh up` adds a `dummy` inside the
+container's netns.
 
-**Proves:** the toggle stays on. Target evidence is the exact inverse of Stage 1's failure —
-`Wi-Fi is enabled`, `mClientInterfaceName: wlan0`, no `Failed to setup iface in wificond`.
+**It worked, and the target evidence is exactly the inverse of Stage 1's failure:**
+`Successfully setup Iface:{Name=wlan0,Id=5,Type=STA_SCAN}`, `entering ScanOnlyModeState`,
+`mClientInterfaceName: wlan0`, and no `Failed to setup iface in wificond`. Full writeup in
+[31-wifi-stage2.md](31-wifi-stage2.md); evidence in `artifacts/wifi/stage2/`; verify with
+`bin/wifi-test.sh`.
 
-### Stage 3 — scan-only mode: real SSIDs in the picker
+**One thing in this stage's framing was wrong and is corrected there: the toggle does *not* turn
+on yet, and could not have.** Switching Wi-Fi on puts `ActiveModeWarden` into `ROLE_CLIENT_PRIMARY`,
+which runs `setupInterfaceForClientInConnectivityMode()` — and that calls `startSupplicant()`
+*before* it ever reaches wificond, so it fails with `Failed to start supplicant`. A wificond-only
+shim can reach **scan-only mode** and no further, which is what Stage 3 below already said. The
+toggle belongs to Stage 4.
 
-Extend the same daemon: `IWifiScannerImpl` + `IScanEvent`, with results synthesized from
-NetworkManager's D-Bus `AccessPoint` objects through the `WifiBackend` contract. Android's
-`ROLE_CLIENT_SCAN_ONLY` needs no supplicant at all.
+Two things fell out of doing it:
+
+- **A host process registering a service in the container's servicemanager is no longer an
+  assumption.** Waydroid does it already — `tools/interfaces/IUserMonitor.py`, `IClipboard.py`,
+  `INotifications.py` and `IHardware.py` are host-side python-gbinder objects in the guest's
+  `/dev/binder` domain. The SELinux risk below is retired by the running system, not by our code.
+- **`IScanEvent.OnScanResultReady` at code 1 is confirmed at runtime**, which is the first answer to
+  [30](30-wifi-aidl-surface.md)'s one unverifiable question — callback transaction codes. The same
+  technique settles the supplicant's two callbacks in Stage 4.
+
+### Stage 3 — real SSIDs in the picker
+
+Scan-only mode itself arrived in Stage 2, and so did both halves of the plumbing on either side of
+the gap: `IWifiScannerImpl` + `IScanEvent` above, and NetworkManager's `AccessPoint` objects below
+(`waydroid-wifid --scan` prints the host's real AP list through the `WifiBackend` contract). **What
+is left is exactly one thing — the `NativeScanResult` parcelable layout**, which has to come out of
+this image's `framework.jar` the same way the transaction codes did in
+[30](30-wifi-aidl-surface.md). Until then `getScanResults()` returns an empty array, which is legal
+and does not crash anything.
+
+`SingleScanSettings` will want parsing here too, once a backend can act on a channel list or a
+hidden-SSID list.
 
 **Proves the backend contract end-to-end** — NM's real scan list rendered by Android's own Wi-Fi
 picker — while the connect path is still unwritten. This is the milestone Path U would otherwise
@@ -284,8 +317,8 @@ them later, the backend contract is where they would land.
 | ~~Feature XML alone does not start `WifiService`~~ | **resolved 2026-09-07 — it does** |
 | ~~No-vendor-HAL path does not exist in Android 13~~ | **resolved 2026-09-07 — `mWifi: null` and the framework carried on regardless** |
 | Which supplicant interface T binds — HIDL 1.4 vs AIDL v1/v2 | before Stage 3, offline (below) |
-| No usable prebuilt supplicant for x86_64 A13 | Stage 2, falls through to Stage 3 |
-| SELinux blocks a host daemon serving these particular services | Stage 3; sensors is precedent but not proof |
+| No usable prebuilt supplicant for x86_64 A13 | moot — Path U killed the prebuilt shortcut |
+| ~~SELinux blocks a host daemon serving these particular services~~ | **resolved 2026-09-08 — `wifinl80211` registered from the host; Waydroid's own `IUserMonitor`/`IClipboard` were doing this all along** |
 | Kernel-module maintenance burden | avoided if the Path K/U fork goes userspace |
 | **`virt_wifi` pins its wiphy to `init_net`** — netdev is namespaced, wiphy is not | **found 2026-09-07**; forces the Path K/U fork above |
 | Waydroid image updates wiping assumptions | overlay files survive; image contents may not |
