@@ -260,9 +260,26 @@ handshake every time; `key-mgmt sae` connects immediately. Ruled out along the w
 one variable: MAC randomization (`cloned-mac-address permanent` — no change) and power save
 (`wifi.powersave 2` — no change).
 
-**Not distinguished:** whether the AP's PSK leg is broken or `rtw88_8822bu` cannot complete a WPA2
-handshake. Telling them apart means trying `wpa-psk` on `wlp1s0`, which risks the host's only
-working link for a question that does not change what we do. Left open deliberately.
+**Not distinguished** at the time: whether the AP's PSK leg is broken or `rtw88_8822bu` cannot
+complete a WPA2 handshake. Telling them apart means trying `wpa-psk` on `wlp1s0`, which risks the
+host's only working link for a question that does not change what we do. Left open deliberately.
+
+> **Resolved 2026-09-08 — the AP's PSK leg is fine; the T3U is the side that cannot do WPA2.**
+> The experiment had been running the whole time and nobody had looked: the host's own `vidiot`
+> profile was `key-mgmt: wpa-psk` and **associated on `wlp1s0`** throughout, measured while checking
+> something else entirely. So this AP completes a WPA2 4-way handshake perfectly well with the Intel
+> radio, and the failure is specific to `rtw88_8822bu` (or that adapter).
+>
+> Worth noting how cheap the answer turned out to be. The test was framed as "risk the host's only
+> working link", which was true when [28-wifi-feasibility.md](28-wifi-feasibility.md)'s
+> one-interface premise held; once the T3U made `wlp1s0` the spare rather than the lifeline, the
+> question was answerable by reading a property. The premise changed and the cost estimate attached
+> to it did not.
+>
+> The machine's owner has since changed that profile to `sae` by hand, so the evidence is now
+> historical — but it was measured, not inferred. See
+> [36-wifi-credential-sync.md](36-wifi-credential-sync.md) for why the profile's key-mgmt now
+> matters beyond the host: it is what the credential sync maps to Android's security type.
 
 The practical consequence: the network must be given to Android as `wpa3`, not `wpa2`.
 `cmd wifi connect-network vidiot wpa2 …` builds a `WPA_PSK | WPA_PSK_SHA256` config (`0x102`) that
