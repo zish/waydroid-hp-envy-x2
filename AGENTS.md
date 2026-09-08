@@ -123,8 +123,8 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [docs/10-battery-fixed.md](docs/10-battery-fixed.md); verify with `bin/battery-test.sh`.
    Temperature is still unreported — that needs an NDK rebuild of the HAL (battery temp) or a new
    thermal HAL (system temps); both are scoped in docs/10.
-4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** **In progress: Stages 0, 2, 3 and 4
-   done; Stage 5 (hardening) outstanding.** The whole Android Wi-Fi framework was already present and dormant in
+4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** **In progress: Stages 0 and 2–5
+   largely done; some Stage 5 polish outstanding.** The whole Android Wi-Fi framework was already present and dormant in
    the image (`com.android.wifi` APEX, `wificond`); what was missing was the feature XML, a
    supplicant, and any vendor HAL. Direct hardware access was considered and **rejected**: `wlp1s0`
    is this machine's only network interface, so handing `phy0` to the container costs the host its
@@ -164,9 +164,30 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    and kills the Ethernet-outscores-Wi-Fi trap for good. The wificond name race is now closed
    durably by an overlay `.rc` that execs `/system/bin/true`. See
    [docs/34-wifi-second-radio.md](docs/34-wifi-second-radio.md).
-   **Stage 5 remains**: no systemd unit, so the daemon does not survive a reboot; and the T3U can
-   wedge into a state where it scans but will not associate, recovered manually with
-   `bin/wifi-radio-reset.sh`.
+   **Stage 5 is largely done** — `waydroid-wifid.service` runs the daemon from boot, and a reboot
+   was watched end to end: the daemon came up before the container, waited for its servicemanager,
+   registered both names, and Android reached `ROLE_CLIENT_PRIMARY` with validated internet with
+   nobody touching anything. Two findings dominate.
+   **The daemon only ever worked because it was started by hand.** systemd runs a `bin_t` binary as
+   `unconfined_service_t`, and the host policy allows `binder { call }` to that domain but **denies
+   `binder { transfer }`** from `container_runtime_t`. Calls carrying no binder succeed while every
+   callback-passing call fails with a bare `DeadObjectException`, and the rule is `dontaudit`ed, so
+   `ausearch` shows nothing. Fixed with `SELinuxContext=` in the unit — a policy module was rejected
+   as the weaker option, since it would grant that transfer to every unconfined service on the host.
+   **Android showed no networks because of a channel list, not a timestamp.** `WificondScannerImpl`
+   has *two* filters incrementing one counter — a `tsf` check and a `containsChannel()` check — so
+   "Filtering out N" is ambiguous, and the channel lists come from our own `getAvailable*Channels`,
+   which was the one handler that logged nothing. It does now. Two real `tsf` bugs were fixed on the
+   way (NM truncates `LastSeen` to whole seconds; a scan is a sweep, not an instant).
+   Android also does not restart Wi-Fi after the daemon restarts, and the cause is AOSP's own quota:
+   `SelfRecovery` allows 2 restarts an hour and one daemon restart delivers 2–3 binder deaths, so
+   the first spends the budget. `waydroid-wifi-nudge` re-enables it, respecting `wifi_on`.
+   The radio is now pinned by **factory MAC**, not by `wlp0s20u1`, which is a USB-topology name.
+   See [docs/35-wifi-stage5.md](docs/35-wifi-stage5.md).
+   **Still open**: the T3U wedge has no automatic trigger (and `nmcli connection up` remains the
+   mandatory discriminator before reprobing — it saved a wasted reprobe this session);
+   `NmBackend::forget()` is implemented but nothing calls it, so forgetting a network in Android
+   leaves its PSK in NetworkManager; and signal/state fidelity in Android's UI is unreviewed.
 5. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.
    Exposing the user's `/run/media/<username>` directory is probably sufficient. **Deprioritised
    below Wi-Fi on 2026-09-07** at the owner's request.

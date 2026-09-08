@@ -1,0 +1,133 @@
+# Serve Android's Wi-Fi native interfaces across a reboot.
+#
+# Installed at /etc/systemd/system/waydroid-wifid.service by
+# `wifi/build.sh --install --unit`.  Nothing else depends on this unit;
+# `systemctl disable --now waydroid-wifid` restores the "start it by hand"
+# behaviour that docs/34-wifi-second-radio.md documents, and deleting the file
+# removes it completely.
+#
+# See docs/35-wifi-stage5.md.
+
+[Unit]
+Description=Wi-Fi native services for Waydroid's Android container
+Documentation=file:///usr/share/doc/waydroid-bigtab01/docs/34-wifi-second-radio.md
+
+# NetworkManager is the backend, and NmBackend::init() refuses to start if NM
+# is not answering on the system bus.  Ordering after it turns what would be a
+# boot race into a non-event; Wants= rather than Requires= because a host with
+# NM disabled should get one clear "NetworkManager is not answering" in the
+# journal, not a dependency failure that hides it.
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+# The binder device, and the ONLY hard dependency.
+#
+# Deliberately NOT ordered after waydroid-container.service.  The daemon is
+# built to outlive the container -- it waits for the guest's servicemanager
+# with gbinder_servicemanager_wait(sm, -1) and re-registers from its presence
+# handler when the container restarts (docs/29-wifi-plan.md, Stage 5).  Tying
+# its startup to the container would throw that away and make a container
+# restart able to take the daemon with it.
+#
+# This is also why ExecStart names /dev/binderfs/binder rather than the
+# daemon's own default of /dev/binder: /dev/binder is a symlink created by
+# waydroid-container.service's ExecStartPre, so using it would smuggle the
+# container back in as a startup dependency.  The binderfs node itself exists
+# as soon as the mount unit is up.
+Requires=dev-binderfs.mount
+After=dev-binderfs.mount
+
+# See the note above Restart= in [Service] for why there is no start rate limit.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+
+# The radio to hand Android lives here, not in this unit, so changing adapters
+# does not mean editing a packaged file.  A missing file is not an error: with
+# no arguments the daemon auto-selects a radio that is not carrying the host's
+# default route, which is a guard rather than a guarantee -- see the conf file.
+EnvironmentFile=-/etc/waydroid-wifid.conf
+ExecStart=/usr/local/bin/waydroid-wifid $WAYDROID_WIFID_ARGS /dev/binderfs/binder
+
+# Run in the domain this daemon has ALWAYS run in, and the only one it works in.
+#
+# This is not a preference, it is a hard requirement, and finding out why cost
+# most of a session -- see docs/35-wifi-stage5.md.  systemd runs a bin_t
+# executable as unconfined_service_t, and the host policy says:
+#
+#   container_runtime_t -> unconfined_service_t : binder { call }      allow
+#   container_runtime_t -> unconfined_service_t : binder { transfer }  DENY
+#   container_runtime_t -> unconfined_t         : binder { transfer }  allow
+#
+# container_runtime_t is what system_server runs as here.  `transfer` is the
+# permission to pass a binder REFERENCE, so the split is surgical and silent:
+# createClientInterface() and addStaInterface() carry no binder and succeed,
+# while subscribeScanEvents() and ISupplicantStaIface.registerCallback() carry
+# the framework's callback object and fail with a bare DeadObjectException.
+# Android then tears the interface down and sits in DisabledState.  Nothing is
+# logged as a denial -- the rule is dontaudit'ed -- so it presents as the daemon
+# being mysteriously half-broken.
+#
+# The daemon worked for all of Stages 2-4 only because it was started by hand
+# from an ssh login, which is unconfined_t.  Running it under systemd is what
+# exposed this, and it would have exposed it on the first reboot instead.
+#
+# The alternative -- a policy module granting container_runtime_t the transfer
+# to unconfined_service_t -- was rejected as the WEAKER option: it would let
+# Android pass binders to every unconfined service on the host, where this
+# grants nothing to anything and only puts one daemon back in the domain it was
+# developed and verified in.
+SELinuxContext=system_u:unconfined_r:unconfined_t:s0
+
+# Put Android's Wi-Fi back on if this was a restart under a running container.
+#
+# Not the daemon's job and deliberately not in the daemon: it is a workaround
+# for a quota inside AOSP's WifiSelfRecovery, it needs to ask Android questions
+# the daemon has no way to ask, and it must be trivially removable when a better
+# answer turns up.  The script explains the quota in full; the "-" means a
+# failure here can never fail the daemon.
+#
+# It blocks `systemctl restart` for as long as it takes Android to come back,
+# up to about 45 s.  That is tolerable because nothing depends on this unit, and
+# it is better than reporting the service started while Wi-Fi is still down.
+# At boot it detects that Android was not already running and returns at once.
+ExecStartPost=-/usr/local/bin/waydroid-wifi-nudge
+
+Restart=always
+RestartSec=5
+
+# No start rate limit, on purpose.
+#
+# `--device` naming a radio that is not present is FATAL by design (a daemon
+# that quietly fell back to another radio could hand Android the host's own
+# link -- trap 5 of docs/33-wifi-stage4.md).  A USB adapter that is unplugged,
+# or that enumerates late, therefore shows up as a restart loop, and the
+# correct behaviour is to keep trying until it comes back rather than to give
+# up permanently after five attempts.  At RestartSec=5 that costs one line in
+# the journal every five seconds while the adapter is genuinely absent.
+#
+# The directive itself lives in [Unit], NOT [Service] -- systemd parses it only
+# there, and in [Service] it is silently ignored with one "Unknown key" line
+# that is easy to miss.  It was in the wrong section on first deployment.
+
+# Logs go to the journal: `journalctl -u waydroid-wifid -f`.  This supersedes
+# the /var/log/waydroid-wifid.log that the by-hand recipe in docs/34 redirects
+# into; that file is not written by this unit and can be deleted.
+
+# NOT sandboxed, and both of the obvious directives are left off deliberately:
+#
+#   PrivateTmp=yes       would break the single-instance guard.  /tmp is the
+#                        last of the daemon's three lock-file locations, so a
+#                        private /tmp would let this instance and a hand-started
+#                        one hold "different" locks and both register services.
+#   NoNewPrivileges=yes  can suppress the SELinux domain transition, leaving the
+#                        daemon in init_t instead of the domain the policy picks
+#                        for it.  On an Enforcing host that trades a known
+#                        confinement for an unknown one to no benefit.
+#
+# SELinux is the confinement that matters here; see docs/35-wifi-stage5.md for
+# the domain this actually runs in and the denials looked for.
+
+[Install]
+WantedBy=multi-user.target

@@ -41,6 +41,45 @@ if pgrep -x waydroid-wifid >/dev/null; then
 else
   say "FAIL waydroid-wifid is not running"; FAIL=1
 fi
+
+# Stage 5. The domain check is not housekeeping -- it is the single check that
+# would have saved most of a session, and it is placed first because everything
+# below it fails in confusing ways when it is wrong.
+#
+# systemd runs a bin_t executable as unconfined_service_t, and the host policy
+# ALLOWS binder { call } to that domain while DENYING binder { transfer }. So
+# createClientInterface() and addStaInterface() succeed, and every call that
+# carries a callback binder -- subscribeScanEvents, registerCallback -- fails
+# with a bare DeadObjectException. The rule is dontaudit'ed, so `ausearch` shows
+# nothing and the obvious first move gives the wrong answer. See docs/35.
+DOM=$(ps -o label= -C waydroid-wifid 2>/dev/null | head -1 |
+      awk -F: '{print $3}')
+case "$DOM" in
+unconfined_t)
+  say "OK   running in $DOM, which can accept binder references from Android" ;;
+"")
+  say "WARN could not read waydroid-wifid's SELinux domain" ;;
+*)
+  say "FAIL running in $DOM -- Android cannot pass it a binder reference."
+  say "     binder { transfer } is denied to that domain and nothing audits it,"
+  say "     so this presents as callbacks failing with DeadObjectException."
+  say "     Fix: SELinuxContext= in waydroid-wifid.service. See docs/35."
+  FAIL=1 ;;
+esac
+
+if systemctl is-enabled --quiet waydroid-wifid.service 2>/dev/null; then
+  say "OK   waydroid-wifid.service is enabled, so it survives a reboot"
+else
+  say "WARN waydroid-wifid.service is not enabled -- the daemon will not come"
+  say "     back after a reboot. Install it with: wifi/build.sh --install --unit"
+fi
+if [ -x /usr/local/bin/waydroid-wifi-nudge ]; then
+  say "OK   waydroid-wifi-nudge is installed"
+else
+  say "WARN no waydroid-wifi-nudge. After a daemon restart Android's own"
+  say "     SelfRecovery quota (2/hour, and one restart spends 2-3) leaves"
+  say "     Wi-Fi switched off with nothing to turn it back on. See docs/35."
+fi
 if pgrep -x wificond >/dev/null; then
   say "WARN stock wificond is also running -- it registers wifinl80211 too,"
   say "     and whichever registered last owns the name. Stop it with:"

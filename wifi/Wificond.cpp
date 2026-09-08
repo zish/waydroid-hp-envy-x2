@@ -322,6 +322,23 @@ Wificond::handleWificond(GBinderRemoteRequest* req, guint code, guint flags,
         default: break;
         }
         std::vector<int32_t> freqs = mBackend->frequencies(band);
+
+        /*
+         * Logged because this answer has consequences far from here and no
+         * other trace at all.  WificondChannelHelper caches these lists at
+         * driver-load time and WificondScannerImpl then drops every scan result
+         * whose frequency it cannot place in a band -- so an empty or missing
+         * reply presents as "Filtering out N scan results" and Android showing
+         * no networks, with nothing pointing back to a channel query.  Being
+         * the only handler here that said nothing cost a long detour into the
+         * scan timestamps instead.
+         */
+        static const char* const bandName[] = {
+            "2g", "5g-non-dfs", "5g-dfs", "6g", "60g"
+        };
+        GINFO("getAvailable%sChannels() -> %zu channels", bandName[(int) band],
+              freqs.size());
+
         GBinderLocalReply* reply = beginReply(mWificond, &writer, status);
         writeInt32Array(&writer, freqs);
         return reply;

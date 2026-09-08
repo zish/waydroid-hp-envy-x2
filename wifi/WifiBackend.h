@@ -133,7 +133,24 @@ class WifiBackend {
 public:
     virtual ~WifiBackend() = default;
 
-    virtual bool init() = 0;
+    /*
+     * Bring the backend up, and choose the radio in the same breath.
+     *
+     * `spec` is the radio the operator asked for -- an interface name or a
+     * hardware address, see selectDevice() -- or empty to let the backend
+     * choose.  A non-empty spec that does not resolve MUST fail: the backend
+     * has already had to pick something by then, and carrying on with that
+     * after the operator named a different radio is how Android ends up
+     * driving the host's own link (trap 5 of docs/33-wifi-stage4.md).
+     *
+     * The selection is a parameter of init() rather than a call the caller
+     * makes afterwards because doing it in two steps is what went wrong
+     * before: selectDevice() has to ask the backend whether the device exists,
+     * so calling it first silently validated nothing (docs/34, change 3), and
+     * calling it second meant the backend auto-selected a radio it was about
+     * to be told not to use.  One call cannot be sequenced wrongly.
+     */
+    virtual bool init(const std::string& spec) = 0;
     virtual const char* name() const = 0;
 
     /* Radio state.  setEnabled() is rfkill / NM's WirelessEnabled. */
@@ -172,9 +189,15 @@ public:
     /*
      * Radio selection.  Android sees exactly one interface, so if the host has
      * several radios the choice is made here and never surfaced upwards.
+     *
+     * selectDevice() takes an interface name OR a hardware address, because on
+     * this machine the name is not an identity: wlp0s20u1 encodes a USB port,
+     * so the adapter renames itself when it moves.  A backend that cannot
+     * resolve an address may reject it, but it should try -- an unattended
+     * daemon has nothing else stable to name a radio by.
      */
     virtual std::vector<std::string> devices() = 0;
-    virtual bool selectDevice(const std::string& ifname) = 0;
+    virtual bool selectDevice(const std::string& spec) = 0;
     virtual std::string selectedDevice() const = 0;
 
     /* MAC of the selected device, or all-zero if unknown. */

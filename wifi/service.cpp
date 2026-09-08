@@ -18,10 +18,13 @@
  * docs/30-wifi-aidl-surface.md for the interface surface.
  *
  * Usage:
- *   waydroid-wifid [--device IFNAME] [--verbose] [/dev/binder]
+ *   waydroid-wifid [--device IFNAME|MAC] [--verbose] [/dev/binder]
  *   waydroid-wifid --devices        list the host's Wi-Fi radios and exit
  *   waydroid-wifid --scan           scan through the backend and print the
  *                                   result; needs no container at all
+ *
+ * Run under systemd from artifacts/wifi/waydroid-wifid.service, which is what
+ * makes it survive a reboot; the arguments live in /etc/waydroid-wifid.conf.
  */
 
 #include "NativeScanResult.h"
@@ -318,12 +321,17 @@ main(int argc, char* argv[])
             gutil_log_default.level = GLOG_LEVEL_VERBOSE;
         } else if (!g_strcmp0(argv[i], "--help") ||
                    !g_strcmp0(argv[i], "-h")) {
-            printf("usage: %s [--device IFNAME] [--verbose] [BINDER_DEVICE]\n"
+            printf("usage: %s [--device IFNAME|MAC] [--verbose] [BINDER_DEVICE]\n"
                    "       %s --devices | --scan\n"
                    "\n"
                    "  Serves Android's %s over %s (protocol %s),\n"
                    "  backed by a host Wi-Fi backend.\n"
                    "\n"
+                   "  --device    the host radio to hand Android, by interface\n"
+                   "              name or by factory MAC address.  Prefer the\n"
+                   "              MAC anywhere unattended: an interface name\n"
+                   "              like wlp0s20u1 encodes a USB port and changes\n"
+                   "              when the adapter moves.\n"
                    "  --devices   list the host's Wi-Fi radios and exit\n"
                    "  --scan      scan through the backend and print the\n"
                    "              result; needs no container\n",
@@ -338,38 +346,39 @@ main(int argc, char* argv[])
         }
     }
 
-    std::unique_ptr<WifiBackend> backend(new NmBackend());
-    if (!backend->init()) {
-        GERR("backend \"%s\" failed to start", backend->name());
-        return RET_ERR;
-    }
-
     /*
-     * --device is applied AFTER init(), because selectDevice() has to ask the
-     * backend whether the device exists and the backend has no connection to
-     * ask over until init() has built one.  Applied before, the check inside
-     * selectDevice() failed every time, warned "NetworkManager has no Wi-Fi
-     * device called ...", and then kept the name regardless -- so --device
-     * appeared to work while its validation did precisely nothing.
+     * The radio is chosen by init(), not by a second call afterwards, and a
+     * --device that does not resolve is fatal.  Both of those are the residue
+     * of a real bug: selection used to be a separate step, which meant it
+     * could be -- and was -- sequenced wrongly, so --device validated nothing
+     * for as long as it existed (docs/34-wifi-second-radio.md, change 3).
+     * See WifiBackend::init().
      *
-     * A named device that does not exist is fatal, not a fallback.  By this
-     * point init() has already auto-selected some radio, and carrying on with
-     * THAT one after the operator explicitly named another is how Android ends
-     * up driving the host's only link -- trap 5 of docs/33-wifi-stage4.md, and
-     * the whole reason the name was given.  Refusing to start is the safe
-     * failure; picking a radio behind the operator's back is not.
+     * Refusing to start is the safe failure here.  The unsafe one is carrying
+     * on with whatever radio the backend would have picked for itself, which
+     * on this machine can be the host's own link.
      */
-    if (want_dev && !backend->selectDevice(want_dev)) {
-        GERR("no Wi-Fi device called \"%s\" -- refusing to start", want_dev);
-        return RET_ERR;
-    }
+    std::unique_ptr<WifiBackend> backend(new NmBackend());
+    bool up = backend->init(want_dev ? want_dev : "");
 
     if (list_devices) {
+        /*
+         * Listing is a question about the host, so it answers even when the
+         * requested radio is missing -- that is precisely when the answer is
+         * wanted.  `waydroid-wifid --devices --device <mac>` is therefore also
+         * the way to check a MAC before putting it in /etc/waydroid-wifid.conf:
+         * it resolves, or it says so and shows you what is actually there.
+         */
         for (const std::string& d : backend->devices()) {
             printf("%s%s\n", d.c_str(),
                    d == backend->selectedDevice() ? "  (selected)" : "");
         }
-        return RET_OK;
+        return up ? RET_OK : RET_ERR;
+    }
+
+    if (!up) {
+        GERR("backend \"%s\" failed to start", backend->name());
+        return RET_ERR;
     }
 
     if (do_scan) {

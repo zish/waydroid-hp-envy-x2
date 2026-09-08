@@ -15,6 +15,7 @@
 #include <gio/gio.h>
 
 #include <map>
+#include <utility>
 
 namespace waydroid {
 namespace wifi {
@@ -24,7 +25,7 @@ public:
     NmBackend();
     ~NmBackend() override;
 
-    bool init() override;
+    bool init(const std::string& spec) override;
     const char* name() const override { return "networkmanager"; }
 
     bool setEnabled(bool on) override;
@@ -42,7 +43,7 @@ public:
         std::function<void(const LinkState&, LinkEvent)> cb) override;
 
     std::vector<std::string> devices() override;
-    bool selectDevice(const std::string& ifname) override;
+    bool selectDevice(const std::string& spec) override;
     std::string selectedDevice() const override { return mIfname; }
 
     void macAddress(uint8_t out[6]) override;
@@ -65,6 +66,25 @@ private:
 
     /* Resolve the Wi-Fi device object path for mIfname, "" if none. */
     std::string wifiDevicePath();
+
+    /*
+     * Every Wi-Fi device NM knows about, as (object path, interface name).
+     * devices() and MAC resolution both want this list and neither wants to
+     * pay for the other's shape.
+     */
+    std::vector<std::pair<std::string, std::string> > wifiDeviceList();
+
+    /* Factory MAC of a device object path, uppercase; "" if NM will not say. */
+    std::string permMacOf(const std::string& path);
+
+    /* "34:e8:94:f8:61:70" -> "34:E8:94:F8:61:70"; "" if it is not a MAC. */
+    static std::string normalizeMac(const std::string& s);
+
+    /*
+     * The radio whose factory MAC is mSelectorMac, as (object path, ifname).
+     * Both empty if that hardware is not present.
+     */
+    std::pair<std::string, std::string> resolveByMac();
 
     /*
      * Whether NM currently routes the host's own default traffic over this
@@ -97,6 +117,23 @@ private:
     GDBusConnection* mBus = nullptr;
     std::string mIfname;                 /* selected host interface, e.g. wlp1s0 */
     std::string mDevPath;                /* cached NM object path for it */
+
+    /*
+     * The FACTORY MAC of the radio we are pinned to, uppercase.
+     *
+     * The interface name is not an identity.  wlp0s20u1 encodes the USB port
+     * the T3U happens to be in, so moving it one socket along renames it; a
+     * driver reprobe (bin/wifi-radio-reset.sh) can rename it too.  Anything
+     * unattended keying off the name is therefore keying off a coincidence,
+     * and the failure it invites is the expensive one -- Android silently
+     * driving the host's own link, trap 5 of docs/33-wifi-stage4.md.
+     *
+     * Set on the first successful selection however the radio was named, so
+     * even --device wlp0s20u1 follows that piece of hardware afterwards rather
+     * than following whatever wears the name next.  NOT the same thing as
+     * macAddress(), which reports the randomized address actually on the air.
+     */
+    std::string mSelectorMac;
     std::function<void(const LinkState&, LinkEvent)> mLinkCb;
     guint   mStateSignalId = 0;          /* Device.StateChanged subscription */
 
@@ -123,6 +160,7 @@ private:
     gint64  mScanBaseline = -1;          /* Device.Wireless LastScan before it */
     bool    mScanBlind = false;          /* this NM does not publish LastScan */
     bool    mScanSuppressed = false;     /* this scan was skipped mid-association */
+    bool    mScanSettling = false;       /* scan landed; AP properties catching up */
 };
 
 } /* namespace wifi */

@@ -85,7 +85,11 @@ nmcli -t -f DEVICE,STATE,CONNECTION device 2>/dev/null | grep "^$IFNAME:" || tru
 cat <<EOF
 
 The interface is back and NetworkManager is managing it again.  waydroid-wifid
-re-resolves its device by NAME on every use, so it does not need restarting --
-but Android will have seen the association drop, so re-connect from Android (or
+does not need restarting: it re-resolves the device by FACTORY MAC when the name
+stops resolving, so a reprobe that renames the interface costs it nothing.  But
+Android will have seen the association drop, so re-connect from Android (or
 'nmcli connection up "<ssid> (Waydroid)"' to confirm the radio first).
+
+Restarting waydroid-wifid is in fact the more expensive option now, because each
+restart spends Android's WifiSelfRecovery budget -- see docs/35-wifi-stage5.md.
 EOF

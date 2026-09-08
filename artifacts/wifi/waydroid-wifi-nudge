@@ -1,0 +1,116 @@
+#!/bin/sh
+#
+# waydroid-wifi-nudge -- switch Android's Wi-Fi back on after waydroid-wifid
+# has restarted underneath it.
+#
+# Installed at /usr/local/bin/waydroid-wifi-nudge and run as ExecStartPost of
+# waydroid-wifid.service.  See docs/35-wifi-stage5.md.
+#
+# WHY THIS IS NEEDED
+#
+# When waydroid-wifid goes away, Android notices immediately and correctly --
+# "Wificond died!", "wpa_supplicant died", then WifiSelfRecovery.  It is
+# supposed to restart Wi-Fi afterwards.  It does not, and the reason is a
+# quota in AOSP rather than anything wrong on our side:
+#
+#   WifiSelfRecovery: Already restarted wifi 2 times in last 1 hour. Disabling wifi
+#
+# SelfRecovery permits MAX_RESTARTS_IN_TIME_WINDOW = 2 in an hour.  Our two
+# services live in ONE process, so a single daemon restart delivers two binder
+# deaths -- sometimes three -- and each one is counted.  The first restart in
+# any given hour therefore spends the whole budget, and every restart after it
+# lands on "Disabling wifi" and stops there.  Nothing in the framework will
+# retry, because from its point of view Wi-Fi is simply off.
+#
+# There is no way to spend less of that budget short of splitting the daemon in
+# two, which would trade this for a worse problem -- two lifetimes that can get
+# out of step, the thing docs/29-wifi-plan.md deliberately avoided.  So we let
+# the framework do its thing and turn Wi-Fi back on afterwards.
+#
+# WHAT IT IS CAREFUL ABOUT
+#
+#   * It never turns Wi-Fi on against the user's wishes.  Settings.Global
+#     wifi_on survives self-recovery (verified: still 1 while the framework
+#     reported "Wifi is disabled"), so it is a faithful record of what the user
+#     last chose, and this script does nothing unless it says 1.
+#   * It does nothing at boot.  If Android has not finished booting then this is
+#     a fresh start, not a restart -- Android will enable Wi-Fi from its own
+#     saved state and a nudge would only race it.
+#   * It cannot fail the daemon.  Every path exits 0, and the unit invokes it
+#     with a leading "-" as well.
+
+set -u
+
+WAIT_SETTLE=25          # seconds to let self-recovery finish before acting
+WAIT_ENABLE=20          # seconds to wait for the framework to come back up
+
+log() { echo "waydroid-wifi-nudge: $*" >&2; }
+
+# waydroid appends its own noise to EVERY command -- a cosmetic
+# "ERROR: [Errno 13] Permission denied: 1" and a "Use '--details-to-stdout'"
+# hint -- and not all of it goes to stderr, so redirecting stderr is not enough.
+# Output above it is still valid.
+ash() {
+	waydroid shell -- "$@" 2>/dev/null |
+		sed -e '/Errno 13/d' -e '/--details-to-stdout/d' -e '/^ *\/usr/d' |
+		tr -d '\r'
+}
+
+# The first line of that, with surrounding whitespace gone.  Every value this
+# script tests is a single short token, and matching loosely against the whole
+# output would let waydroid's trailing noise answer the question instead of
+# Android -- a substring test for "1" is exactly the kind of thing that passes
+# in testing and then reads a stray digit out of a hint line.
+ash1() {
+	ash "$@" | head -1 | tr -d '[:space:]'
+}
+
+# Not a restart if Android was not already up -- see the header.
+booted=$(ash1 getprop sys.boot_completed)
+if [ "$booted" != "1" ]; then
+	log "Android is not booted; nothing to nudge"
+	exit 0
+fi
+
+wanted=$(ash1 settings get global wifi_on)
+if [ "$wanted" != "1" ]; then
+	log "wifi_on=${wanted:-unset}: the user has Wi-Fi off, leaving it off"
+	exit 0
+fi
+
+# Let self-recovery run to completion first.  Acting while ActiveModeWarden is
+# still tearing mode managers down produces an enable that is immediately undone
+# and looks, in the logs, exactly like the bug this works around.
+i=0
+while [ "$i" -lt "$WAIT_SETTLE" ]; do
+	state=$(ash cmd wifi status | head -1)
+	case "$state" in
+	*"Wifi is enabled"*)
+		log "Wi-Fi is already enabled; nothing to do"
+		exit 0
+		;;
+	*"Wifi is disabled"*)
+		break
+		;;
+	esac
+	i=$((i + 1))
+	sleep 1
+done
+
+log "Wi-Fi is off but wifi_on=1 -- self-recovery gave up, switching it back on"
+ash cmd wifi set-wifi-enabled enabled >/dev/null
+
+i=0
+while [ "$i" -lt "$WAIT_ENABLE" ]; do
+	case "$(ash cmd wifi status | head -1)" in
+	*"Wifi is enabled"*)
+		log "Wi-Fi is back on"
+		exit 0
+		;;
+	esac
+	i=$((i + 1))
+	sleep 1
+done
+
+log "Wi-Fi did not come back on within ${WAIT_ENABLE}s -- see 'logcat | grep Wifi'"
+exit 0

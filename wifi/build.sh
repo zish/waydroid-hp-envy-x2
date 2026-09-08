@@ -37,6 +37,9 @@
 #   wifi/build.sh --deps       # fetch/refresh headers and host .so files
 #   wifi/build.sh --check      # build, then report runtime deps vs the host
 #   wifi/build.sh --install    # build, then install to bigtab01 (needs sudo there)
+#   wifi/build.sh --install --unit
+#                              # ... and install/enable the systemd unit, which
+#                              # is what makes the daemon survive a reboot
 #
 # Env: HOST=<ip>  OUT=<dir>
 set -euo pipefail
@@ -53,11 +56,13 @@ GLIBUTIL_TAG=1.0.82     # must match libglibutil on the host
 DO_DEPS=0
 DO_CHECK=0
 DO_INSTALL=0
+DO_UNIT=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--deps) DO_DEPS=1; shift ;;
 	--check) DO_CHECK=1; shift ;;
 	--install) DO_INSTALL=1; DO_CHECK=1; shift ;;
+	--unit) DO_UNIT=1; DO_INSTALL=1; DO_CHECK=1; shift ;;
 	*) echo "unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
@@ -181,8 +186,55 @@ if [ "$DO_INSTALL" = 1 ]; then
 	                 /tmp/waydroid-wifid.new /usr/local/bin/waydroid-wifid &&
 	             rm -f /tmp/waydroid-wifid.new &&
 	             ls -l /usr/local/bin/waydroid-wifid'
+fi
+
+# --------------------------------------------------------------------- unit
+#
+# Separate from --install because replacing the binary is a routine part of
+# developing and installing the unit is not: --install on its own leaves
+# whatever start method is already in use alone, so an iteration cycle cannot
+# accidentally enable a service on the host or restart one that is being
+# watched.  --unit is the deliberate act.
+#
+# The conf file is installed only if it is not already there, because it is the
+# one file on the host an operator is expected to edit -- overwriting somebody's
+# --device with the adapter this repo happens to know about is exactly the
+# failure the fatal-on-missing-device rule exists to prevent.
+
+if [ "$DO_UNIT" = 1 ]; then
 	echo
-	echo "Unlike waydroid-sensord, the name waydroid-wifid means nothing to"
-	echo "Waydroid -- nothing starts it automatically.  Start it by hand, or"
-	echo "install the unit once Stage 5 packages one."
+	echo "== installing the systemd unit on $HOST"
+	scp -q "$repo/artifacts/wifi/waydroid-wifid.service" \
+	       "$repo/artifacts/wifi/waydroid-wifid.conf" \
+	       "$repo/artifacts/wifi/waydroid-wifi-nudge" "$HOST:/tmp/"
+	ssh "$HOST" 'set -e
+	    sudo install -m 0644 -o root -g root \
+	        /tmp/waydroid-wifid.service /etc/systemd/system/waydroid-wifid.service
+	    sudo install -m 0755 -o root -g root \
+	        /tmp/waydroid-wifi-nudge /usr/local/bin/waydroid-wifi-nudge
+	    if [ -e /etc/waydroid-wifid.conf ]; then
+	        echo "keeping the existing /etc/waydroid-wifid.conf:"
+	        grep -v "^#" /etc/waydroid-wifid.conf | grep . || true
+	    else
+	        sudo install -m 0644 -o root -g root \
+	            /tmp/waydroid-wifid.conf /etc/waydroid-wifid.conf
+	        echo "installed /etc/waydroid-wifid.conf"
+	    fi
+	    rm -f /tmp/waydroid-wifid.service /tmp/waydroid-wifid.conf \
+	          /tmp/waydroid-wifi-nudge
+	    sudo systemctl daemon-reload
+	    sudo systemctl enable waydroid-wifid.service
+	    sudo systemctl restart waydroid-wifid.service
+	    sleep 2
+	    systemctl --no-pager --full status waydroid-wifid.service || true'
+	echo
+	echo "Started under systemd.  Follow it with:"
+	echo "    ssh $HOST journalctl -u waydroid-wifid -f"
+elif [ "$DO_INSTALL" = 1 ]; then
+	echo
+	echo "Binary only -- the start method on the host is untouched.  Pass"
+	echo "--unit to install and enable waydroid-wifid.service, which is what"
+	echo "makes the daemon survive a reboot; if the unit is already installed,"
+	echo "  ssh $HOST sudo systemctl restart waydroid-wifid"
+	echo "picks this binary up."
 fi
