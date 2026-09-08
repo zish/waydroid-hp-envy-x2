@@ -1,0 +1,320 @@
+#!/bin/bash
+#
+# waydroid-wifi-sync -- make NetworkManager the source of truth for the Wi-Fi
+# networks Android knows about.
+#
+# Installed at /usr/local/bin/waydroid-wifi-sync, run by waydroid-wifi-sync.timer.
+# See docs/36-wifi-credential-sync.md.
+#
+# WHY THIS EXISTS
+#
+# waydroid-wifid carries credentials in ONE direction.  Android holds its own
+# copy of every passphrase in /data/misc/apexdata/com.android.wifi/
+# WifiConfigStore.xml, pushes it down on each connect via setPskPassphrase, and
+# NmBackend::connect() then calls Update on the profile -- so NetworkManager is a
+# write-through projection of Android's config and a host-side edit is silently
+# overwritten.  A network joined on the host is invisible to Android entirely.
+#
+# The supplicant seam cannot fix that: its AIDL has no "here are my saved
+# networks" direction, and Android never asks.  But `cmd wifi add-network` does
+# exactly this job, so the reconciliation happens here instead, from the host,
+# in the same shape as waydroid-wifi-nudge.
+#
+# WHAT IT DOES
+#
+#   * imports every allow-listed NM profile into Android's saved networks
+#   * deletes the NM profile when the corresponding network is forgotten in
+#     Android -- guarded heavily, see canDelete() and the mass-forget check
+#
+# It is idempotent and safe to run on a timer: add-network is documented as
+# "Add/update saved network", so re-importing an unchanged network is a no-op
+# from the user's point of view.
+
+set -u
+
+SHARE_CONF="${SHARE_CONF:-/etc/waydroid-wifi-share.conf}"
+STATE="${STATE:-/var/lib/waydroid/waydroid-wifi-sync.state}"
+
+# Refuse to act on a wholesale disappearance.  A factory reset, a container
+# reinstall or a wiped WifiConfigStore.xml makes every imported network look
+# forgotten at once, and honouring that would delete the host's Wi-Fi profiles
+# -- including, potentially, the one this machine is administered over.  A
+# person forgetting networks does it one at a time.
+MAX_FORGETS_PER_RUN="${MAX_FORGETS_PER_RUN:-1}"
+
+log() { echo "waydroid-wifi-sync: $*" >&2; }
+
+# waydroid appends its own noise to every command and not all of it goes to
+# stderr; strip it so we compare Android's answers and not waydroid's chatter.
+ash() {
+	waydroid shell -- "$@" 2>/dev/null |
+		sed -e '/Errno 13/d' -e '/--details-to-stdout/d' -e '/^ *\/usr/d' |
+		tr -d '\r'
+}
+
+[ "$(id -u)" -eq 0 ] || { log "must run as root"; exit 1; }
+
+if [ ! -r "$SHARE_CONF" ]; then
+	log "no $SHARE_CONF -- nothing is opted in, so there is nothing to do"
+	exit 0
+fi
+
+# Not a sync target if Android is not up; a fresh boot will be caught by the
+# next timer tick, and acting mid-boot races WifiConfigStore's own load.
+booted=$(ash getprop sys.boot_completed | head -1 | tr -d '[:space:]')
+if [ "$booted" != "1" ]; then
+	log "Android is not booted yet"
+	exit 0
+fi
+
+# ----------------------------------------------------------------- allow-list
+
+mapfile -t WANTED < <(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                          "$SHARE_CONF" | grep -v '^$')
+if [ "${#WANTED[@]}" -eq 0 ]; then
+	log "$SHARE_CONF names no networks"
+	exit 0
+fi
+
+wanted_contains() {
+	local s
+	for s in "${WANTED[@]}"; do [ "$s" = "$1" ] && return 0; done
+	return 1
+}
+
+# ------------------------------------------------------- what Android now has
+#
+# Parsed positionally rather than by column width: an SSID may contain spaces,
+# but a network id never does and a security type never does, so first field and
+# last field are unambiguous and everything between them is the SSID.
+#
+# Ids repeat.  Android 13 adds an SAE parameter alongside WPA2 for auto-upgrade,
+# so one saved network prints as two rows ("wpa2-psk" and "wpa3-sae^") -- seen
+# while proving this path.  Dedupe on the SSID.
+
+android_ssids() {
+	ash cmd wifi list-networks |
+		awk 'NR > 1 && NF >= 3 {
+			id = $1; $1 = ""; $NF = "";
+			sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "");
+			if ($0 != "") print
+		}' | sort -u
+}
+
+ANDROID_LIST=$(android_ssids)
+if [ -z "$ANDROID_LIST" ]; then
+	# Distinguish "Android has no saved networks" from "we could not ask".
+	# Guessing wrong here deletes host profiles, so refuse rather than assume.
+	if ! ash cmd wifi list-networks | grep -q "Network Id"; then
+		log "could not read Android's saved networks -- doing nothing"
+		exit 0
+	fi
+fi
+
+android_has() {
+	printf '%s\n' "$ANDROID_LIST" | grep -qxF "$1"
+}
+
+# ------------------------------------------------- Android forget -> NM delete
+#
+# THIS RUNS BEFORE THE IMPORT, AND THE ORDER IS LOAD-BEARING.
+#
+# With the import first, a network forgotten in Android is re-imported by the
+# same run that then deletes its NM profile -- so "forget" leaves the network
+# saved in Android and gone from NetworkManager, the exact inverse of what was
+# asked for. Measured doing precisely that before the order was swapped.
+
+# A profile is only deletable if losing it cannot cost this machine its network.
+# The second adapter exists precisely so Android can never strand the host
+# (docs/34-wifi-second-radio.md); a sync script able to delete the profile the
+# host is connected through would hand that back.
+canDelete() {
+	local uuid="$1" ssid="$2" active hostdev devs
+
+	active=$(nmcli -t -f UUID,DEVICE connection show --active 2>/dev/null |
+	         awk -F: -v u="$uuid" '$1 == u { print $2 }')
+	if [ -n "$active" ]; then
+		log "  refusing to delete \"$ssid\": it is active on $active"
+		return 1
+	fi
+
+	hostdev=$(ip -o route get 1.1.1.1 2>/dev/null |
+	          grep -o 'dev [^ ]*' | awk '{print $2}')
+	devs=$(nmcli -g connection.interface-name connection show "$uuid" 2>/dev/null)
+	if [ -n "$hostdev" ] && [ "$devs" = "$hostdev" ]; then
+		log "  refusing to delete \"$ssid\": pinned to $hostdev, which carries" \
+		    "the host's default route"
+		return 1
+	fi
+	return 0
+}
+
+PREV=()
+deleted=()
+[ -r "$STATE" ] && mapfile -t PREV < "$STATE"
+
+# Candidates: networks we imported on a previous run, still opted in, whose NM
+# profile still exists, and which Android no longer has. That combination means
+# somebody forgot it in Android rather than that it was never there.
+forgotten=()
+for ssid in ${PREV[@]+"${PREV[@]}"}; do
+	[ -n "$ssid" ] || continue
+	wanted_contains "$ssid" || continue
+	android_has "$ssid" && continue
+	forgotten+=("$ssid")
+done
+
+if [ "${#forgotten[@]}" -gt "$MAX_FORGETS_PER_RUN" ]; then
+	log "${#forgotten[@]} networks vanished from Android at once -- that is a" \
+	    "reset, not somebody forgetting a network. Deleting nothing."
+	log "  (${forgotten[*]})"
+elif [ "${#forgotten[@]}" -gt 0 ]; then
+	for ssid in ${forgotten[@]+"${forgotten[@]}"}; do
+		log "\"$ssid\" was forgotten in Android; NM is the mirror, so removing it"
+		deleted+=("$ssid")
+		while IFS= read -r uuid; do
+			[ -n "$uuid" ] || continue
+			s=$(nmcli -g 802-11-wireless.ssid connection show "$uuid" 2>/dev/null)
+			[ "$s" = "$ssid" ] || continue
+			cid=$(nmcli -g connection.id connection show "$uuid" 2>/dev/null)
+			case "$cid" in
+			*" (Waydroid)") continue ;;   # the daemon's own; not ours to reap
+			esac
+			canDelete "$uuid" "$ssid" || continue
+			if nmcli connection delete "$uuid" >/dev/null 2>&1; then
+				log "  deleted NM profile \"$cid\""
+			else
+				log "  could not delete NM profile \"$cid\""
+			fi
+		done < <(nmcli -t -f UUID,TYPE connection show 2>/dev/null |
+		         awk -F: '$2 == "802-11-wireless" { print $1 }')
+	done
+fi
+
+was_forgotten() {
+	local s
+	for s in ${forgotten[@]+"${forgotten[@]}"}; do [ "$s" = "$1" ] && return 0; done
+	return 1
+}
+
+# --------------------------------------------------------- NM -> Android
+
+# NM key-mgmt as the profile is CONFIGURED, which is the host's stated intent
+# and therefore the thing to honour when the host is the source of truth.
+# Android's add-network takes open|owe|wpa2|wpa3.
+android_sectype() {
+	case "$1" in
+	none|"")    echo open ;;
+	owe)        echo owe ;;
+	sae)        echo wpa3 ;;
+	wpa-psk|wpa-psk-sha256|wpa-ft-psk)
+	            echo wpa2 ;;
+	*)          echo "" ;;      # wpa-eap, wpa-eap-suite-b-192, ieee8021x, ...
+	esac
+}
+
+imported=()
+
+while IFS= read -r uuid; do
+	[ -n "$uuid" ] || continue
+
+	ssid=$(nmcli -g 802-11-wireless.ssid connection show "$uuid" 2>/dev/null)
+	[ -n "$ssid" ] || continue
+	wanted_contains "$ssid" || continue
+
+	# Decided above to be a forget. Its profile has normally just been deleted,
+	# but a guard may have spared one (an active profile, say) -- and importing
+	# that would resurrect in Android the very network the user just removed.
+	was_forgotten "$ssid" && continue
+
+	# Never import the daemon's own projection of an Android network. It exists
+	# because Android already knows that network, so importing it would be a
+	# loop -- and its credentials came FROM Android in the first place.
+	cid=$(nmcli -g connection.id connection show "$uuid" 2>/dev/null)
+	case "$cid" in
+	*" (Waydroid)") continue ;;
+	esac
+
+	km=$(nmcli -g 802-11-wireless-security.key-mgmt connection show "$uuid" 2>/dev/null)
+	sectype=$(android_sectype "$km")
+	if [ -z "$sectype" ]; then
+		log "skipping \"$ssid\": key-mgmt \"$km\" is not carried across this seam"
+		continue
+	fi
+
+	psk=""
+	if [ "$sectype" != "open" ] && [ "$sectype" != "owe" ]; then
+		psk=$(nmcli -s -g 802-11-wireless-security.psk connection show "$uuid" 2>/dev/null)
+		if [ -z "$psk" ]; then
+			# psk-flags may say the secret is agent-owned rather than stored in
+			# the profile, in which case there is nothing here to copy.
+			log "skipping \"$ssid\": NetworkManager holds no passphrase for it"
+			continue
+		fi
+	fi
+
+	# ADD MISSING NETWORKS; NEVER OVERWRITE ONE ANDROID ALREADY HAS.
+	#
+	# This is a safety property, not an optimisation -- `add-network` is
+	# documented as "Add/update saved network", so re-running it WOULD clobber
+	# the existing config, and clobbering it is exactly the wrong move.
+	#
+	# The host profile's key-mgmt is not a reliable statement of what Android
+	# should use.  On this machine the host joins "vidiot" with wpa-psk over
+	# wlp1s0 perfectly well, while Android over the T3U can only complete the
+	# handshake with SAE (docs/34-wifi-second-radio.md) -- so importing the
+	# host's "wpa-psk" over Android's working "wpa3-sae" would break a
+	# connection that works, using a mapping we know to be unreliable.
+	#
+	# The cost is that a passphrase changed on the host does not propagate to a
+	# network Android already knows.  That is a real limit of "NM is the source
+	# of truth" here, and it is the conservative side to err on: forget the
+	# network in Android and the next sync imports it afresh.
+	if android_has "$ssid"; then
+		imported+=("$ssid")
+		continue
+	fi
+
+	log "importing \"$ssid\" ($sectype) into Android"
+	if [ -n "$psk" ]; then
+		out=$(ash cmd wifi add-network "$ssid" "$sectype" "$psk")
+	else
+		out=$(ash cmd wifi add-network "$ssid" "$sectype")
+	fi
+
+	# `imported` becomes the state file, and the state file is what licenses a
+	# DELETION next run -- so it must mean "confirmed present in Android", never
+	# "we tried".  Recording a failed import would make the next run see the
+	# network missing from Android, read that as a forget, and delete the host's
+	# profile.  A failed import must therefore leave no trace at all.
+	case "$out" in
+	*"Save successful"*)
+		log "  imported \"$ssid\""
+		imported+=("$ssid")
+		;;
+	*)
+		log "  FAILED to import \"$ssid\": ${out:-no output}"
+		;;
+	esac
+done < <(nmcli -t -f UUID,TYPE connection show 2>/dev/null |
+         awk -F: '$2 == "802-11-wireless" { print $1 }')
+
+# Record what is confirmed present in Android NOW, minus anything just deleted.
+# Leaving a deleted network in the state file would make the next run see it
+# missing from Android all over again, spend the mass-forget budget on it, and
+# hunt for a profile that is already gone.
+was_deleted() {
+	local s
+	for s in ${deleted[@]+"${deleted[@]}"}; do [ "$s" = "$1" ] && return 0; done
+	return 1
+}
+
+mkdir -p "$(dirname "$STATE")" 2>/dev/null
+: > "$STATE"
+for ssid in ${imported[@]+"${imported[@]}"}; do
+	wanted_contains "$ssid" || continue
+	was_deleted "$ssid" && continue
+	printf '%s\n' "$ssid" >> "$STATE"
+done
+
+exit 0

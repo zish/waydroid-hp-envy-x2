@@ -206,12 +206,35 @@ if [ "$DO_UNIT" = 1 ]; then
 	echo "== installing the systemd unit on $HOST"
 	scp -q "$repo/artifacts/wifi/waydroid-wifid.service" \
 	       "$repo/artifacts/wifi/waydroid-wifid.conf" \
-	       "$repo/artifacts/wifi/waydroid-wifi-nudge" "$HOST:/tmp/"
+	       "$repo/artifacts/wifi/waydroid-wifi-nudge" \
+	       "$repo/artifacts/wifi/waydroid-wifi-sync" \
+	       "$repo/artifacts/wifi/waydroid-wifi-sync.service" \
+	       "$repo/artifacts/wifi/waydroid-wifi-sync.timer" \
+	       "$repo/artifacts/wifi/waydroid-wifi-share.conf" "$HOST:/tmp/"
 	ssh "$HOST" 'set -e
 	    sudo install -m 0644 -o root -g root \
 	        /tmp/waydroid-wifid.service /etc/systemd/system/waydroid-wifid.service
 	    sudo install -m 0755 -o root -g root \
 	        /tmp/waydroid-wifi-nudge /usr/local/bin/waydroid-wifi-nudge
+	    sudo install -m 0755 -o root -g root \
+	        /tmp/waydroid-wifi-sync /usr/local/bin/waydroid-wifi-sync
+	    sudo install -m 0644 -o root -g root \
+	        /tmp/waydroid-wifi-sync.service \
+	        /etc/systemd/system/waydroid-wifi-sync.service
+	    sudo install -m 0644 -o root -g root \
+	        /tmp/waydroid-wifi-sync.timer \
+	        /etc/systemd/system/waydroid-wifi-sync.timer
+	    # 0600: this file names the networks whose passphrases get copied into
+	    # the container, so it is the audit trail for that and not world-readable.
+	    if [ -e /etc/waydroid-wifi-share.conf ]; then
+	        echo "keeping the existing /etc/waydroid-wifi-share.conf:"
+	        grep -v "^#" /etc/waydroid-wifi-share.conf | grep . ||
+	            echo "  (nothing opted in)"
+	    else
+	        sudo install -m 0600 -o root -g root \
+	            /tmp/waydroid-wifi-share.conf /etc/waydroid-wifi-share.conf
+	        echo "installed /etc/waydroid-wifi-share.conf (nothing opted in yet)"
+	    fi
 	    if [ -e /etc/waydroid-wifid.conf ]; then
 	        echo "keeping the existing /etc/waydroid-wifid.conf:"
 	        grep -v "^#" /etc/waydroid-wifid.conf | grep . || true
@@ -221,10 +244,15 @@ if [ "$DO_UNIT" = 1 ]; then
 	        echo "installed /etc/waydroid-wifid.conf"
 	    fi
 	    rm -f /tmp/waydroid-wifid.service /tmp/waydroid-wifid.conf \
-	          /tmp/waydroid-wifi-nudge
+	          /tmp/waydroid-wifi-nudge /tmp/waydroid-wifi-sync \
+	          /tmp/waydroid-wifi-sync.service /tmp/waydroid-wifi-sync.timer \
+	          /tmp/waydroid-wifi-share.conf
 	    sudo systemctl daemon-reload
 	    sudo systemctl enable waydroid-wifid.service
 	    sudo systemctl restart waydroid-wifid.service
+	    # The timer, not the service: the sync runs on a schedule, and starting
+	    # it here would fire a reconciliation before anyone has opted anything in.
+	    sudo systemctl enable --now waydroid-wifi-sync.timer
 	    sleep 2
 	    systemctl --no-pager --full status waydroid-wifid.service || true'
 	echo

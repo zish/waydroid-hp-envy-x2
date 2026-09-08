@@ -1,0 +1,33 @@
+# Reconcile Android's saved Wi-Fi networks with NetworkManager's.
+#
+# Installed at /etc/systemd/system/waydroid-wifi-sync.service and driven by
+# waydroid-wifi-sync.timer. Runnable on demand:
+#   systemctl start waydroid-wifi-sync
+#
+# See docs/36-wifi-credential-sync.md.
+
+[Unit]
+Description=Sync NetworkManager's Wi-Fi networks into Android
+Documentation=file:///usr/share/doc/waydroid-bigtab01/docs/36-wifi-credential-sync.md
+
+# NM is the source of truth being read, and the container is what is written to.
+# Neither is Requires=: with nothing opted in this is a no-op, and it must not
+# fail noisily on a host where Waydroid simply is not running.
+After=NetworkManager.service waydroid-container.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+
+# Runs as root because reading a profile's passphrase
+# (nmcli -s -g 802-11-wireless-security.psk) and driving `waydroid shell` both
+# require it. Same SELinux reasoning as waydroid-wifid.service: this drives the
+# container, so give it the domain that has always worked rather than discovering
+# a dontaudit'ed denial later.
+SELinuxContext=system_u:unconfined_r:unconfined_t:s0
+
+ExecStart=/usr/local/bin/waydroid-wifi-sync
+
+# Bounded: it talks to a container that may be mid-boot or wedged, and a sync
+# that hangs must not sit in the timer's way forever.
+TimeoutStartSec=180

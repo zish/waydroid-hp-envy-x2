@@ -1,0 +1,27 @@
+# Run the Wi-Fi credential reconciliation periodically.
+#
+# Installed at /etc/systemd/system/waydroid-wifi-sync.timer.
+# `systemctl disable --now waydroid-wifi-sync.timer` stops all syncing; the
+# allow-list at /etc/waydroid-wifi-share.conf being empty does the same thing
+# more quietly.
+
+[Unit]
+Description=Periodic Wi-Fi credential sync between NetworkManager and Android
+
+[Timer]
+# Five minutes after boot rather than immediately: Android takes about half a
+# minute to finish booting and the script declines to act before it has, so
+# firing at boot would just burn a run.
+OnBootSec=5min
+
+# Frequent enough that forgetting a network in Android takes effect while the
+# user still remembers doing it, and rare enough to be invisible. The work is a
+# handful of D-Bus reads and one `waydroid shell` unless something has changed.
+OnUnitActiveSec=5min
+
+# Do not stack up missed runs after a suspend; one catch-up is enough.
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
