@@ -199,8 +199,11 @@ that registers `wifinl80211` and gets the Wi-Fi toggle to stay on.
 match AOSP `android-13.0.0_r75` exactly, so upstream `.aidl` can be used directly; only 13 of the 18
 are ever called. The supplicant side is **203 method slots** across six interfaces (not the ~80 first
 estimated), with `ISupplicantStaNetwork` alone at 93. Sources fetch as two subdirectory tarballs from
-android.googlesource.com — no repo clone. One check still owed: the supplicant has **not** had the
-same bytecode cross-check as wificond, and should get one before code is written against it.
+android.googlesource.com — no repo clone. The supplicant got the same cross-check on
+2026-09-08: **147 proxy methods match AOSP exactly** across `ISupplicant`, `ISupplicantStaIface` and
+`ISupplicantStaNetwork`, and the highest code in each equals the AIDL method count, so nothing is
+renumbered. The two **callback** interfaces remain unverified — the framework holds their `Stub`,
+not a `Proxy`, so there is nothing to read; that is deliberately deferred to runtime in Stage 4.
 
 **As of 2026-09-07 the active goal is 4, Wi-Fi** — Android's own Wi-Fi settings driving the
 host's NetworkManager. Scoped in that session; nothing is built yet. Removable media was explicitly

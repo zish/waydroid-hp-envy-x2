@@ -188,9 +188,57 @@ Of the thirteen, only **`createClientInterface`** is load-bearing at first — i
 `IClientInterface` that everything else hangs off. The two AP ones can fail cleanly, since SoftAP is
 out of scope.
 
+## Finding 6 — the supplicant matches AOSP too, for the interfaces we call
+
+The same bytecode cross-check was run against `service-wifi.jar`, and **147 proxy methods match
+AOSP `android-13.0.0_r75` declaration order exactly**:
+
+| Interface | Proxies in image | AIDL methods | Result |
+|---|---|---|---|
+| `ISupplicant` | 6 | 13 | match |
+| `ISupplicantStaIface` | 56 | 61 | match |
+| `ISupplicantStaNetwork` | 85 | 93 | match |
+
+R8 strips proxy methods the framework never calls, which is why the counts are short of the AIDL
+totals — but the **highest code in each interface is exactly the AIDL method count** (13, 61, 93),
+so nothing has been renumbered. LineageOS has not touched this package.
+
+### Two extraction traps worth recording
+
+Both cost time and would silently produce plausible-but-wrong tables:
+
+1. **`IBinder.transact` is `invoke-interface`, not `invoke-virtual`.** A regex expecting the latter
+   matches nothing and looks like "no transactions found".
+2. **"The last constant before `transact`" is the wrong constant.** `transact(code, data, reply,
+   flags)` loads `flags` last, so that heuristic returns 0 for every two-way call and 1 for every
+   one-way one. The code lives in **register\[1\] of the invoke's register list** — resolve that
+   register against the last constant written to it.
+
+The extractor was validated by reproducing the already-known `IWificond` table (18 methods, codes
+1..18, no duplicates) before being pointed at anything unverified. Worth doing again for any future
+interface: check the tool against a known answer first.
+
+### What this check could not cover
+
+The two **callback** interfaces — `ISupplicantStaIfaceCallback` (29 methods) and
+`ISupplicantStaNetworkCallback` (5) — are unverified by this method, and the distinction matters:
+the framework *implements* those, so it holds their `Stub`, not a `Proxy`, and there are no
+`transact()` call sites to read codes from. Their `onTransact` uses a `sparse-switch` keyed partly
+on the AIDL meta-codes (`0x00ffffff` `getInterfaceVersion`, `0x00fffffe` `getInterfaceHash`), and
+the case blocks are **not** laid out in declaration order, so layout cannot be used to infer codes
+either.
+
+These are precisely the interfaces **our shim will call into**, so they are not academic. What
+supports them anyway: three interfaces in the same package and version match exactly; frozen
+`aidl_api/…/1/` and live source agree for all six; and the presence of stock stable-AIDL meta-codes
+shows the codegen is unmodified. That makes divergence very unlikely but not proven.
+
+Cheapest way to settle it is at runtime rather than statically: a wrong callback code shows up
+immediately as the framework not reacting to an event, and it can be bisected in Stage 4 when
+callbacks first fire. Parsing the `sparse-switch` payload is the static alternative if that turns
+out to be painful.
+
 ## Still open
 
-- Whether `ISupplicant` AIDL v1 in this image carries LineageOS deltas. The wificond side was
-  proven identical to AOSP; the supplicant side has **not** had the same bytecode cross-check yet,
-  and it should get one before code is written against it.
+- Callback interface transaction codes — see above. Deliberately deferred to runtime.
 - Which `config_wifi*` resources in `com.android.wifi.resources` would need an RRO.
