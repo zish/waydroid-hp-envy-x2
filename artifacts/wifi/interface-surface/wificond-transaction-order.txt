@@ -1,0 +1,70 @@
+# wificond (android.net.wifi.nl80211) transaction codes
+# Source: AOSP tag android-13.0.0_r75, platform/system/connectivity/wificond/aidl
+# VERIFIED against this image: codes below were read out of framework.jar's own
+#   IWificond$Stub$Proxy bytecode (classes2.dex) and match AOSP exactly.
+#   Binder FIRST_CALL_TRANSACTION = 1, so wire code = index + 1.
+
+=== IWificond  (IWificond.aidl) ===
+  code  0 (FIRST_CALL+ 0)  IApInterface createApInterface(@utf8InCpp String iface_name)
+  code  1 (FIRST_CALL+ 1)  IClientInterface createClientInterface(@utf8InCpp String iface_name)
+  code  2 (FIRST_CALL+ 2)  boolean tearDownApInterface(@utf8InCpp String iface_name)
+  code  3 (FIRST_CALL+ 3)  boolean tearDownClientInterface(@utf8InCpp String iface_name)
+  code  4 (FIRST_CALL+ 4)  void tearDownInterfaces()
+  code  5 (FIRST_CALL+ 5)  List<IBinder> GetClientInterfaces()
+  code  6 (FIRST_CALL+ 6)  List<IBinder> GetApInterfaces()
+  code  7 (FIRST_CALL+ 7)  int[] getAvailable2gChannels()
+  code  8 (FIRST_CALL+ 8)  int[] getAvailable5gNonDFSChannels()
+  code  9 (FIRST_CALL+ 9)  int[] getAvailableDFSChannels()
+  code 10 (FIRST_CALL+10)  int[] getAvailable6gChannels()
+  code 11 (FIRST_CALL+11)  int[] getAvailable60gChannels()
+  code 12 (FIRST_CALL+12)  void RegisterCallback(IInterfaceEventCallback callback)
+  code 13 (FIRST_CALL+13)  void UnregisterCallback(IInterfaceEventCallback callback)
+  code 14 (FIRST_CALL+14)  void registerWificondEventCallback(IWificondEventCallback callback)
+  code 15 (FIRST_CALL+15)  void unregisterWificondEventCallback(IWificondEventCallback callback)
+  code 16 (FIRST_CALL+16)  DeviceWiphyCapabilities getDeviceWiphyCapabilities(@utf8InCpp String iface_name)
+  code 17 (FIRST_CALL+17)  void notifyCountryCodeChanged()
+
+=== IClientInterface  (IClientInterface.aidl) ===
+  code  0 (FIRST_CALL+ 0)  int[] getPacketCounters()
+  code  1 (FIRST_CALL+ 1)  int[] signalPoll()
+  code  2 (FIRST_CALL+ 2)  byte[] getMacAddress()
+  code  3 (FIRST_CALL+ 3)  String getInterfaceName()
+  code  4 (FIRST_CALL+ 4)  IWifiScannerImpl getWifiScannerImpl()
+  code  5 (FIRST_CALL+ 5)  void SendMgmtFrame(in byte[] frame, in ISendMgmtFrameEvent callback, int mcs)
+
+=== IWifiScannerImpl  (IWifiScannerImpl.aidl) ===
+  code  0 (FIRST_CALL+ 0)  NativeScanResult[] getScanResults()
+  code  1 (FIRST_CALL+ 1)  NativeScanResult[] getPnoScanResults()
+  code  2 (FIRST_CALL+ 2)  int getMaxSsidsPerScan()
+  code  3 (FIRST_CALL+ 3)  boolean scan(in SingleScanSettings scanSettings)
+  code  4 (FIRST_CALL+ 4)  void subscribeScanEvents(IScanEvent handler)
+  code  5 (FIRST_CALL+ 5)  void unsubscribeScanEvents()
+  code  6 (FIRST_CALL+ 6)  void subscribePnoScanEvents(IPnoScanEvent handler)
+  code  7 (FIRST_CALL+ 7)  void unsubscribePnoScanEvents()
+  code  8 (FIRST_CALL+ 8)  boolean startPnoScan(in PnoSettings pnoSettings)
+  code  9 (FIRST_CALL+ 9)  boolean stopPnoScan()
+  code 10 (FIRST_CALL+10)  void abortScan()
+
+=== IScanEvent  (IScanEvent.aidl) ===
+  code  0 (FIRST_CALL+ 0)  void OnScanResultReady()
+  code  1 (FIRST_CALL+ 1)  void OnScanFailed()
+
+=== IPnoScanEvent  (IPnoScanEvent.aidl) ===
+  code  0 (FIRST_CALL+ 0)  void OnPnoNetworkFound()
+  code  1 (FIRST_CALL+ 1)  void OnPnoScanFailed()
+
+## IWificond methods actually invoked by WifiNl80211Manager (from framework.jar bytecode)
+## Anything not listed here can be a cheap stub.
+  createApInterface
+  createClientInterface
+  getAvailable2gChannels
+  getAvailable5gNonDFSChannels
+  getAvailable60gChannels
+  getAvailable6gChannels
+  getAvailableDFSChannels
+  getDeviceWiphyCapabilities
+  notifyCountryCodeChanged
+  registerWificondEventCallback
+  tearDownApInterface
+  tearDownClientInterface
+  tearDownInterfaces

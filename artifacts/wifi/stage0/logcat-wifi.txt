@@ -1,0 +1,28 @@
+09-07 20:18:51.476   131   131 I wificond: wificond is starting up...
+09-07 20:18:57.355   260   260 I SystemServiceManager: Starting com.android.server.wifi.WifiService
+09-07 20:18:57.419   131   131 I wificond: New wificond event callback registered
+09-07 20:18:57.595   260   260 D SystemServerTiming: OnBootPhase_480_com.android.server.wifi.WifiService
+09-07 20:18:57.595   260   260 V SystemServerTiming: OnBootPhase_480_com.android.server.wifi.WifiService took to complete: 0ms
+09-07 20:18:57.629   260   260 D SystemServerTiming: OnBootPhase_500_com.android.server.wifi.WifiService
+09-07 20:18:57.629   260   260 V SystemServerTiming: OnBootPhase_500_com.android.server.wifi.WifiService took to complete: 0ms
+09-07 20:18:57.649   131   131 E wificond: Can't get wlan0 index: No such device
+09-07 20:18:57.649   131   131 E wificond: Failed to get wiphy index
+09-07 20:18:57.700   260   260 D SystemServerTiming: OnBootPhase_520_com.android.server.wifi.WifiService
+09-07 20:18:57.700   260   260 V SystemServerTiming: OnBootPhase_520_com.android.server.wifi.WifiService took to complete: 0ms
+09-07 20:18:58.366   260   260 D SystemServerTiming: OnBootPhase_550_com.android.server.wifi.WifiService
+09-07 20:18:58.366   260   260 V SystemServerTiming: OnBootPhase_550_com.android.server.wifi.WifiService took to complete: 0ms
+09-07 20:18:58.546   260   260 D SystemServerTiming: OnBootPhase_600_com.android.server.wifi.WifiService
+09-07 20:18:58.546   260   260 V SystemServerTiming: OnBootPhase_600_com.android.server.wifi.WifiService took to complete: 0ms
+09-07 20:18:59.195   260   260 D SystemServerTiming: ssm.onStartUser-0_com.android.server.wifi.WifiService
+09-07 20:18:59.195   260   260 V SystemServerTiming: ssm.onStartUser-0_com.android.server.wifi.WifiService took to complete: 0ms
+09-07 20:19:05.596   260   291 D ActivityManagerTiming: OnBootPhase_1000_com.android.server.wifi.WifiService
+09-07 20:19:05.596   260   291 V ActivityManagerTiming: OnBootPhase_1000_com.android.server.wifi.WifiService took to complete: 1ms
+09-07 20:19:05.756   260   300 D SystemServerTimingAsync: ssm.onUnlockingUser-0_com.android.server.wifi.WifiService
+09-07 20:19:05.757   260   300 V SystemServerTimingAsync: ssm.onUnlockingUser-0_com.android.server.wifi.WifiService took to complete: 0ms
+09-07 20:19:05.880   260   300 D SystemServerTimingAsync: ssm.onUnlockedUser-0_com.android.server.wifi.WifiService
+09-07 20:19:05.880   260   300 V SystemServerTimingAsync: ssm.onUnlockedUser-0_com.android.server.wifi.WifiService took to complete: 0ms
+09-07 20:19:16.099   260  2587 D SystemServerTimingAsync: ssm.onCompletedEventUser-0_{|Unlocked|}_com.android.server.wifi.WifiService
+09-07 20:19:16.099   260  2587 V SystemServerTimingAsync: ssm.onCompletedEventUser-0_{|Unlocked|}_com.android.server.wifi.WifiService took to complete: 0ms
+09-07 20:19:33.159   260   475 W FastPrintWriter: 	at com.android.server.wifi.WifiServiceImpl.lambda$dump$79(WifiServiceImpl.java:4799)
+09-07 20:19:33.159   260   475 W FastPrintWriter: 	at com.android.server.wifi.WifiServiceImpl.$r8$lambda$nWwLj32yWLl6Y0csQPtP1VHlAWk(Unknown Source:0)
+09-07 20:19:33.159   260   475 W FastPrintWriter: 	at com.android.server.wifi.WifiServiceImpl$$ExternalSyntheticLambda112.run(Unknown Source:8)

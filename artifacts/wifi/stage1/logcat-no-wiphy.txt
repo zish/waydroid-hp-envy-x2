@@ -1,0 +1,22 @@
+09-07 20:28:58.432   260   475 D WifiActiveModeWarden: Starting primary ClientModeManager in connect mode
+09-07 20:28:58.432   260   475 D WifiClientModeManager[unknown]: entering IdleState
+09-07 20:28:58.432   260   475 I WifiNative: Vendor Hal not supported, ignoring start.
+09-07 20:28:58.432   260   475 I WifiNative: Vendor Hal not supported, ignoring createStaIface.
+09-07 20:28:58.433   260   475 D WifiNl80211Manager: Setting up interface for client mode: wlan0
+09-07 20:28:58.434   131   131 I wificond: No wiphy is found
+09-07 20:28:58.434   131   131 E wificond: Failed to get wiphy index
+09-07 20:28:58.434   260   475 E WifiNl80211Manager: Could not get IClientInterface instance from wificond
+09-07 20:28:58.434   260   475 E WifiNative: Failed to setup iface in wificond=wlan0
+09-07 20:28:58.434   260   475 I WifiNative: Vendor Hal not supported, ignoring removeStaIface.
+09-07 20:28:58.434   260   475 E WifiNative: Failed to unregister network observer on Iface:{Name=wlan0,Id=1,Type=STA_SCAN}
+09-07 20:28:58.434   260   475 E WifiNl80211Manager: No valid wificond client interface handler for iface=wlan0
+09-07 20:28:58.434   260   475 E WifiNative: Failed to teardown iface in wificond on Iface:{Name=wlan0,Id=1,Type=STA_SCAN}
+09-07 20:28:58.434   260   475 D WifiNl80211Manager: tearing down interfaces in wificond
+09-07 20:28:58.434   260   475 I WifiNative: Vendor Hal not supported, ignoring stop.
+09-07 20:28:58.434   260   475 I WifiNative: Successfully torn down Iface:{Name=wlan0,Id=1,Type=STA_SCAN}
+09-07 20:28:58.434   260   475 I WifiNative: Successfully initiated teardown for iface=wlan0
+09-07 20:28:58.434   260   475 E WifiClientModeManager[unknown]: Failed to create ClientInterface. Sit in Idle
+09-07 20:28:58.434   260   475 E WifiActiveModeWarden: ClientModeManager start failed!ConcreteClientModeManager{id=31183949 iface=null role=null}
+[20:38:56] See also: <https://github.com/waydroid>
+Use '--details-to-stdout' to get more details:
+  /usr/sbin/waydroid --details-to-stdout shell -- sh -c logcat -d | grep -iE "wificond|WifiNative|WifiNl80211|ClientModeManager|ActiveModeWarden" | tail -30

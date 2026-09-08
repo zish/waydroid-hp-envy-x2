@@ -114,8 +114,20 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [docs/10-battery-fixed.md](docs/10-battery-fixed.md); verify with `bin/battery-test.sh`.
    Temperature is still unreported — that needs an NDK rebuild of the HAL (battery temp) or a new
    thermal HAL (system temps); both are scoped in docs/10.
-4. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.
-   Exposing the user's `/run/media/<username>` directory is probably sufficient.
+4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** Scoped 2026-09-07, nothing built
+   yet. The whole Android Wi-Fi framework is present and dormant in the image (`com.android.wifi`
+   APEX, `wificond`); what is missing is the feature XML, a supplicant, and any vendor HAL — the
+   image declares no Wi-Fi HAL in VINTF at all. Direct hardware access was considered and
+   **rejected**: `wlp1s0` is this machine's only network interface, so handing `phy0` to the
+   container costs the host its network while saving almost none of the software work. The design
+   is a host daemon serving the supplicant interface over libgbinder — the
+   [docs/14](docs/14-sensors.md) pattern — behind a **pluggable host backend**, so NetworkManager
+   is one implementation among several and others can add iwd or connman. Findings in
+   [docs/28-wifi-feasibility.md](docs/28-wifi-feasibility.md), staged plan in
+   [docs/29-wifi-plan.md](docs/29-wifi-plan.md).
+5. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.
+   Exposing the user's `/run/media/<username>` directory is probably sufficient. **Deprioritised
+   below Wi-Fi on 2026-09-07** at the owner's request.
 
 Work the list in order. Don't start a later item until the one before it is either done or
 explicitly parked.

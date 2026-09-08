@@ -1,0 +1,33 @@
+=== container netns links ===
+lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP> 
+eth0@if13        UP             00:16:3e:f9:d3:03 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+wlan0@eth0       UNKNOWN        00:16:3e:f9:d3:03 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+
+=== container netns: iw dev (EMPTY - no wiphy here) ===
+
+=== HOST netns: iw dev (wiphy landed here instead) ===
+phy#1
+	Interface wlan0
+		ifindex 4
+		wdev 0x100000001
+		addr 00:16:3e:f9:d3:03
+		type managed
+phy#0
+	Unnamed/non-netdev interface
+		wdev 0xd
+		addr 60:57:18:0a:e8:b8
+		type P2P-device
+	Interface wlp1s0
+		ifindex 2
+		wdev 0x1
+		addr de:fa:b4:68:d3:c7
+		type managed
+		channel 1 (2412 MHz), width: 20 MHz, center1: 2412 MHz
+		txpower 22.00 dBm
+		multicast TXQ:
+			qsz-byt	qsz-pkt	flows	drops	marks	overlmt	hashcol	tx-bytes	tx-packets
+			0	0	0	0	0	0	0	0		0
+
+=== attempt to move wiphy into container netns ===
+command failed: Operation not supported (-95)
+rc=161  (-95 = EOPNOTSUPP: WIPHY_FLAG_NETNS_OK not set by virt_wifi)

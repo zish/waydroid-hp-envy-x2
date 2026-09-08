@@ -1,0 +1,51 @@
+# Extracted from com.android.wifi APEX, service-wifi.jar
+# Android 13 / SDK 33, LineageOS 20, lineage_waydroid_x86_64-userdebug
+# Method: debugfs dump from the read-only system.img, then unzip + strings. No host changes.
+
+## AIDL supplicant wire descriptors (dex stores them $-separated; AIDL emits .replace('$','.'))
+android$hardware$wifi$supplicant$ISupplicant
+android$hardware$wifi$supplicant$ISupplicantP2pIface
+android$hardware$wifi$supplicant$ISupplicantP2pIfaceCallback
+android$hardware$wifi$supplicant$ISupplicantP2pNetwork
+android$hardware$wifi$supplicant$ISupplicantStaIface
+android$hardware$wifi$supplicant$ISupplicantStaIfaceCallback
+android$hardware$wifi$supplicant$ISupplicantStaNetwork
+android$hardware$wifi$supplicant$ISupplicantStaNetworkCallback
+
+## HIDL supplicant descriptors are ALSO present - both paths ship
+ailed to register for notifications to android.hardware.wifi.supplicant@1.0::ISupplicant
+android.hardware.wifi.supplicant@1.0::ISupplicant
+android.hardware.wifi.supplicant@1.1::ISupplicant
+android.hardware.wifi.supplicant@1.2::ISupplicant
+android.hardware.wifi.supplicant@1.3::ISupplicant
+android.hardware.wifi.supplicant@1.4::ISupplicant
+
+## HAL selection + version strings
+AIDL interface version: 1 (initial)
+AIDL service declared: 
+Initializing hostapd using HIDL implementation.
+Initializing SupplicantP2pIfaceHal using HIDL implementation.
+Initializing SupplicantStaIfaceHal using HIDL implementation.
+Starting supplicant using HIDL
+Successfully triggered start of hostapd using HIDL
+Successfully triggered start of supplicant using HIDL
+Terminating supplicant using HIDL
+
+## wificond service name registered in servicemanager
+wifinl80211
+
+## nl80211 types referenced (classes live in the platform boot classpath, NOT in these jars)
+Landroid/net/wifi/nl80211/DeviceWiphyCapabilities;
+Landroid/net/wifi/nl80211/NativeScanResult;
+Landroid/net/wifi/nl80211/NativeWifiClient;
+Landroid/net/wifi/nl80211/PnoNetwork;
+Landroid/net/wifi/nl80211/PnoSettings;
+Landroid/net/wifi/nl80211/RadioChainInfo;
+Landroid/net/wifi/nl80211/WifiNl80211Manager;
+Landroid/net/wifi/nl80211/WifiNl80211Manager$CountryCodeChangedListener;
+Landroid/net/wifi/nl80211/WifiNl80211Manager$OemSecurityType;
+Landroid/net/wifi/nl80211/WifiNl80211Manager$PnoScanRequestCallback;
+Landroid/net/wifi/nl80211/WifiNl80211Manager$ScanEventCallback;
+Landroid/net/wifi/nl80211/WifiNl80211Manager$SendMgmtFrameCallback;
+Landroid/net/wifi/nl80211/WifiNl80211Manager$SignalPollResult;
+Landroid/net/wifi/nl80211/WifiNl80211Manager$SoftApCallback;

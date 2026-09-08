@@ -1,0 +1,9 @@
+=== pm list features (wifi) ===
+feature:android.hardware.wifi
+=== service list (wifi) ===
+228	wifi: [android.net.wifi.IWifiManager]
+229	wifinl80211: [android.net.wifi.nl80211.IWificond]
+230	wifiscanner: [android.net.wifi.IWifiScanner]
+=== interfaces inside container ===
+lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP> 
+eth0@if13        UP             00:16:3e:f9:d3:03 <BROADCAST,MULTICAST,UP,LOWER_UP> 

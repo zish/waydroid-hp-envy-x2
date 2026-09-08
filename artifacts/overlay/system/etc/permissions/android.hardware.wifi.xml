@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Declares that this device has 802.11 networking hardware.
+
+  Verbatim in form from AOSP frameworks/native/data/etc/android.hardware.wifi.xml.
+  The Waydroid LineageOS 20 image ships no Wi-Fi feature XML at all, which is the
+  suspected reason WifiService never starts and Settings shows no Wi-Fi panel.
+
+  Stage 0 of docs/29-wifi-plan.md. Deployed to
+  /var/lib/waydroid/overlay/system/etc/permissions/ -- reversible by deleting it.
+-->
+<permissions>
+    <feature name="android.hardware.wifi" />
+</permissions>

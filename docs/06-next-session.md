@@ -79,6 +79,22 @@ resume throws `xhci_hcd ... xHC error in resume, Reinit` where s2idle resumes cl
 config file and run one command to finish it; docs/17 has both. **Bluetooth as a wake source** also
 looks achievable and untested — `1-4/power/wakeup` exists, so the hardware is capable.
 
+**Session of 2026-09-07** answered a design question instead of fixing anything: can Android's own
+Wi-Fi settings drive NetworkManager, and would handing Android the radio directly be easier? The
+images were inspected with `debugfs` straight off the read-only `.img` files — no mount, no sudo,
+no container running — a technique worth reusing for any "what is in this image" question. Result:
+the **entire Wi-Fi framework is present and dormant** (`com.android.wifi` APEX, `wificond`, the
+libs), and what is missing is the feature XML, a supplicant binary, and any vendor Wi-Fi HAL. The
+vendor VINTF manifest contains no Wi-Fi entry at all, which is precisely the precondition for
+`WifiNative`'s no-vendor-HAL path. Direct hardware access was **rejected**: `wlp1s0` is this
+machine's only network interface, so moving `phy0` into the container drops SSH with no way back
+short of the physical console, and it saves almost none of the work because the supplicant is
+missing either way. The design that survived is the [docs/14](14-sensors.md) pattern — a host
+daemon serving the supplicant interface over libgbinder, behind a **pluggable backend** so
+NetworkManager is one implementation among several. `/dev/binder` turns out to be bind-mounted from
+the host alongside `/dev/hwbinder`, so the AIDL side is reachable from a host daemon too. Wi-Fi is
+now goal 4; removable media is goal 5. [28](28-wifi-feasibility.md), [29](29-wifi-plan.md).
+
 ## Parked, and worth revisiting
 
 Side-quests from the 2026-09-06 sessions, none of them on the AGENTS.md goal list. Each is
@@ -152,16 +168,61 @@ panel is doing.
 transducers, two firmware-fused outputs), the scale factors derived from the HID report descriptor,
 the gyroscope's five-second warm-up, and the traps.
 
-Two candidates, in the order AGENTS.md implies:
+**Stage 0 landed on 2026-09-07 and succeeded** — one overlay file
+(`/system/etc/permissions/android.hardware.wifi.xml`) brought Android's whole Wi-Fi framework up:
+`WifiService` runs, `wificond` starts by itself, Settings tries to enable Wi-Fi, and the *only*
+failure left is `wificond: Can't get wlan0 index: No such device`. It also retired the plan's
+biggest risk a stage early — `HalDeviceManager` reports `mWifi: null` and the framework carried on
+regardless, so **the no-vendor-HAL path works**. **Next is Stage 1: produce a `wlan0` in the
+container** via `virt_wifi`. Evidence in `artifacts/wifi/stage0/`.
+
+**Stage 1 was attempted the same day and is blocked, informatively.** `virt_wifi` creates
+`wlan0@eth0` in the container fine, but it registers the **netdev in the container's netns while
+leaving its wiphy in the host's**, and `iw phy set netns` is refused with `-EOPNOTSUPP` because
+stock `virt_wifi` never sets `WIPHY_FLAG_NETNS_OK`. wificond therefore reports `No wiphy is found`.
+Container networking was unaffected throughout. This forces a fork — patch `virt_wifi` (~2 lines,
+but an out-of-tree module on a host that updates kernels often) versus replace `wificond` in
+userspace (no kernel work, and the wiphy stops mattering at all). **That decision is the next
+thing to make**; the table is at the end of the Stage 1 section in
+[docs/29-wifi-plan.md](29-wifi-plan.md). Evidence in `artifacts/wifi/stage1/`.
+
+**The fork was decided: Path U — no kernel work.** The offline extraction that follows from it is
+done and is in [docs/30-wifi-aidl-surface.md](30-wifi-aidl-surface.md): both HIDL *and* AIDL
+supplicant paths ship in this image, selection is by VINTF declaration, the AIDL is version 1, and
+**both halves of the shim are AIDL on `/dev/binder`** — one dialect, no `hwservicemanager`. Watch
+the jarjar trap recorded there. Path U also kills the prebuilt-supplicant shortcut, because a stock
+`wpa_supplicant` needs a real phy; **the next milestone is Stage 2**, a `waydroid-wifid` skeleton
+that registers `wifinl80211` and gets the Wi-Fi toggle to stay on.
+
+**The AIDL surface is now pinned and cross-checked** — [docs/30](30-wifi-aidl-surface.md).
+`IWificond`'s 18 transaction codes were read out of this image's own `framework.jar` bytecode and
+match AOSP `android-13.0.0_r75` exactly, so upstream `.aidl` can be used directly; only 13 of the 18
+are ever called. The supplicant side is **203 method slots** across six interfaces (not the ~80 first
+estimated), with `ISupplicantStaNetwork` alone at 93. Sources fetch as two subdirectory tarballs from
+android.googlesource.com — no repo clone. One check still owed: the supplicant has **not** had the
+same bytecode cross-check as wificond, and should get one before code is written against it.
+
+**As of 2026-09-07 the active goal is 4, Wi-Fi** — Android's own Wi-Fi settings driving the
+host's NetworkManager. Scoped in that session; nothing is built yet. Removable media was explicitly
+deprioritised below it by the owner and is now goal 5.
+
+Start with [docs/29-wifi-plan.md](29-wifi-plan.md) and its **Stage 0**, which is one overlay file
+and a container restart. The findings behind the plan are in
+[docs/28-wifi-feasibility.md](28-wifi-feasibility.md); the headline is that the whole Android Wi-Fi
+framework is already in the image and dormant, so this is native plumbing rather than framework
+surgery.
+
+Three of that plan's open questions can be answered **offline on the dev box, with no host changes
+at all** — extract `service-wifi.jar` from the `com.android.wifi` APEX and read which supplicant
+interface Android 13 actually binds. That is free and it shapes the largest stage, so do it first.
+
+The other two candidates, both still open:
 
 1. **Vibration** — the rest of goal 2, and the harder half. Unchanged from the previous scoping;
    read the next section. Nothing about the sensors work moves it forward, because the sensors were
-   already readable from Linux and the vibrator still is not.
-2. **Goal 4, removable media** — untouched, and much cheaper. Exposing the user's
-   `/run/media/<username>` to the container is probably sufficient.
-
-Goal 4 is the better next move if the aim is a working machine; vibration is the better next move
-if the aim is to finish goal 2. Vibration needs the DSDT, not Waydroid.
+   already readable from Linux and the vibrator still is not. It needs the DSDT, not Waydroid.
+2. **Goal 5, removable media** — untouched, and still the cheapest thing on the list. Exposing the
+   user's `/run/media/<username>` to the container is probably sufficient.
 
 ### Vibration — harder than the sensors, and blocked one layer lower
 
@@ -444,7 +505,7 @@ A fourth set — the LPSS UARTs being `_OSI`-gated, `GPS0._STA` meaning the rece
 driver, a USB or WWAN-attached GPS, and the module merely being held in reset — was disproven while
 answering the GPS question; see [13-gps.md](13-gps.md).
 
-## Goals 3-4
+## Goals 3-5
 
 Goal 3 is **done** — see [docs/10](10-battery-fixed.md). Two things it deliberately left alone, both
 scoped in that doc: battery *temperature* (needs an NDK rebuild of the health HAL so the board hook
@@ -453,7 +514,10 @@ thermal HAL at all — `dumpsys thermalservice` says `HAL Ready: false`). Neithe
 goal. Goal 3 also has one unverified behaviour: the battery sat at 100% on AC throughout, so
 *tracking a changing value* was never exercised. Unplug the charger and re-run `bin/battery-test.sh`.
 
-Goal 4 (removable media) is untouched, and is now the cheapest remaining item.
+Goal 4 is now **Wi-Fi** — scoped 2026-09-07, nothing built; see
+[28-wifi-feasibility.md](28-wifi-feasibility.md) and [29-wifi-plan.md](29-wifi-plan.md). Removable
+media moved to goal 5. It is untouched and remains the cheapest remaining item, but the owner
+deprioritised it below Wi-Fi.
 
 ## Loose ends unrelated to the goals
 
