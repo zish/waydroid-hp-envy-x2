@@ -256,25 +256,41 @@ container its network for a window.
 
 Four things to know before touching it:
 
-- **Restarting the daemon does not silently reconnect.** `WifiNl80211Manager` caches its failure and
-  `ClientModeManager` sits in Idle. Kick it with `cmd wifi set-scan-always-available disabled` then
-  `enabled`. The daemon's own half is fine — the servicemanager presence handler was watched
-  re-registering across a container restart, so that Stage 5 item is proven. The framework's half
-  is the one still to build; Stage 5 in [29](29-wifi-plan.md) now says so.
+- **The daemon must run in `unconfined_t`, and this is not a preference.** systemd runs a `bin_t`
+  binary as `unconfined_service_t`, and the host policy allows `binder { call }` to that domain while
+  **denying `binder { transfer }`** from `container_runtime_t`. Calls carrying no binder succeed and
+  every callback-passing call fails with a bare `DeadObjectException`; the rule is `dontaudit`ed, so
+  `ausearch` is clean and the obvious first move gives the wrong answer. `SELinuxContext=` in
+  `waydroid-wifid.service` handles it. **`bin/wifi-test.sh` checks this first** — see
+  [35](35-wifi-stage5.md).
 
 - **An overlay file is not deployed until the container *service* restarts.**
   `waydroid container restart` does nothing for it — see [32](32-wifi-stage3.md). This already bit a
   Stage 0 file that had not been in effect for a day without anyone noticing. Verify from inside the
   container, not by listing the overlay directory.
 
-- **`wlan0` is not needed for scanning.** [31](31-wifi-stage2.md)'s claim that it must exist was
-  disproven on 2026-09-08. Stage 4 will need it for real, when `IpClient` runs DHCP.
+- **`wlan0` is the container's uplink now**, renamed by `lxc.net.0.name = wlan0` in
+  `/var/lib/waydroid/lxc/waydroid/config`. There is no `eth0` at all, which kills the
+  Ethernet-outscores-Wi-Fi trap for good and retires `bin/wifi-wlan0.sh`. See
+  [34](34-wifi-second-radio.md). ~~`wlan0` is not needed for scanning~~ — true of scan-only mode and
+  no longer the point.
 
-- **Nothing autostarts `waydroid-wifid`** — unlike `waydroid-sensord`, the name means nothing to
-  Waydroid. Start it by hand (`sudo waydroid-wifid --verbose &`). Packaging is Stage 5.
-- **Stock wificond has to be out of the way**, because both register the same name and the last
-  writer wins. It is currently stopped by hand; `artifacts/overlay/system/etc/init/wificond.rc`
-  makes that permanent but is **not deployed** — it needs a `waydroid container restart`.
+- **`waydroid-wifid` autostarts from `waydroid-wifid.service`** and survives a reboot, verified end
+  to end. It is pinned to the T3U by **factory MAC** in `/etc/waydroid-wifid.conf`, not by
+  `wlp0s20u1`, which encodes a USB port. Install or update with `wifi/build.sh --install --unit`.
+
+- **Restarting the daemon leaves Android's Wi-Fi switched off**, and the cause is AOSP's own quota:
+  `SelfRecovery` allows 2 restarts an hour and one daemon restart delivers 2–3 binder deaths, so the
+  first spends the budget and the rest land on `Disabling wifi`. `waydroid-wifi-nudge` re-enables it
+  from `ExecStartPost`, respecting `Settings.Global wifi_on`. The old
+  `set-scan-always-available disabled/enabled` dance is **obsolete** — it was compensating for the
+  SELinux denial above, not for anything about registration.
+
+- **Stock wificond can never take the name.** `artifacts/overlay/system/etc/init/wificond.rc` is
+  deployed and points the service at `/system/bin/true` with `oneshot`, so it execs and exits;
+  `getprop init.svc.wificond` is empty across a full boot. Marking it `disabled` alone was **not**
+  enough — something asks init to start it on the connectivity-mode path. See
+  [34](34-wifi-second-radio.md).
 
 The other two candidates, both still open:
 
@@ -358,11 +374,17 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | **`/etc/wayland-sessions/waydroid-cage.desktop`** | the SDDM session entry, `cage -s -- …/waydroid-cage-session`, mode `0644`. Pre-existing file; restore the one-line `Exec=cage -- waydroid show-full-ui` to revert |
 | `/var/tmp/powerbtn-probe.py` | copy of [bin/powerbtn-probe.py](../bin/powerbtn-probe.py), for the untested button-hold question in [15](15-power-button.md). `/var/tmp` survives reboots; safe to delete |
 | **`overlay/system/etc/permissions/android.hardware.wifi.xml`** | **Wi-Fi Stage 0** — the one file that brings Android's whole Wi-Fi framework out of dormancy, mode `0644`. Delete to revert. See [29](29-wifi-plan.md) |
-| **`/usr/local/bin/waydroid-wifid`** | **Wi-Fi Stage 2 — the host-side wificond replacement**, 688 KB, mode `0755`. Nothing starts it automatically; run it by hand. Delete to revert. See [31](31-wifi-stage2.md) |
-| `wlan0` in the container | a `dummy` netdev added by `bin/wifi-wlan0.sh up` so netd's observer has something to watch. **Does not survive a reboot**; `bin/wifi-wlan0.sh down` removes it |
-| stock `wificond` | **stopped by hand** (`ctl.stop` then `kill -9`; the ctl.stop alone left it in `stopping` forever). It and `waydroid-wifid` register the same name, so the last one to register wins. A `waydroid container restart` brings it back. `artifacts/overlay/system/etc/init/wificond.rc` makes the suppression permanent but is **not deployed** |
+| **`/usr/local/bin/waydroid-wifid`** | **the host-side wificond + supplicant replacement**, mode `0755`. Started by `waydroid-wifid.service`, not by hand. Delete to revert. See [31](31-wifi-stage2.md), [34](34-wifi-second-radio.md), [35](35-wifi-stage5.md) |
+| **`/etc/systemd/system/waydroid-wifid.service`** | **enabled.** Runs the daemon from boot, from `/dev/binderfs/binder` so it does not depend on the container. Carries `SELinuxContext=system_u:unconfined_r:unconfined_t:s0`, **without which every callback-passing binder call fails silently** — see [35](35-wifi-stage5.md). `systemctl disable --now` to revert |
+| **`/etc/waydroid-wifid.conf`** | the daemon's arguments. Pins the radio by **factory MAC** (`34:E8:94:F8:61:70`, the T3U), not by `wlp0s20u1`, which encodes a USB port and renames if the adapter moves |
+| **`/usr/local/bin/waydroid-wifi-nudge`** | re-enables Android's Wi-Fi after a daemon restart, run as `ExecStartPost`. Works around AOSP's `SelfRecovery` quota (2/hour, and one restart spends 2–3). Respects `Settings.Global wifi_on`. See [35](35-wifi-stage5.md) |
+| **`/usr/local/bin/waydroid-wifi-sync`** + **`waydroid-wifi-sync.{service,timer}`** | **timer enabled.** Imports opted-in NetworkManager profiles into Android's saved networks, and deletes the NM profile when the network is forgotten in Android. Also triggered by the daemon when Android enables Wi-Fi. See [36](36-wifi-credential-sync.md) |
+| **`/etc/waydroid-wifi-share.conf`** | the **opt-in allow-list**, mode `0600`, and the audit trail for which passphrases have been copied into Android's *cleartext* `WifiConfigStore.xml`. Currently: `vidiot	nodelete`. Empty it to stop sharing |
+| `wlan0` in the container | **the container's uplink**, renamed by `lxc.net.0.name = wlan0` in `/var/lib/waydroid/lxc/waydroid/config` (backup at `config.pre-wlan0`). There is no `eth0`. ~~a dummy netdev from `bin/wifi-wlan0.sh`~~ — that script is retired |
+| stock `wificond` | **can never start.** `artifacts/overlay/system/etc/init/wificond.rc` is deployed and points it at `/system/bin/true` with `oneshot`; `getprop init.svc.wificond` is empty across a full boot. Marking it `disabled` alone was not enough |
 | `/var/lib/waydroid/waydroid-wifid.pid` | the wifi daemon's single-instance lock. Recreated on demand, safe to delete |
-| `/tmp/wifid.log`, `/tmp/wifi-test.sh`, `/tmp/wifi-wlan0.sh` | Stage 2 working files; `/tmp` clears on reboot |
+| `/var/lib/waydroid/waydroid-wifi-sync.state` | which networks the sync has confirmed present in Android. **Deleting it is safe** — it only ever licenses a deletion, so losing it makes the next run more conservative, not less |
+| `vidiot (Waydroid)` NM profile | the daemon's projection of an Android-driven connection: pinned to `wlp0s20u1`, `never-default`, `route-metric 1000`, UUID derived from the SSID. Recreated on the next connect if deleted. **Not** the host's own `vidiot` profile |
 | **`/usr/local/bin/waydroid-sensord`** | **the sensors fix**, 663 KB, mode `0755`. `/usr/local` is a symlink to `/var/usrlocal`, so no layering and no reboot. **Delete to revert** — waydroid then restores `waydroid.stub_sensors_hal=1` by itself |
 | `/var/lib/waydroid/waydroid-sensord.pid` | the daemon's single-instance lock. Recreated on demand, safe to delete |
 | `/etc/waydroid-sensors.conf` | **not installed.** Optional; documented sample in [artifacts/sensors/](../artifacts/sensors/) |

@@ -338,11 +338,29 @@ plan the cutover, do not stumble into it.
   into retrying afterwards. The blunt instrument above works from the host; whether there is a
   cleaner trigger — an `IWificondEventCallback` the framework already listens on, or the same effect
   through `IInterfaceEventCallback` — is worth reading out of the dex before writing anything.
+
+  > **Done 2026-09-08, and no callback was needed — the premise above is wrong.** The framework is
+  > not failing to notice; it notices perfectly and then declines to act, because AOSP's
+  > `SelfRecovery` allows 2 restarts an hour and our two services share one process, so a single
+  > daemon restart delivers 2–3 binder deaths and the first one spends the whole budget:
+  > `Already restarted wifi 2 times in last 1 hour. Disabling wifi`. `waydroid-wifi-nudge` switches
+  > Wi-Fi back on afterwards. The `set-scan-always-available` dance recorded above is **obsolete** —
+  > it was compensating for an SELinux denial, not for anything about registration. See
+  > [35-wifi-stage5.md](35-wifi-stage5.md).
 - Signal strength and state transitions that Android's UI believes.
-- Saved networks synced both ways — forget in Android should forget in NM.
+- ~~Saved networks synced both ways — forget in Android should forget in NM.~~ **Done 2026-09-08**,
+  and it could not be done at this seam: the supplicant AIDL has no "here are my saved networks"
+  direction and Android never asks. `waydroid-wifi-sync` reconciles from the host through
+  `cmd wifi add-network` instead, opt-in per network. See
+  [36-wifi-credential-sync.md](36-wifi-credential-sync.md).
 - Cleanly report P2P, SoftAP, RTT and NAN as unsupported rather than letting them fail oddly.
-- SELinux, autostart ordering, packaging, and a `bin/wifi-test.sh` in the style of
-  `bin/sensors-test.sh` and `bin/battery-test.sh`.
+- ~~SELinux, autostart ordering~~, packaging, and ~~a `bin/wifi-test.sh`~~. **Done 2026-09-08**
+  except packaging: `waydroid-wifid.service` autostarts the daemon, `bin/wifi-test.sh` gained Stage 5
+  checks, and SELinux turned out to be the whole ballgame rather than a checklist item — see
+  [35-wifi-stage5.md](35-wifi-stage5.md). **Packaging is still open**, and
+  `packaging/waydroid-bigtab01.spec` does not cover the Wi-Fi work: that spec is `BuildArch: noarch`
+  and `waydroid-wifid` is a compiled x86_64 binary, so it needs its own subpackage and a
+  DESTDIR-honouring `artifacts/wifi/install.sh` factored out of `wifi/build.sh`.
 
 ## Deliberately out of scope
 

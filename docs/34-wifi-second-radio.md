@@ -409,9 +409,10 @@ ping google.com  -> resolved, 20.9 ms
 
 All Stage 5 hardening; none of it blocks Stage 4.
 
-- **No systemd unit.** The daemon does not survive a reboot. The start-ordering constraint is gone
-  now that `wificond` is neutered, so a unit is simpler than it would have been — it needs
-  NetworkManager and `/dev/binder`, not a wait on another Android service.
+- ~~**No systemd unit.** The daemon does not survive a reboot.~~ **Done 2026-09-08** — and the unit
+  turned out to be the easy half. Running under systemd put the daemon in `unconfined_service_t`,
+  where the host policy denies `binder { transfer }`, so it worked only because it had always been
+  started by hand from an ssh login. See [35-wifi-stage5.md](35-wifi-stage5.md).
 - **The rtw88 wedge has no automatic recovery**, and no understood trigger. `bin/wifi-radio-reset.sh`
   is manual.
 - **The wrong-password path is still unproven.** It is also awkward to test honestly on this AP: over
