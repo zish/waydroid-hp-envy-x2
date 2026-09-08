@@ -88,6 +88,7 @@ private:
     GBinderRemoteObject* mEventCallback = nullptr;
 
     std::string mIfaceName;     /* what Android asked us to create, e.g. wlan0 */
+    bool mScanPending = false;  /* the framework asked, the host has not answered */
 };
 
 } /* namespace wifi */

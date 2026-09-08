@@ -114,8 +114,8 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [docs/10-battery-fixed.md](docs/10-battery-fixed.md); verify with `bin/battery-test.sh`.
    Temperature is still unreported — that needs an NDK rebuild of the HAL (battery temp) or a new
    thermal HAL (system temps); both are scoped in docs/10.
-4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** **In progress: Stages 0 and 2
-   done, 3–5 outstanding.** The whole Android Wi-Fi framework was already present and dormant in
+4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** **In progress: Stages 0, 2 and 3
+   done, 4–5 outstanding.** The whole Android Wi-Fi framework was already present and dormant in
    the image (`com.android.wifi` APEX, `wificond`); what was missing was the feature XML, a
    supplicant, and any vendor HAL. Direct hardware access was considered and **rejected**: `wlp1s0`
    is this machine's only network interface, so handing `phy0` to the container costs the host its
@@ -132,11 +132,18 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    **Stage 2 is done**: `waydroid-wifid` (source in [wifi/](wifi)) registers `wifinl80211` on
    `/dev/binder` and serves `IWificond`, `IClientInterface` and `IWifiScannerImpl`, and Android now
    brings a client interface up and keeps it in `ScanOnlyModeState` against it. See
-   [docs/31-wifi-stage2.md](docs/31-wifi-stage2.md); verify with `bin/wifi-test.sh`.
-   **Next is Stage 3**, and it is one job — the `NativeScanResult` parcelable layout. The host half
-   already works (`waydroid-wifid --scan` lists the real access points). The Wi-Fi **master toggle
-   still does not stay on**, and cannot until Stage 4's supplicant: `ROLE_CLIENT_PRIMARY` calls
-   `startSupplicant()` before it ever reaches wificond.
+   [docs/31-wifi-stage2.md](docs/31-wifi-stage2.md).
+   **Stage 3 is done**: the host's real access points now arrive inside Android with the right
+   names, signal strengths and security flags — `cmd wifi list-scan-results` reads straight out of
+   NetworkManager. The `NativeScanResult` layout was disassembled from this image's `framework.jar`;
+   the beacon information elements Android parses security out of have to be **synthesised**,
+   because NM keeps the conclusions and discards the beacon; and `tsf` is load-bearing, since
+   results older than the scan Android asked for are dropped without a word. See
+   [docs/32-wifi-stage3.md](docs/32-wifi-stage3.md); verify both stages with `bin/wifi-test.sh`.
+   **Next is Stage 4, the supplicant.** The Wi-Fi **master toggle still does not stay on** and
+   cannot until then — `ROLE_CLIENT_PRIMARY` calls `startSupplicant()` before it ever reaches
+   wificond — so the Settings picker still shows nothing even though the scan data behind it is
+   real.
 5. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.
    Exposing the user's `/run/media/<username>` directory is probably sufficient. **Deprioritised
    below Wi-Fi on 2026-09-07** at the owner's request.
@@ -170,7 +177,9 @@ and the reasoning behind each change.
 - `wifi/` — source for `waydroid-wifid`, the host-side wificond replacement (goal 4). Same shape as
   `sensors/`. `WifiBackend.h` is the pluggable seam: everything above it speaks AIDL to Android,
   everything below it speaks to whatever owns the radio on the host, and `NmBackend` is the first
-  implementation. Build with `wifi/build.sh`
+  implementation. `NativeScanResult.cpp` is the awkward corner — it marshals a custom parcelable
+  whose layout exists only as bytecode, and synthesises the 802.11 beacon elements Android insists
+  on parsing its security out of. Build with `wifi/build.sh`
 - `sensor-app/` — "Sensor Info", a dependency-free Kotlin app that displays every sensor live,
   with an attitude panel above it: a compass dial and a software-rendered 3-D view of the
   machine's orientation. Built without Gradle (`aapt2` + `kotlinc` + `d8` + `apksigner`);

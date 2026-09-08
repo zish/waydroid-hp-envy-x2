@@ -37,8 +37,21 @@ enum class Security {
     Wep,
     WpaPsk,
     Wpa2Psk,
+    Wpa2Wpa3Psk,                    /* transition mode: PSK and SAE together */
     Wpa3Sae,
     Wpa2Eap,
+};
+
+/*
+ * Cipher suites, as a mask, because an AP advertises a list of pairwise
+ * ciphers rather than one.  These are the suites NetworkManager distinguishes;
+ * anything a future backend learns about (GCMP, say) gets a bit here.
+ */
+enum Cipher {
+    CipherWep40  = 1 << 0,
+    CipherWep104 = 1 << 1,
+    CipherTkip   = 1 << 2,
+    CipherCcmp   = 1 << 3,
 };
 
 const char* securityName(Security s);
@@ -50,8 +63,18 @@ struct Bss {
     int32_t     freqMhz  = 0;
     int32_t     rssiDbm  = 0;       /* dBm, negative */
     Security    security = Security::Open;
+    uint32_t    pairwiseCiphers = 0;/* Cipher mask; 0 means "host did not say" */
+    uint32_t    groupCiphers    = 0;/* Cipher mask; one bit in practice */
     bool        known    = false;   /* the host already has a profile for it */
-    uint64_t    tsfUsec  = 0;       /* age of the sighting, microseconds */
+
+    /*
+     * When the host last saw this AP, in CLOCK_BOOTTIME microseconds; 0 if it
+     * does not know.  An absolute instant rather than an age because that is
+     * what the host actually records, and because the reader above the line
+     * compares it against its own boot clock -- the container shares the
+     * host's kernel, so the two agree exactly.
+     */
+    uint64_t    lastSeenUsec = 0;
 };
 
 /* A connection request coming down from Android's Wi-Fi dialog. */
@@ -96,6 +119,15 @@ public:
     /* Scanning. */
     virtual bool startScan() = 0;
     virtual std::vector<Bss> scanResults() = 0;
+
+    /*
+     * Called when a scan the host was asked for has finished, successfully or
+     * not.  This is a fact the layer above cannot infer from startScan()
+     * returning true, and it needs it: the reader discards every result whose
+     * timestamp predates the scan it requested, so announcing results before
+     * the host has actually produced any means announcing nothing.
+     */
+    virtual void onScanComplete(std::function<void(bool ok)> cb) = 0;
 
     /* Association. */
     virtual bool connect(const NetworkRequest& req) = 0;

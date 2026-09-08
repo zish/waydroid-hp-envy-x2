@@ -1,5 +1,6 @@
 #include "Wificond.h"
 #include "AidlParcel.h"
+#include "NativeScanResult.h"
 
 #include <gutil_log.h>
 
@@ -108,10 +109,33 @@ Wificond::Wificond(GBinderServiceManager* sm, WifiBackend* backend) :
 {
     mWificond = gbinder_servicemanager_new_local_object(sm, IFACE_WIFICOND,
         onWificond, this);
+
+    /*
+     * The framework is told a scan finished only when the host says one did.
+     * Announcing earlier is worse than not announcing: WificondScannerImpl
+     * discards every result older than the scan it asked for, so an early
+     * OnScanResultReady delivers the previous scan's list straight into the
+     * stale filter and the picker stays empty with nothing in the log to
+     * explain it.
+     */
+    mBackend->onScanComplete([this](bool ok) {
+        if (!mScanPending) {
+            return;
+        }
+        mScanPending = false;
+        if (ok) {
+            notifyScanResultsReady();
+        } else {
+            GWARN("the host produced no scan; reporting failure");
+            notifyScanFailed();
+        }
+    });
 }
 
 Wificond::~Wificond()
 {
+    /* The backend holds a std::function capturing this; drop it first. */
+    mBackend->onScanComplete(nullptr);
     dropScanEvent();
     dropPnoScanEvent();
     if (mEventCallback) {
@@ -144,6 +168,8 @@ Wificond::ensureClientInterface()
 void
 Wificond::dropScanEvent()
 {
+    /* Nobody left to tell, so no scan is outstanding as far as we care. */
+    mScanPending = false;
     if (mScanEventClient) {
         gbinder_client_unref(mScanEventClient);
         mScanEventClient = nullptr;
@@ -450,13 +476,6 @@ Wificond::onScanner(GBinderLocalObject* obj, GBinderRemoteRequest* req,
     return ((Wificond*) user)->handleScanner(req, code, flags, status);
 }
 
-static gboolean
-scan_results_ready_idle(gpointer user)
-{
-    ((Wificond*) user)->notifyScanResultsReady();
-    return G_SOURCE_REMOVE;
-}
-
 GBinderLocalReply*
 Wificond::handleScanner(GBinderRemoteRequest* req, guint code, guint flags,
     int* status)
@@ -471,14 +490,22 @@ Wificond::handleScanner(GBinderRemoteRequest* req, guint code, guint flags,
     gbinder_remote_request_init_reader(req, &reader);
 
     switch (code) {
-    case SCANNER_getScanResults:
+    case SCANNER_getScanResults: {
+        std::vector<Bss> results = mBackend->scanResults();
+        LinkState link = mBackend->state();
+        GBinderLocalReply* reply = beginReply(mScanner, &writer, status);
+        int n = writeScanResultArray(&writer, results,
+            link.associated ? link.bssid : nullptr);
+        GDEBUG("getScanResults() -> %d access points", n);
+        return reply;
+    }
+
     case SCANNER_getPnoScanResults: {
         /*
-         * Stage 3.  The backend already produces the AP list -- see
-         * NmBackend::scanResults() and `waydroid-wifid --scan` -- what is
-         * missing is the NativeScanResult parcelable layout, which has to come
-         * out of framework.jar the same way the transaction codes did.
-         * An empty array is a legal, non-crashing answer meanwhile.
+         * Empty on purpose, and not the same answer as above: startPnoScan()
+         * returns false, so no PNO scan has ever run and there is no PNO
+         * result set to report.  Handing back the single-scan list here would
+         * be inventing one.
          */
         GBinderLocalReply* reply = beginReply(mScanner, &writer, status);
         gbinder_writer_append_int32(&writer, 0);
@@ -495,17 +522,13 @@ Wificond::handleScanner(GBinderRemoteRequest* req, guint code, guint flags,
         /*
          * SingleScanSettings is not parsed yet -- nothing below the contract
          * can act on a channel list or a hidden-SSID list, so reading it would
-         * only be ceremony.  Ask the host for a fresh scan and tell the
-         * framework to come back for results; that exercises the IScanEvent
-         * callback path, which is the one part of the wire format that could
-         * not be verified statically (docs/30, "What this check could not
-         * cover").
+         * only be ceremony.  Ask the host for a fresh scan; the completion
+         * handler installed in the constructor answers with OnScanResultReady
+         * when the host has actually produced one.
          */
         bool ok = mBackend->startScan();
         GINFO("scan() -> %s", ok ? "true" : "false");
-        if (ok) {
-            g_idle_add(scan_results_ready_idle, this);
-        }
+        mScanPending = ok;
         GBinderLocalReply* reply = beginReply(mScanner, &writer, status);
         writeBool(&writer, ok);
         return reply;
@@ -557,6 +580,7 @@ Wificond::handleScanner(GBinderRemoteRequest* req, guint code, guint flags,
 
     case SCANNER_abortScan:
         GDEBUG("abortScan()");
+        mScanPending = false;
         return beginReply(mScanner, &writer, status);
 
     default:

@@ -259,23 +259,36 @@ Two things fell out of doing it:
   [30](30-wifi-aidl-surface.md)'s one unverifiable question — callback transaction codes. The same
   technique settles the supplicant's two callbacks in Stage 4.
 
-### Stage 3 — real SSIDs in the picker
+### Stage 3 — real SSIDs from the host, in Android's scan results — **DONE, 2026-09-08**
 
-Scan-only mode itself arrived in Stage 2, and so did both halves of the plumbing on either side of
-the gap: `IWifiScannerImpl` + `IScanEvent` above, and NetworkManager's `AccessPoint` objects below
-(`waydroid-wifid --scan` prints the host's real AP list through the `WifiBackend` contract). **What
-is left is exactly one thing — the `NativeScanResult` parcelable layout**, which has to come out of
-this image's `framework.jar` the same way the transaction codes did in
-[30](30-wifi-aidl-surface.md). Until then `getScanResults()` returns an empty array, which is legal
-and does not crash anything.
+The `NativeScanResult` parcelable layout was disassembled out of this image's `framework.jar`, the
+same way the transaction codes were, and Android now lists the host's real access points with the
+right names, signal strengths and security flags. Writeup in [32-wifi-stage3.md](32-wifi-stage3.md);
+evidence in `artifacts/wifi/stage3/`; verify with `bin/wifi-test.sh`.
 
-`SingleScanSettings` will want parsing here too, once a backend can act on a channel list or a
-hidden-SSID list.
+**This stage's framing was one thing short, and it was the expensive half.** The layout was the
+known job; two others were not:
 
-**Proves the backend contract end-to-end** — NM's real scan list rendered by Android's own Wi-Fi
-picker — while the connect path is still unwritten. This is the milestone Path U would otherwise
-lack, and it is worth aiming for deliberately: it is the first point where the thing looks like it
-works.
+- **Android has no "security type" field to fill in** — it parses the beacon's information elements
+  and derives everything from them. NM keeps the conclusions and discards the beacon, so the IEs
+  have to be *rebuilt* from those conclusions or every network shows up as open. That is now
+  `wifi/NativeScanResult.cpp`, checked offline against a reimplementation of Android's own parser.
+- **`tsf` is load-bearing.** `WificondScannerImpl` silently discards every result older than the
+  scan it asked for, so a zero timestamp — or announcing completion before the host has really
+  scanned, which is what Stage 2 did — empties the list with nothing in the log to explain it.
+  `WifiBackend` gained `onScanComplete()` and `NmBackend` now watches NM's `LastScan`.
+
+Doing it properly also **corrected a Stage 2 bug**: `securityFromFlags()` reported any AP offering
+SAE as WPA3-only, when one offering PSK *and* SAE is a WPA2/WPA3 transition AP — a distinction
+Android draws by the MFPR bit. There is now a `Security::Wpa2Wpa3Psk`.
+
+**Proves the backend contract end-to-end**, which was the point of aiming at this stage. One
+correction to the heading it used to carry: the results are what apps and `cmd wifi
+list-scan-results` see, **not yet the Settings picker**, which needs the master toggle — and the
+toggle needs the supplicant. That is Stage 4, exactly as [31](31-wifi-stage2.md) said.
+
+`SingleScanSettings` is still not parsed; the condition this plan attached to it — a backend that
+can act on a channel list or a hidden-SSID list — has not been met.
 
 ### Stage 4 — supplicant shim, credentials, and a `wlan0` that carries traffic
 

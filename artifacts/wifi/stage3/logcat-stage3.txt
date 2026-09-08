@@ -1,0 +1,42 @@
+09-08 01:47:47.599   260  1415 D WifiNl80211Manager: Scan result ready event
+09-08 01:47:47.599   260  1415 D WifiNative: Scan result ready event
+09-08 01:47:47.729   260   481 D WificondScannerImpl: Filtering out 4 scan results.
+09-08 01:49:03.171   260   759 D WifiNl80211Manager: Scan result ready event
+09-08 01:49:03.171   260   759 D WifiNative: Scan result ready event
+09-08 01:49:03.336   260   481 D WificondScannerImpl: Filtering out 6 scan results.
+09-08 01:49:26.942   260  1719 D WifiNl80211Manager: Scan result ready event
+09-08 01:49:26.942   260  1719 D WifiNative: Scan result ready event
+09-08 01:49:27.139   260   481 D WificondScannerImpl: Filtering out 14 scan results.
+09-08 01:53:12.895   260   260 E WifiNl80211Manager: Wificond died!
+09-08 01:53:12.895   260   475 D WifiClientModeManager[wlan0]:  currentstate: ScanOnlyModeState
+09-08 01:53:12.896   260   475 D WifiClientModeManager[wlan0]: The target role change info null
+09-08 01:53:12.896   260   475 D WifiClientModeManager[wlan0]: Continue to stop wifi
+09-08 01:53:12.896   260   475 E WifiNl80211Manager: No valid wificond client interface handler for iface=wlan0
+09-08 01:53:12.896   260   475 D WifiNl80211Manager: tearing down interfaces in wificond
+09-08 01:53:12.897   260   475 E WifiNl80211Manager: Failed to get reference to wificond
+09-08 01:53:12.897   260   475 I WifiClientModeManager[unknown]: StartedState#exit(), setting mRole = null
+09-08 01:53:12.897   260   481 E WifiNl80211Manager: No valid wificond scanner interface handler for iface=wlan0
+09-08 01:53:14.900   260   475 D WifiClientModeManager[unknown]: entering IdleState
+09-08 01:53:14.900   260   475 D WifiNl80211Manager: Setting up interface for client mode: wlan0
+09-08 01:53:14.903   260   475 D WifiClientModeManager[wlan0]: entering StartedState
+09-08 01:53:14.903   260   475 D WifiClientModeManager[wlan0]: entering ScanOnlyModeState
+09-08 01:53:14.904   260   475 V WifiClientModeManager[wlan0]: ClientModeManager started in role: Role: ROLE_CLIENT_SCAN_ONLY, RequestorWs: WorkSource{1010}, ModeListener: com.android.server.wifi.ActiveModeWarden$ClientListener@cc0317d
+09-08 01:53:17.222   260   475 D WifiClientModeManager[wlan0]:  currentstate: ScanOnlyModeState
+09-08 01:53:17.223   260   475 D WifiClientModeManager[wlan0]: The target role change info null
+09-08 01:53:17.223   260   475 D WifiClientModeManager[wlan0]: Continue to stop wifi
+09-08 01:53:17.224   260   475 D WifiNl80211Manager: tearing down interfaces in wificond
+09-08 01:53:17.224   260   475 I WifiClientModeManager[unknown]: StartedState#exit(), setting mRole = null
+09-08 01:53:17.224   260   481 E WifiNl80211Manager: No valid wificond scanner interface handler for iface=wlan0
+09-08 01:53:19.551   260   475 D WifiClientModeManager[unknown]: entering IdleState
+09-08 01:53:19.551   260   475 D WifiNl80211Manager: Setting up interface for client mode: wlan0
+09-08 01:53:19.553   260   475 D WifiClientModeManager[wlan0]: entering StartedState
+09-08 01:53:19.553   260   475 D WifiClientModeManager[wlan0]: entering ScanOnlyModeState
+09-08 01:53:19.553   260   475 V WifiClientModeManager[wlan0]: ClientModeManager started in role: Role: ROLE_CLIENT_SCAN_ONLY, RequestorWs: WorkSource{1010}, ModeListener: com.android.server.wifi.ActiveModeWarden$ClientListener@f806b07
+09-08 01:53:49.295   260  1415 D WifiNl80211Manager: Scan result ready event
+09-08 01:53:49.295   260  1415 D WifiNative: Scan result ready event
+09-08 01:53:49.353   260   481 D WificondScannerImpl: Filtering out 4 scan results.
+09-08 01:54:11.160   260  5026 D WifiNl80211Manager: Scan result ready event
+09-08 01:54:11.160   260  5026 D WifiNative: Scan result ready event
+09-08 01:54:11.311   260   481 D WificondScannerImpl: Filtering out 7 scan results.
+Use '--details-to-stdout' to get more details:
+  /usr/sbin/waydroid --details-to-stdout shell -- sh -c logcat -d -t 2000 | grep -iE "WifiNl80211|WificondScannerImpl|WifiNative: Scan|ClientModeManager\[|Filtering out"

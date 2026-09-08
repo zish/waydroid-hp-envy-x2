@@ -1,0 +1,50 @@
+Offline check of the synthesised information elements.
+
+The IE blob is the one invented part of Stage 3 -- everything else is
+either copied from the host or read out of the image.  So it is checked
+without a device: the daemon's buildBeaconIes() is compiled standalone,
+fed one Bss per security type, and the bytes are run back through a
+reimplementation of Android's InformationElementUtil (parseInformationElements,
+parseRsnElement, parseWpaOneElement, generateCapabilitiesString) to see
+what capability string the framework would build.
+
+Sources: scratchpad ietest.cpp + decode.py, from AOSP android-13.0.0_r75
+packages/modules/Wifi InformationElementUtil.java.
+
+== synthetic cases: capability field | IE bytes ==
+open|0001|0006766964696f74
+wep|0011|0006766964696f74
+wpa-psk-tkip|0011|0006766964696f74dd160050f20101000050f20201000050f20201000050f202
+wpa2-psk-ccmp|0011|0006766964696f7430120100000fac040100000fac040100000fac02
+wpa2-psk-mixed|0011|0006766964696f7430160100000fac020200000fac04000fac020100000fac02
+wpa3-sae|0011|0006766964696f74301a0100000fac040100000fac040100000fac08c0000000000fac06
+wpa2/wpa3|0011|0006766964696f74301e0100000fac040100000fac040200000fac02000fac0880000000000fac06
+wpa2-eap|0011|0006766964696f7430120100000fac040100000fac040100000fac01
+wpa2-nociphers|0011|0006766964696f7430120100000fac040100000fac040100000fac02
+hidden-open|0001|0000
+
+== decoded as the framework would ==
+open             ssid='vidiot' [ESS]
+wep              ssid='vidiot' [WEP][ESS]
+wpa-psk-tkip     ssid='vidiot' [WPA-PSK-TKIP][ESS]
+wpa2-psk-ccmp    ssid='vidiot' [WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]
+wpa2-psk-mixed   ssid='vidiot' [WPA2-PSK-CCMP+TKIP][RSN-PSK-CCMP+TKIP][ESS]
+wpa3-sae         ssid='vidiot' [RSN-SAE-CCMP][ESS][MFPR][MFPC]
+wpa2/wpa3        ssid='vidiot' [WPA2-PSK+SAE-CCMP][RSN-PSK+SAE-CCMP][ESS][MFPC]
+wpa2-eap         ssid='vidiot' [WPA2-EAP/SHA1-CCMP][RSN-EAP/SHA1-CCMP][ESS]
+wpa2-nociphers   ssid='vidiot' [WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]
+hidden-open      ssid=''       [ESS]
+
+== the same, for real APs the host actually saw ==
+vidiot           ssid='vidiot' [WPA2-PSK+SAE-CCMP][RSN-PSK+SAE-CCMP][ESS][MFPC]
+my-wifi          ssid='my-wifi-can-beat-up-your-wifi' [WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]
+hidden-eap       ssid=''       [WPA2-EAP/SHA1-CCMP][RSN-EAP/SHA1-CCMP][ESS]
+f48fc5           ssid='f48fc5' [RSN-SAE-CCMP][ESS][MFPR][MFPC]
+xfinitywifi      ssid='xfinitywifi' [ESS]
+hidden-open      ssid=''       [ESS]
+
+Confirmed on device afterwards -- 'cmd wifi list-scan-results' agrees,
+except that the framework's WPA2 back-compat duplicate lists only the
+WPA2-valid AKMs ([WPA2-PSK-CCMP] beside [RSN-PSK+SAE-CCMP]) where this
+decoder copies the whole string.  The RSN half, which is the one that
+matters, matches exactly.

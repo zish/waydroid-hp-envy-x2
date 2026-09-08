@@ -74,6 +74,12 @@ What is missing is only the `NativeScanResult` parcelable layout, which has to b
 `framework.jar` the same way the transaction codes were. That is Stage 3 and it is now the whole of
 Stage 3.
 
+**Done on the same day — [32-wifi-stage3.md](32-wifi-stage3.md).** Two things in this section turned
+out to be understatements. The layout was the easy half: Android has no security field and derives
+everything by parsing beacon information elements, which a host backend has to synthesise; and the
+scan-completion notification below is wrong — announcing results before the host has really scanned
+delivers them straight into a stale filter. Both are corrected there.
+
 ## What was built
 
 `wifi/`, alongside `sensors/` and in the same shape:

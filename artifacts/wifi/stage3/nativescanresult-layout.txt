@@ -1,0 +1,130 @@
+How the NativeScanResult wire layout was obtained -- from THIS image, not
+from AOSP.  NativeScanResult is a custom parcelable (its .aidl is only a
+forward declaration with a cpp_header), so the layout is whatever the
+reader's createFromParcel does and there is nothing generated to consult.
+
+  debugfs -R "dump /system/framework/framework.jar ..." /etc/waydroid-extra/images/system.img
+  unzip framework.jar; dexdump -d classes2.dex
+
+== android.net.wifi.nl80211.NativeScanResult$1.createFromParcel ==
+
+41d74c:                                        |[41d74c] android.net.wifi.nl80211.NativeScanResult$1.createFromParcel:(Landroid/os/Parcel;)Landroid/net/wifi/nl80211/NativeScanResult;
+41d75c: 2200 4415                              |0000: new-instance v0, Landroid/net/wifi/nl80211/NativeScanResult; // type@1544
+41d760: 7010 f3b0 0000                         |0002: invoke-direct {v0}, Landroid/net/wifi/nl80211/NativeScanResult;.<init>:()V // method@b0f3
+41d766: 6e10 23d3 0600                         |0005: invoke-virtual {v6}, Landroid/os/Parcel;.createByteArray:()[B // method@d323
+41d76c: 0c01                                   |0008: move-result-object v1
+41d76e: 5b01 e75f                              |0009: iput-object v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.ssid:[B // field@5fe7
+41d772: 5401 e75f                              |000b: iget-object v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.ssid:[B // field@5fe7
+41d776: 1202                                   |000d: const/4 v2, #int 0 // #0
+41d778: 3901 0600                              |000e: if-nez v1, 0014 // +0006
+41d77c: 2321 ee1e                              |0010: new-array v1, v2, [B // type@1eee
+41d780: 5b01 e75f                              |0012: iput-object v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.ssid:[B // field@5fe7
+41d784: 6e10 23d3 0600                         |0014: invoke-virtual {v6}, Landroid/os/Parcel;.createByteArray:()[B // method@d323
+41d78a: 0c01                                   |0017: move-result-object v1
+41d78c: 5b01 e15f                              |0018: iput-object v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.bssid:[B // field@5fe1
+41d790: 5401 e15f                              |001a: iget-object v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.bssid:[B // field@5fe1
+41d794: 3901 0600                              |001c: if-nez v1, 0022 // +0006
+41d798: 2321 ee1e                              |001e: new-array v1, v2, [B // type@1eee
+41d79c: 5b01 e15f                              |0020: iput-object v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.bssid:[B // field@5fe1
+41d7a0: 6e10 23d3 0600                         |0022: invoke-virtual {v6}, Landroid/os/Parcel;.createByteArray:()[B // method@d323
+41d7a6: 0c01                                   |0025: move-result-object v1
+41d7a8: 5b01 e45f                              |0026: iput-object v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.infoElement:[B // field@5fe4
+41d7ac: 5401 e45f                              |0028: iget-object v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.infoElement:[B // field@5fe4
+41d7b0: 3901 0600                              |002a: if-nez v1, 0030 // +0006
+41d7b4: 2321 ee1e                              |002c: new-array v1, v2, [B // type@1eee
+41d7b8: 5b01 e45f                              |002e: iput-object v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.infoElement:[B // field@5fe4
+41d7bc: 6e10 b8d3 0600                         |0030: invoke-virtual {v6}, Landroid/os/Parcel;.readInt:()I // method@d3b8
+41d7c2: 0a01                                   |0033: move-result v1
+41d7c4: 5901 e35f                              |0034: iput v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.frequency:I // field@5fe3
+41d7c8: 6e10 b8d3 0600                         |0036: invoke-virtual {v6}, Landroid/os/Parcel;.readInt:()I // method@d3b8
+41d7ce: 0a01                                   |0039: move-result v1
+41d7d0: 5901 e65f                              |003a: iput v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.signalMbm:I // field@5fe6
+41d7d4: 6e10 c1d3 0600                         |003c: invoke-virtual {v6}, Landroid/os/Parcel;.readLong:()J // method@d3c1
+41d7da: 0b03                                   |003f: move-result-wide v3
+41d7dc: 5a03 e85f                              |0040: iput-wide v3, v0, Landroid/net/wifi/nl80211/NativeScanResult;.tsf:J // field@5fe8
+41d7e0: 6e10 b8d3 0600                         |0042: invoke-virtual {v6}, Landroid/os/Parcel;.readInt:()I // method@d3b8
+41d7e6: 0a01                                   |0045: move-result v1
+41d7e8: 5901 e25f                              |0046: iput v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.capability:I // field@5fe2
+41d7ec: 6e10 b8d3 0600                         |0048: invoke-virtual {v6}, Landroid/os/Parcel;.readInt:()I // method@d3b8
+41d7f2: 0a01                                   |004b: move-result v1
+41d7f4: 3801 0300                              |004c: if-eqz v1, 004f // +0003
+41d7f8: 1212                                   |004e: const/4 v2, #int 1 // #1
+41d7fa: 5c02 e05f                              |004f: iput-boolean v2, v0, Landroid/net/wifi/nl80211/NativeScanResult;.associated:Z // field@5fe0
+41d7fe: 2201 5a1e                              |0051: new-instance v1, Ljava/util/ArrayList; // type@1e5a
+41d802: 7010 53f8 0100                         |0053: invoke-direct {v1}, Ljava/util/ArrayList;.<init>:()V // method@f853
+41d808: 5b01 e55f                              |0056: iput-object v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.radioChainInfos:Ljava/util/List; // field@5fe5
+41d80c: 5401 e55f                              |0058: iget-object v1, v0, Landroid/net/wifi/nl80211/NativeScanResult;.radioChainInfos:Ljava/util/List; // field@5fe5
+41d810: 6202 f55f                              |005a: sget-object v2, Landroid/net/wifi/nl80211/RadioChainInfo;.CREATOR:Landroid/os/Parcelable$Creator; // field@5ff5
+41d814: 6e30 f5d3 1602                         |005c: invoke-virtual {v6, v1, v2}, Landroid/os/Parcel;.readTypedList:(Ljava/util/List;Landroid/os/Parcelable$Creator;)V // method@d3f5
+41d81a: 1100                                   |005f: return-object v0
+      catches       : (none)
+
+== the array framing: IWifiScannerImpl$Stub$Proxy.getScanResults ==
+
+41c000:                                        |[41c000] android.net.wifi.nl80211.IWifiScannerImpl$Stub$Proxy.getScanResults:()[Landroid/net/wifi/nl80211/NativeScanResult;
+41c010: 7100 8ad3 0000                         |0000: invoke-static {}, Landroid/os/Parcel;.obtain:()Landroid/os/Parcel; // method@d38a
+41c016: 0c00                                   |0003: move-result-object v0
+41c018: 7100 8ad3 0000                         |0004: invoke-static {}, Landroid/os/Parcel;.obtain:()Landroid/os/Parcel; // method@d38a
+41c01e: 0c01                                   |0007: move-result-object v1
+41c020: 1a02 6697                              |0008: const-string v2, "android.net.wifi.nl80211.IWifiScannerImpl" // string@9766
+41c024: 6e20 29d4 2000                         |000a: invoke-virtual {v0, v2}, Landroid/os/Parcel;.writeInterfaceToken:(Ljava/lang/String;)V // method@d429
+41c02a: 5452 a45f                              |000d: iget-object v2, v5, Landroid/net/wifi/nl80211/IWifiScannerImpl$Stub$Proxy;.mRemote:Landroid/os/IBinder; // field@5fa4
+41c02e: 1213                                   |000f: const/4 v3, #int 1 // #1
+41c030: 1204                                   |0010: const/4 v4, #int 0 // #0
+41c032: 7254 8dc6 3210                         |0011: invoke-interface {v2, v3, v0, v1, v4}, Landroid/os/IBinder;.transact:(ILandroid/os/Parcel;Landroid/os/Parcel;I)Z // method@c68d
+41c038: 6e10 acd3 0100                         |0014: invoke-virtual {v1}, Landroid/os/Parcel;.readException:()V // method@d3ac
+41c03e: 6202 de5f                              |0017: sget-object v2, Landroid/net/wifi/nl80211/NativeScanResult;.CREATOR:Landroid/os/Parcelable$Creator; // field@5fde
+41c042: 6e20 36d3 2100                         |0019: invoke-virtual {v1, v2}, Landroid/os/Parcel;.createTypedArray:(Landroid/os/Parcelable$Creator;)[Ljava/lang/Object; // method@d336
+41c048: 0c02                                   |001c: move-result-object v2
+41c04a: 1f02 1b21                              |001d: check-cast v2, [Landroid/net/wifi/nl80211/NativeScanResult; // type@211b
+41c04e: 6e10 fbd3 0100                         |001f: invoke-virtual {v1}, Landroid/os/Parcel;.recycle:()V // method@d3fb
+41c054: 6e10 fbd3 0000                         |0022: invoke-virtual {v0}, Landroid/os/Parcel;.recycle:()V // method@d3fb
+41c05a: 0000                                   |0025: nop // spacer
+41c05c: 1102                                   |0026: return-object v2
+41c05e: 0d02                                   |0027: move-exception v2
+41c060: 6e10 fbd3 0100                         |0028: invoke-virtual {v1}, Landroid/os/Parcel;.recycle:()V // method@d3fb
+41c066: 6e10 fbd3 0000                         |002b: invoke-virtual {v0}, Landroid/os/Parcel;.recycle:()V // method@d3fb
+41c06c: 2702                                   |002e: throw v2
+      catches       : 1
+
+== Parcel.createTypedArray -> readTypedObject (the per-element null flag) ==
+
+492888:                                        |[492888] android.os.Parcel.createTypedArray:(Landroid/os/Parcelable$Creator;)[Ljava/lang/Object;
+492898: 6e10 b8d3 0400                         |0000: invoke-virtual {v4}, Landroid/os/Parcel;.readInt:()I // method@d3b8
+49289e: 0a00                                   |0003: move-result v0
+4928a0: 3b00 0400                              |0004: if-gez v0, 0008 // +0004
+4928a4: 1205                                   |0006: const/4 v5, #int 0 // #0
+4928a6: 1105                                   |0007: return-object v5
+4928a8: 7220 b5d4 0500                         |0008: invoke-interface {v5, v0}, Landroid/os/Parcelable$Creator;.newArray:(I)[Ljava/lang/Object; // method@d4b5
+4928ae: 0c01                                   |000b: move-result-object v1
+4928b0: 1202                                   |000c: const/4 v2, #int 0 // #0
+4928b2: 3502 0b00                              |000d: if-ge v2, v0, 0018 // +000b
+4928b6: 6e20 f6d3 5400                         |000f: invoke-virtual {v4, v5}, Landroid/os/Parcel;.readTypedObject:(Landroid/os/Parcelable$Creator;)Ljava/lang/Object; // method@d3f6
+4928bc: 0c03                                   |0012: move-result-object v3
+4928be: 4d03 0102                              |0013: aput-object v3, v1, v2
+4928c2: d802 0201                              |0015: add-int/lit8 v2, v2, #int 1 // #01
+4928c6: 28f6                                   |0017: goto 000d // -000a
+4928c8: 1101                                   |0018: return-object v1
+      catches       : (none)
+492340:                                        |[492340] android.os.Parcel.readTypedObject:(Landroid/os/Parcelable$Creator;)Ljava/lang/Object;
+492350: 6e10 b8d3 0100                         |0000: invoke-virtual {v1}, Landroid/os/Parcel;.readInt:()I // method@d3b8
+492356: 0a00                                   |0003: move-result v0
+492358: 3800 0700                              |0004: if-eqz v0, 000b // +0007
+49235c: 7220 b4d4 1200                         |0006: invoke-interface {v2, v1}, Landroid/os/Parcelable$Creator;.createFromParcel:(Landroid/os/Parcel;)Ljava/lang/Object; // method@d4b4
+492362: 0c02                                   |0009: move-result-object v2
+492364: 1102                                   |000a: return-object v2
+492366: 1202                                   |000b: const/4 v2, #int 0 // #0
+492368: 1102                                   |000c: return-object v2
+      catches       : (none)
+
+== RadioChainInfo$1.createFromParcel: two ints, so an empty list is one 0 ==
+
+41e340:                                        |[41e340] android.net.wifi.nl80211.RadioChainInfo$1.createFromParcel:(Landroid/os/Parcel;)Landroid/net/wifi/nl80211/RadioChainInfo;
+41e350: 2200 4c15                              |0000: new-instance v0, Landroid/net/wifi/nl80211/RadioChainInfo; // type@154c
+41e354: 6e10 b8d3 0300                         |0002: invoke-virtual {v3}, Landroid/os/Parcel;.readInt:()I // method@d3b8
+41e35a: 0a01                                   |0005: move-result v1
+41e35c: 6e10 b8d3 0300                         |0006: invoke-virtual {v3}, Landroid/os/Parcel;.readInt:()I // method@d3b8
+41e362: 0a03                                   |0009: move-result v3
+41e364: 7030 42b1 1003                         |000a: invoke-direct {v0, v1, v3}, Landroid/net/wifi/nl80211/RadioChainInfo;.<init>:(II)V // method@b142
+41e36a: 1100                                   |000d: return-object v0
+      catches       : (none)

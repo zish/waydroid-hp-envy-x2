@@ -20,6 +20,14 @@ namespace wifi {
 #define NM_DEVICE_TYPE_WIFI     2
 
 /* NM80211ApSecurityFlags */
+#define NM_SEC_PAIR_WEP40       0x00000001
+#define NM_SEC_PAIR_WEP104      0x00000002
+#define NM_SEC_PAIR_TKIP        0x00000004
+#define NM_SEC_PAIR_CCMP        0x00000008
+#define NM_SEC_GROUP_WEP40      0x00000010
+#define NM_SEC_GROUP_WEP104     0x00000020
+#define NM_SEC_GROUP_TKIP       0x00000040
+#define NM_SEC_GROUP_CCMP       0x00000080
 #define NM_SEC_KEY_MGMT_PSK     0x00000100
 #define NM_SEC_KEY_MGMT_802_1X  0x00000200
 #define NM_SEC_KEY_MGMT_SAE     0x00000400
@@ -38,6 +46,7 @@ securityName(Security s)
     case Security::Wep:     return "wep";
     case Security::WpaPsk:  return "wpa-psk";
     case Security::Wpa2Psk: return "wpa2-psk";
+    case Security::Wpa2Wpa3Psk: return "wpa2/wpa3-psk";
     case Security::Wpa3Sae: return "wpa3-sae";
     case Security::Wpa2Eap: return "wpa-eap";
     }
@@ -50,6 +59,9 @@ NmBackend::NmBackend() = default;
 
 NmBackend::~NmBackend()
 {
+    if (mScanPollId) {
+        g_source_remove(mScanPollId);
+    }
     if (mBus) {
         g_object_unref(mBus);
     }
@@ -179,6 +191,24 @@ NmBackend::propUint(const char* path, const char* iface, const char* prop,
     return out;
 }
 
+gint64
+NmBackend::propInt64(const char* path, const char* iface, const char* prop,
+                     gint64 def)
+{
+    GVariant* v = getProp(path, iface, prop);
+    gint64 out = def;
+
+    if (v) {
+        if (g_variant_is_of_type(v, G_VARIANT_TYPE_INT64)) {
+            out = g_variant_get_int64(v);
+        } else if (g_variant_is_of_type(v, G_VARIANT_TYPE_INT32)) {
+            out = g_variant_get_int32(v);
+        }
+        g_variant_unref(v);
+    }
+    return out;
+}
+
 /* ---------------------------------------------------------------- radios */
 
 std::vector<std::string>
@@ -290,6 +320,67 @@ NmBackend::isEnabled()
 
 /* ------------------------------------------------------------- scanning */
 
+/*
+ * SCAN COMPLETION
+ *
+ * NM publishes Device.Wireless.LastScan -- CLOCK_BOOTTIME milliseconds at
+ * which the last scan *finished*, -1 if it has never scanned.  Watching that
+ * value cross the point where we asked is the only signal NM offers that a
+ * scan actually happened; there is no "scan done" D-Bus signal.
+ *
+ * It is polled rather than watched through PropertiesChanged.  A property read
+ * on the local system bus costs almost nothing, the poll only runs while a
+ * scan is outstanding (a few seconds, a few times a minute), and it avoids a
+ * signal subscription whose match rules and lifetime would be more code than
+ * the thing it replaces.  If that ever stops being true, this is the only
+ * place that has to change.
+ */
+#define SCAN_POLL_MS        500
+#define SCAN_POLL_MAX       24          /* 12 s: NM's rate-limit window + a scan */
+
+gboolean
+NmBackend::scanPollTick(gpointer user)
+{
+    NmBackend* self = (NmBackend*) user;
+    std::string path = self->wifiDevicePath();
+    gint64 last = path.empty() ? -1 :
+        self->propInt64(path.c_str(), NM_WIFI, "LastScan");
+
+    if (last > self->mScanBaseline) {
+        GDEBUG("NM finished a scan (LastScan %" G_GINT64_FORMAT ")", last);
+        self->mScanPollId = 0;
+        self->scanFinished(true);
+        return G_SOURCE_REMOVE;
+    }
+    if (--self->mScanPollsLeft <= 0) {
+        self->mScanPollId = 0;
+        if (self->mScanBlind) {
+            /* Nothing to watch on this host, so take the scan on trust. */
+            self->scanFinished(true);
+        } else {
+            GWARN("no scan from NetworkManager after %d ms",
+                  SCAN_POLL_MS * SCAN_POLL_MAX);
+            self->scanFinished(false);
+        }
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+void
+NmBackend::scanFinished(bool ok)
+{
+    if (mScanCb) {
+        mScanCb(ok);
+    }
+}
+
+void
+NmBackend::onScanComplete(std::function<void(bool ok)> cb)
+{
+    mScanCb = cb;
+}
+
 bool
 NmBackend::startScan()
 {
@@ -298,20 +389,58 @@ NmBackend::startScan()
         return false;
     }
 
+    if (mScanPollId) {
+        /* One is already in flight; its completion answers this caller too. */
+        GDEBUG("scan already pending");
+        return true;
+    }
+
+    /*
+     * Absent (not merely -1) means this NM is too old to publish it, which is
+     * a different situation and is handled differently below.
+     */
+    GVariant* v = getProp(path.c_str(), NM_WIFI, "LastScan");
+    bool haveLastScan = (v != nullptr);
+    mScanBaseline = -1;
+    if (v) {
+        if (g_variant_is_of_type(v, G_VARIANT_TYPE_INT64)) {
+            mScanBaseline = g_variant_get_int64(v);
+        }
+        g_variant_unref(v);
+    }
+
     GVariantBuilder b;
     g_variant_builder_init(&b, G_VARIANT_TYPE("a{sv}"));
     GVariant* res = call(path.c_str(), NM_WIFI, "RequestScan",
         g_variant_new("(a{sv})", &b), "()");
 
-    if (!res) {
+    if (res) {
+        g_variant_unref(res);
+    } else {
         /*
          * NM rate-limits RequestScan and answers "Scanning not allowed
-         * immediately following previous scan" -- not an error worth
-         * propagating, because the AP list it already holds is still good.
+         * immediately following previous scan".  Not fatal: NM scans on its
+         * own schedule while unassociated, so the wait below still ends with
+         * a real scan -- just not one we caused.
          */
-        return true;
+        GDEBUG("RequestScan refused; waiting for NM's own scan");
     }
-    g_variant_unref(res);
+
+    /*
+     * If NM is too old to publish LastScan there is nothing to watch, so fall
+     * back to announcing completion after one poll interval.  Results will
+     * then be dated by their own LastSeen, which is still honest -- some of
+     * them will simply be filtered out by the reader as too old.
+     */
+    mScanBlind = !haveLastScan;
+    if (mScanBlind) {
+        GWARN("NetworkManager does not publish LastScan; scan completion is "
+              "a guess on this host");
+        mScanPollsLeft = 1;
+    } else {
+        mScanPollsLeft = SCAN_POLL_MAX;
+    }
+    mScanPollId = g_timeout_add(SCAN_POLL_MS, scanPollTick, this);
     return true;
 }
 
@@ -319,7 +448,14 @@ static Security
 securityFromFlags(guint32 flags, guint32 wpa, guint32 rsn)
 {
     if (rsn & NM_SEC_KEY_MGMT_SAE) {
-        return Security::Wpa3Sae;
+        /*
+         * SAE alongside PSK is a WPA2/WPA3 transition-mode AP, and the two
+         * cases are not interchangeable to Android: a transition AP does not
+         * require management frame protection and a WPA3-only one does, which
+         * is how the framework tells them apart in the scan result.
+         */
+        return (rsn & NM_SEC_KEY_MGMT_PSK) ? Security::Wpa2Wpa3Psk
+                                           : Security::Wpa3Sae;
     }
     if ((rsn | wpa) & (NM_SEC_KEY_MGMT_802_1X | NM_SEC_KEY_MGMT_EAP_192)) {
         return Security::Wpa2Eap;
@@ -334,6 +470,24 @@ securityFromFlags(guint32 flags, guint32 wpa, guint32 rsn)
         return Security::Wep;
     }
     return Security::Open;
+}
+
+/*
+ * NM reports the ciphers the AP advertised, so they can be passed on as
+ * observation rather than guessed at higher up.  WPA-only networks are
+ * described by WpaFlags and everything newer by RsnFlags; where both are
+ * present the RSN half is the one the security type above refers to.
+ */
+static uint32_t
+ciphersFromFlags(guint32 f, bool group)
+{
+    uint32_t out = 0;
+
+    if (f & (group ? NM_SEC_GROUP_WEP40  : NM_SEC_PAIR_WEP40))  out |= CipherWep40;
+    if (f & (group ? NM_SEC_GROUP_WEP104 : NM_SEC_PAIR_WEP104)) out |= CipherWep104;
+    if (f & (group ? NM_SEC_GROUP_TKIP   : NM_SEC_PAIR_TKIP))   out |= CipherTkip;
+    if (f & (group ? NM_SEC_GROUP_CCMP   : NM_SEC_PAIR_CCMP))   out |= CipherCcmp;
+    return out;
 }
 
 std::vector<Bss>
@@ -392,9 +546,30 @@ NmBackend::scanResults()
         }
         bss.rssiDbm = (int32_t) (quality / 2) - 100;   /* 0 -> -100, 100 -> -50 */
 
-        bss.security = securityFromFlags(propUint(path, NM_AP, "Flags"),
-                                         propUint(path, NM_AP, "WpaFlags"),
-                                         propUint(path, NM_AP, "RsnFlags"));
+        guint32 apFlags  = propUint(path, NM_AP, "Flags");
+        guint32 wpaFlags = propUint(path, NM_AP, "WpaFlags");
+        guint32 rsnFlags = propUint(path, NM_AP, "RsnFlags");
+
+        bss.security = securityFromFlags(apFlags, wpaFlags, rsnFlags);
+        guint32 sec = (bss.security == Security::WpaPsk) ? wpaFlags : rsnFlags;
+        bss.pairwiseCiphers = ciphersFromFlags(sec, false);
+        bss.groupCiphers    = ciphersFromFlags(sec, true);
+
+        /*
+         * LastSeen is CLOCK_BOOTTIME *seconds*, -1 if NM has never seen it.
+         * The truncation to whole seconds is NM's, not ours, and it is the
+         * only thing standing between this and the microsecond value the
+         * reader wants -- so it is converted and left alone.
+         */
+        GVariant* seen = getProp(path, NM_AP, "LastSeen");
+        if (seen) {
+            gint32 t = g_variant_is_of_type(seen, G_VARIANT_TYPE_INT32) ?
+                g_variant_get_int32(seen) : -1;
+            if (t > 0) {
+                bss.lastSeenUsec = (uint64_t) t * 1000000;
+            }
+            g_variant_unref(seen);
+        }
         out.push_back(bss);
     }
     g_variant_iter_free(iter);

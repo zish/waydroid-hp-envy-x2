@@ -101,9 +101,11 @@ wificond entirely, and the Wi-Fi framework brings a client interface up and keep
 `Successfully setup Iface:{Name=wlan0,...}`, `entering ScanOnlyModeState`. Stage 1's blocker
 evaporated exactly as Path U predicted, because nothing in this design talks to nl80211 and `wlan0`
 only has to be a netdev. The NetworkManager backend behind the pluggable contract already reads the
-host's real access points (`waydroid-wifid --scan`); what is not connected yet is the parcelable
-that carries them into Android, and the supplicant, without which the master toggle cannot stay on.
-[31](31-wifi-stage2.md), verify with `bin/wifi-test.sh`.
+host's real access points (`waydroid-wifid --scan`), and as of Stage 3 they arrive **inside**
+Android with the right names, signal strengths and security flags. What is still missing is the
+supplicant, without which the master toggle cannot stay on — and therefore the Settings picker,
+which needs the toggle, even though the scan data behind it is now real.
+[31](31-wifi-stage2.md), [32](32-wifi-stage3.md); verify with `bin/wifi-test.sh`.
 
 ## Parked, and worth revisiting
 
@@ -226,15 +228,37 @@ inverse of Stage 1's failure. Verify with `bin/wifi-test.sh`; evidence in `artif
 have.** `ROLE_CLIENT_PRIMARY` runs `startSupplicant()` *before* it reaches wificond, so a
 wificond-only shim tops out at scan-only mode. The toggle is Stage 4's, with the supplicant.
 
-**The next milestone is Stage 3, and it is now one job: the `NativeScanResult` parcelable layout.**
-Both sides of that gap already exist — `IWifiScannerImpl.getScanResults()` is wired up and returns
-an empty array, and `waydroid-wifid --scan` prints the host's real AP list (15 of them, with
-correct security types) through the backend contract with no container involved. Read the layout
-out of this image's `framework.jar` with the same bytecode technique
-[docs/30](30-wifi-aidl-surface.md) used for the transaction codes, and real SSIDs appear in
-Android's own Wi-Fi picker.
+**Stage 3 landed the same day** — [docs/32-wifi-stage3.md](32-wifi-stage3.md). The
+`NativeScanResult` layout came out of this image's `framework.jar` with the same bytecode technique
+[docs/30](30-wifi-aidl-surface.md) used for the transaction codes, and Android now lists the host's
+real access points: `cmd wifi list-scan-results` shows SSIDs, RSSI and flags like
+`[RSN-SAE-CCMP][ESS][MFPR][MFPC]`, all of it from NetworkManager.
 
-Two things to know before touching it:
+Two findings from that stage are worth carrying forward, because both would cost a session to
+rediscover:
+
+- **Android derives security by parsing beacon information elements; there is no security field.**
+  A host backend has no beacon, so the IEs are synthesised in `wifi/NativeScanResult.cpp` from what
+  NM reports. Emit nothing the host did not actually say — that is why `WifiStandard` reads
+  "unknown" rather than a plausible guess.
+- **`tsf` is load-bearing and fails silently.** `WificondScannerImpl` drops every result older than
+  the scan it asked for, so a zero timestamp, or announcing completion before the host has really
+  scanned, produces an empty list with nothing in the log. `WifiBackend::onScanComplete()` exists
+  for this.
+
+**The next milestone is Stage 4: the supplicant**, and with it the master toggle and any actual
+connection. It is `ISupplicant` / `ISupplicantStaIface` / `ISupplicantStaNetwork` plus two callbacks
+at AIDL v1, declared through a VINTF fragment in the vendor overlay so `isDeclared()` picks the AIDL
+path — the same mechanism the widevine fix uses. The callback transaction codes cannot be read
+statically and must be settled at runtime, exactly as `IScanEvent`'s were in Stage 2. `wlan0` also
+has to start carrying traffic; plan that cutover rather than stumbling into it, since it costs the
+container its network for a window.
+
+Three things to know before touching it:
+
+- **Restarting the daemon does not silently reconnect.** `WifiNl80211Manager` caches its failure and
+  `ClientModeManager` sits in Idle. Kick it with `cmd wifi set-scan-always-available disabled` then
+  `enabled`. Stage 5 has to close this properly.
 
 - **Nothing autostarts `waydroid-wifid`** — unlike `waydroid-sensord`, the name means nothing to
   Waydroid. Start it by hand (`sudo waydroid-wifid --verbose &`) and put `wlan0` in the container

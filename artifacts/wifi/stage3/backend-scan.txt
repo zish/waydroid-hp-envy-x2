@@ -1,0 +1,57 @@
+[waydroid-wifid] NetworkManager 1.56.1
+[waydroid-wifid] using host radio wlp1s0 (/org/freedesktop/NetworkManager/Devices/2)
+[waydroid-wifid] NM finished a scan (LastScan 50420012)
+backend: networkmanager, radio: wlp1s0, enabled: yes
+scan: completed
+25 access points
+  vidiot                           76:bd:71:0f:a5:c2   2412 MHz   -73 dBm  wpa2/wpa3-psk  seen   0s
+      capability 0x0011  ies 00 06 76 69 64 69 6f 74 30 1e 01 00 00 0f ac 04 01 00 00 0f ac 04 02 00 00 0f ac 02 00 0f ac 08 80 00 00 00 00 0f ac 06
+  my-wifi-can-beat-up-your-wifi    a4:2b:8c:16:5d:0e   2427 MHz   -69 dBm  wpa2-psk       seen   0s
+      capability 0x0011  ies 00 1d 6d 79 2d 77 69 66 69 2d 63 61 6e 2d 62 65 61 74 2d 75 70 2d 79 6f 75 72 2d 77 69 66 69 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  f48fc5                           7c:7e:f9:56:19:82   2462 MHz   -80 dBm  wpa3-sae       seen   0s
+      capability 0x0011  ies 00 06 66 34 38 66 63 35 30 1a 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 08 c0 00 00 00 00 0f ac 06
+  f48fc5                           7c:7e:f9:aa:33:03   5260 MHz   -92 dBm  wpa3-sae       seen   0s
+      capability 0x0011  ies 00 06 66 34 38 66 63 35 30 1a 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 08 c0 00 00 00 00 0f ac 06
+  AdventurousEagle                 ac:db:48:84:e1:4e   5220 MHz   -93 dBm  wpa2-psk       seen   0s
+      capability 0x0011  ies 00 10 41 64 76 65 6e 74 75 72 6f 75 73 45 61 67 6c 65 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  OffToDisney                      7c:7e:f9:aa:33:05   5260 MHz   -91 dBm  wpa2-psk       seen   0s
+      capability 0x0011  ies 00 0b 4f 66 66 54 6f 44 69 73 6e 65 79 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  OffToDisney                      7c:7e:f9:56:19:84   2462 MHz   -80 dBm  wpa2-psk       seen   0s
+      capability 0x0011  ies 00 0b 4f 66 66 54 6f 44 69 73 6e 65 79 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  xfinitywifi                      aa:db:48:84:e1:4e   5220 MHz   -94 dBm  open           seen   0s
+      capability 0x0001  ies 00 0b 78 66 69 6e 69 74 79 77 69 66 69
+  (hidden)                         7c:7e:f9:aa:33:07   5260 MHz   -90 dBm  open           seen  35s
+      capability 0x0001  ies 00 00
+  OffToDisney                      7c:7e:f9:aa:33:06   2462 MHz   -84 dBm  wpa2-psk       seen   0s
+      capability 0x0011  ies 00 0b 4f 66 66 54 6f 44 69 73 6e 65 79 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  f48fc5                           7c:7e:f9:aa:33:04   2462 MHz   -82 dBm  wpa3-sae       seen   0s
+      capability 0x0011  ies 00 06 66 34 38 66 63 35 30 1a 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 08 c0 00 00 00 00 0f ac 06
+  Verizon_3W6JK7                   78:67:0e:37:46:d3   2437 MHz   -89 dBm  wpa2-psk       seen  36s
+      capability 0x0011  ies 00 0e 56 65 72 69 7a 6f 6e 5f 33 57 36 4a 4b 37 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  CenterPizzaCoolZone              ac:91:9b:e2:00:bf   2412 MHz   -90 dBm  wpa2-psk       seen   0s
+      capability 0x0011  ies 00 13 43 65 6e 74 65 72 50 69 7a 7a 61 43 6f 6f 6c 5a 6f 6e 65 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  DIRECT-D4-HP OfficeJet 3830      38:22:e2:72:6e:d5   2412 MHz   -91 dBm  wpa2-psk       seen   8s
+      capability 0x0011  ies 00 1b 44 49 52 45 43 54 2d 44 34 2d 48 50 20 4f 66 66 69 63 65 4a 65 74 20 33 38 33 30 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  TopoftheHub                      00:31:92:18:55:92   2447 MHz   -87 dBm  wpa2-psk       seen   0s
+      capability 0x0011  ies 00 0b 54 6f 70 6f 66 74 68 65 48 75 62 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  Jackash                          5e:22:da:f0:9a:09   2462 MHz   -83 dBm  wpa2/wpa3-psk  seen   0s
+      capability 0x0011  ies 00 07 4a 61 63 6b 61 73 68 30 1e 01 00 00 0f ac 04 01 00 00 0f ac 04 02 00 00 0f ac 02 00 0f ac 08 80 00 00 00 00 0f ac 06
+  Verizon_ZJGM7L                   58:96:71:60:54:1c   2437 MHz   -93 dBm  wpa2-psk       seen  36s
+      capability 0x0011  ies 00 0e 56 65 72 69 7a 6f 6e 5f 5a 4a 47 4d 37 4c 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  dame_doody_stench                4c:22:f3:51:9e:d4   2437 MHz   -93 dBm  wpa2-psk       seen  36s
+      capability 0x0011  ies 00 11 64 61 6d 65 5f 64 6f 6f 64 79 5f 73 74 65 6e 63 68 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  AdventurousEagle                 ac:db:48:84:e1:4d   2462 MHz   -78 dBm  wpa2-psk       seen   8s
+      capability 0x0011  ies 00 10 41 64 76 65 6e 74 75 72 6f 75 73 45 61 67 6c 65 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  Fios-XP6cP-plus                  20:0d:b0:6b:fa:67   2412 MHz   -81 dBm  wpa2-psk       seen   0s
+      capability 0x0011  ies 00 0f 46 69 6f 73 2d 58 50 36 63 50 2d 70 6c 75 73 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  Fios-XP6cP_EXT_EXT               ec:75:0c:88:55:eb   2412 MHz   -87 dBm  wpa2-psk       seen   0s
+      capability 0x0011  ies 00 12 46 69 6f 73 2d 58 50 36 63 50 5f 45 58 54 5f 45 58 54 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  Callum’s Room Wifi.0415.ybc,   fa:8f:ca:79:24:95   2437 MHz   -89 dBm  wpa2-psk       seen   8s
+      capability 0x0011  ies 00 1e 43 61 6c 6c 75 6d e2 80 99 73 20 52 6f 6f 6d 20 57 69 66 69 2e 30 34 31 35 2e 79 62 63 2c 30 12 01 00 00 0f ac 02 01 00 00 0f ac 02 01 00 00 0f ac 02
+  (hidden)                         06:31:92:18:55:92   2447 MHz   -91 dBm  wpa2-psk       seen  16s
+      capability 0x0011  ies 00 00 30 12 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 02
+  b214c9                           a8:b0:88:51:68:46   2437 MHz   -89 dBm  wpa3-sae       seen   8s
+      capability 0x0011  ies 00 06 62 32 31 34 63 39 30 1a 01 00 00 0f ac 04 01 00 00 0f ac 04 01 00 00 0f ac 08 c0 00 00 00 00 0f ac 06
+  Cooper                           a8:b0:88:51:68:48   2437 MHz   -90 dBm  wpa2/wpa3-psk  seen   8s
+      capability 0x0011  ies 00 06 43 6f 6f 70 65 72 30 1e 01 00 00 0f ac 04 01 00 00 0f ac 04 02 00 00 0f ac 02 00 0f ac 08 80 00 00 00 00 0f ac 06
+link: associated to vidiot

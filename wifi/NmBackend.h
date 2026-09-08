@@ -32,6 +32,7 @@ public:
 
     bool startScan() override;
     std::vector<Bss> scanResults() override;
+    void onScanComplete(std::function<void(bool ok)> cb) override;
 
     bool connect(const NetworkRequest& req) override;
     bool disconnect() override;
@@ -55,6 +56,11 @@ private:
     bool setProp(const char* path, const char* iface, const char* prop, GVariant* value);
     std::string propString(const char* path, const char* iface, const char* prop);
     guint32 propUint(const char* path, const char* iface, const char* prop, guint32 def = 0);
+    gint64 propInt64(const char* path, const char* iface, const char* prop, gint64 def = -1);
+
+    /* Scan completion, polled -- see the note above NmBackend::startScan(). */
+    static gboolean scanPollTick(gpointer user);
+    void scanFinished(bool ok);
 
     /* Resolve the Wi-Fi device object path for mIfname, "" if none. */
     std::string wifiDevicePath();
@@ -63,6 +69,12 @@ private:
     std::string mIfname;                 /* selected host interface, e.g. wlp1s0 */
     std::string mDevPath;                /* cached NM object path for it */
     std::function<void(LinkState)> mStateCb;
+
+    std::function<void(bool)> mScanCb;
+    guint   mScanPollId = 0;             /* GLib source while a scan is pending */
+    int     mScanPollsLeft = 0;
+    gint64  mScanBaseline = -1;          /* Device.Wireless LastScan before it */
+    bool    mScanBlind = false;          /* this NM does not publish LastScan */
 };
 
 } /* namespace wifi */

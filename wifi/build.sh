@@ -128,7 +128,7 @@ LDFLAGS=(
 	-static-libstdc++ -static-libgcc
 )
 
-SRCS=(NmBackend.cpp Wificond.cpp service.cpp)
+SRCS=(NativeScanResult.cpp NmBackend.cpp Wificond.cpp service.cpp)
 OBJS=()
 
 echo "== compiling"

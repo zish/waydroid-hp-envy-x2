@@ -20,6 +20,7 @@
  *                                   result; needs no container at all
  */
 
+#include "NativeScanResult.h"
 #include "NmBackend.h"
 #include "Wificond.h"
 
@@ -203,16 +204,56 @@ app_run(App* app)
 }
 
 static void
-print_bss(const Bss& b)
+print_bss(const Bss& b, uint64_t nowUsec)
 {
     char mac[18];
+    char age[16] = "  ?";
 
     snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
              b.bssid[0], b.bssid[1], b.bssid[2],
              b.bssid[3], b.bssid[4], b.bssid[5]);
-    printf("  %-32s %s  %5d MHz  %4d dBm  %s\n",
+    if (b.lastSeenUsec && nowUsec > b.lastSeenUsec) {
+        snprintf(age, sizeof(age), "%3llus",
+                 (unsigned long long) ((nowUsec - b.lastSeenUsec) / 1000000));
+    }
+    printf("  %-32s %s  %5d MHz  %4d dBm  %-14s seen %s\n",
            b.ssid.empty() ? "(hidden)" : b.ssid.c_str(), mac, b.freqMhz,
-           b.rssiDbm, securityName(b.security));
+           b.rssiDbm, securityName(b.security), age);
+}
+
+/*
+ * The same IE blob and capability field the container would be handed, printed
+ * as hex.  This is the one part of the Android-facing marshalling that can be
+ * checked without a container at all, so it is worth being able to look at.
+ */
+static void
+print_bss_ies(const Bss& b)
+{
+    std::vector<uint8_t> ies = buildBeaconIes(b);
+
+    printf("      capability 0x%04x  ies", beaconCapability(b));
+    for (uint8_t x : ies) {
+        printf(" %02x", x);
+    }
+    printf("\n");
+}
+
+/* --scan waits for a real scan rather than assuming one; see WifiBackend.h. */
+typedef struct scan_wait {
+    GMainLoop* loop;
+    bool ok;
+    guint timeout;
+} ScanWait;
+
+static gboolean
+scan_wait_timeout(gpointer user)
+{
+    ScanWait* w = (ScanWait*) user;
+
+    GWARN("timed out waiting for the backend to finish a scan");
+    w->timeout = 0;
+    g_main_loop_quit(w->loop);
+    return G_SOURCE_REMOVE;
 }
 
 int
@@ -278,18 +319,37 @@ main(int argc, char* argv[])
     }
 
     if (do_scan) {
+        ScanWait wait = { g_main_loop_new(nullptr, FALSE), false, 0 };
+
         printf("backend: %s, radio: %s, enabled: %s\n", backend->name(),
                backend->selectedDevice().c_str(),
                backend->isEnabled() ? "yes" : "no");
+
+        backend->onScanComplete([&wait](bool ok) {
+            wait.ok = ok;
+            g_main_loop_quit(wait.loop);
+        });
         if (!backend->startScan()) {
             GWARN("startScan() failed");
+        } else {
+            wait.timeout = g_timeout_add_seconds(20, scan_wait_timeout, &wait);
+            g_main_loop_run(wait.loop);
+            if (wait.timeout) {
+                g_source_remove(wait.timeout);
+            }
         }
-        /* NM answers RequestScan immediately; give it a moment to fill in. */
-        sleep(3);
+        backend->onScanComplete(nullptr);
+        g_main_loop_unref(wait.loop);
+        printf("scan: %s\n", wait.ok ? "completed" : "did not complete");
+
         std::vector<Bss> results = backend->scanResults();
+        uint64_t now = boottimeUsec();
         printf("%zu access points\n", results.size());
         for (const Bss& b : results) {
-            print_bss(b);
+            print_bss(b, now);
+            if (gutil_log_default.level >= GLOG_LEVEL_VERBOSE) {
+                print_bss_ies(b);
+            }
         }
         LinkState st = backend->state();
         printf("link: %s%s\n", st.associated ? "associated to " : "idle",
