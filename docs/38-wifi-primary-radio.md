@@ -5,10 +5,42 @@ instead of the TP-Link Archer T3U that [34-wifi-second-radio.md](34-wifi-second-
 This inverts a decision that three earlier documents rest on, so the reasoning is recorded here
 rather than left to be inferred from a one-line config change.
 
-**Status: in service, under observation.** The host was rebooted into this configuration on
-2026-09-09 and is being used normally to see whether it holds up. Stability has *not* been
-established — it is being monitored as it is used, and this document should be revisited with
-what that shows. `--verbose` stays on for exactly that reason.
+**Status: in service, under observation.** Stability has *not* been established. The configuration
+is being monitored as the machine is used, and this document should be revisited with what that
+shows. `--verbose` stays on for exactly that reason.
+
+### Observations so far
+
+**2026-09-09 02:35 — session restart, unattended association: PASS.**
+
+```
+02:35:37  Registered "wifinl80211"
+02:35:37  Registered "android.hardware.wifi.supplicant.ISupplicant/default"
+02:35:54  connect(vidiot): this radio is the host's own path off the machine
+          -- letting our profile carry the default route
+```
+
+`waydroid-wifid` had not restarted — still pid 180364, up since 02:02:25 — so this exercised the
+presence handler rather than the unit: the daemon outlived the session stop and re-registered
+against the new container by itself. Android then associated 17 s later with nobody touching
+anything. `IpClient is not ready` did not recur (0 occurrences); `wlp1s0` carried
+`vidiot (Waydroid)` while the host kept its default route; Android reached `192.168.240.112/24`.
+
+**Rebooting Android from inside the guest does not reboot the host.** It stops the Waydroid session
+and leaves `waydroid-container.service` active with nothing to supervise; `waydroid status` reads
+`Session: STOPPED` and nothing restarts it. Worth knowing because it looks like a reboot from the
+screen, and because it is how the above was triggered. It also stranded the display — a separate
+fault, in [37-brightness.md](37-brightness.md).
+
+One thing it showed in passing: when Android's profile went away, NM's autoconnect put `wlp1s0`
+back on the host's own `vidiot` profile with the default route intact. The host recovers its link
+on its own when Android stops owning the radio, which is the failure mode that mattered most.
+
+**Not yet tested: a cold boot.** Every association so far has been against a daemon that was
+already running. The untested path is the one the unit exists for — `waydroid-wifid` starting from
+systemd at boot, resolving `wlp1s0` by factory MAC before NetworkManager has necessarily settled,
+and Android connecting off the back of that. Until a host reboot is watched end to end, Stage 5's
+boot claim does not carry over to this configuration.
 
 ## The reported symptom, and why it was not a contradiction
 
