@@ -36,11 +36,38 @@ One thing it showed in passing: when Android's profile went away, NM's autoconne
 back on the host's own `vidiot` profile with the default route intact. The host recovers its link
 on its own when Android stops owning the radio, which is the failure mode that mattered most.
 
-**Not yet tested: a cold boot.** Every association so far has been against a daemon that was
-already running. The untested path is the one the unit exists for — `waydroid-wifid` starting from
-systemd at boot, resolving `wlp1s0` by factory MAC before NetworkManager has necessarily settled,
-and Android connecting off the back of that. Until a host reboot is watched end to end, Stage 5's
-boot claim does not carry over to this configuration.
+**2026-09-09 02:46 — cold boot, unattended association: PASS.** A real host reboot, watched end to
+end. Nobody touched Wi-Fi at any point.
+
+```
+02:46:41  NetworkManager 1.56.1
+02:46:41  using host radio wlp1s0 (/org/.../Devices/2), pinned to factory MAC 60:57:18:0A:E8:B7
+02:46:42  systemd: Started waydroid-wifid.service
+02:47:02  Registered "wifinl80211"
+02:47:02  Registered "android.hardware.wifi.supplicant.ISupplicant/default"
+02:47:09  Wi-Fi came up; asked waydroid-wifi-sync to reconcile
+02:47:20  connect(vidiot): this radio is the host's own path off the machine
+          -- letting our profile carry the default route
+```
+
+**39 seconds** from daemon start to association. Result: Android connected to `vidiot`, SAE,
+`192.168.240.112/24`, `COMPLETED`, `VALIDATED`; `IpClient is not ready` count **0**; `wlp1s0`
+carrying `vidiot (Waydroid)` with `never-default: no` and `route-metric: -1`; the host's default
+route intact on `wlp1s0`.
+
+Two things worth extracting:
+
+- **No boot race.** `After=NetworkManager.service` was enough — NM was answering by the time the
+  daemon looked, and there was no `no Wi-Fi device with factory MAC` retry loop. The unit needs no
+  extra ordering.
+- **Pinning by factory MAC earned itself.** NM published the radio at
+  `/org/freedesktop/NetworkManager/Devices/2` this boot, where before the reboot it was `Devices/3`.
+  A daemon holding a device path — or an interface name — would have had to cope; one holding
+  `60:57:18:0A:E8:B7` simply resolved it again and never noticed.
+
+With this, the configuration has been exercised from a cold boot and the Stage 5 boot claim carries
+over. What remains unproven is duration, not startup: it has not yet run for long under normal use,
+which is what the observation log above is for.
 
 ## The reported symptom, and why it was not a contradiction
 
