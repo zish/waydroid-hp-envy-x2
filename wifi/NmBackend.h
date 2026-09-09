@@ -94,6 +94,14 @@ private:
     bool carriesHostDefaultRoute(const std::string& ifname);
 
     /*
+     * Whether a profile of ours must leave the host's default route alone.
+     * True when some OTHER device carries it, false when this radio is itself
+     * the host's path off the machine, or when nothing carries one at all.
+     * See the long note above the ipv4 builder in buildSettings().
+     */
+    bool yieldDefaultRouteToHost();
+
+    /*
      * Association.  NM takes a whole connection profile at once, where the
      * supplicant interface above the seam builds one a property at a time, so
      * the translation happens here rather than being spread across callers.

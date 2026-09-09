@@ -530,6 +530,61 @@ NmBackend::carriesHostDefaultRoute(const std::string& ifname)
 }
 
 /*
+ * Whether a profile of ours must stay out of the host's default route.
+ *
+ * "Somebody else carries it" is NM's own judgement -- PrimaryConnection is the
+ * active connection NM has decided owns the default route -- so this tracks the
+ * host's routing instead of re-deriving it.  The three answers, and why each is
+ * the right one, are set out above the ipv4 builder in buildSettings().
+ *
+ * Every failure path returns TRUE, which is the cautious answer and not an
+ * arbitrary one: yielding costs Android a default route it does not use today
+ * anyway (wlan0 is a veth onto waydroid0), whereas wrongly TAKING the route
+ * costs the host the link this machine is administered over.
+ */
+bool
+NmBackend::yieldDefaultRouteToHost()
+{
+    std::string primary = propString(NM_PATH, NM_IFACE, "PrimaryConnection");
+
+    /* Nothing carries a default route, so there is none to protect. */
+    if (primary.empty() || primary == "/") {
+        return false;
+    }
+
+    std::string ours = wifiDevicePath();
+    if (ours.empty()) {
+        return true;
+    }
+
+    GVariant* devs = getProp(primary.c_str(), NM_ACTIVE, "Devices");
+    if (!devs) {
+        return true;
+    }
+
+    bool mine = false;
+    if (g_variant_is_of_type(devs, G_VARIANT_TYPE("ao"))) {
+        GVariantIter iter;
+        const char* path = nullptr;
+
+        /*
+         * "&o" borrows, so breaking out of g_variant_iter_loop() early here
+         * leaks nothing -- which is not true of the allocating formats.
+         */
+        g_variant_iter_init(&iter, devs);
+        while (g_variant_iter_loop(&iter, "&o", &path)) {
+            if (path && ours == path) {
+                mine = true;
+                break;
+            }
+        }
+    }
+    g_variant_unref(devs);
+
+    return !mine;
+}
+
+/*
  * Takes either an interface name or a factory MAC address, told apart by shape
  * -- see normalizeMac().  A MAC is the better argument for anything unattended
  * because it is the only stable name this hardware has; see mSelectorMac.
@@ -1120,17 +1175,41 @@ NmBackend::buildSettings(const NetworkRequest& req)
         g_variant_new_string("infrastructure"));
 
     /*
-     * DHCP, but never at the host's expense.
+     * DHCP, and whether this profile may carry the host's default route.
      *
-     * The radio Android drives is a second adapter; the host reaches the world
-     * over its own.  Both are likely to be on the SAME AP and therefore the
-     * same subnet, so without a guard NM would install two competing sets of
-     * routes and the host's default could land on the radio Android is free to
-     * disconnect at any moment.  That is trap 5 of 33-wifi-stage4.md wearing a
-     * different hat: the outage there came from Android's control of a radio
-     * reaching further than Android's own session.
+     * Both topologies this daemon runs in are legitimate, and they want
+     * opposite answers:
      *
-     * Two settings, because they stop two different things:
+     *   Android on a SECOND adapter (docs/34-wifi-second-radio.md), the host on
+     *   its own.  Both are likely to be on the SAME AP and therefore the same
+     *   subnet, so without a guard NM would install two competing sets of routes
+     *   and the host's default could land on the radio Android is free to
+     *   disconnect at any moment.  That is trap 5 of 33-wifi-stage4.md wearing a
+     *   different hat: the outage there came from Android's control of a radio
+     *   reaching further than Android's own session.
+     *
+     *   Android on the host's ONLY adapter, which is what a machine driven
+     *   entirely from inside the Android session wants -- there, Android
+     *   manipulating NetworkManager IS the point.  Yielding now inverts into the
+     *   very fault the guard was written to prevent: activating our profile
+     *   displaces the host's own, and never-default means nothing supplies a
+     *   default route afterwards.  The host loses its route off the machine,
+     *   and because Waydroid NATs waydroid0 out of that route, Android loses
+     *   connectivity too -- while reporting itself connected.
+     *
+     * So the question is not "which adapter is this" but "is somebody ELSE
+     * carrying the host's default route".  NM's PrimaryConnection answers it:
+     *
+     *   another device holds it  ->  yield, exactly as before
+     *   this device holds it     ->  keep supplying it; we are the lifeline
+     *   nothing holds it         ->  there is no route to protect
+     *
+     * Asking NM rather than comparing against our own --device argument is what
+     * makes this stable across re-activation.  Once our profile IS the default
+     * route, the device carrying it is this one, so the answer does not flip
+     * back and strand the host on the next reconnect.
+     *
+     * When yielding, two settings, because they stop two different things:
      *
      *   never-default  keeps this profile from ever supplying a DEFAULT route.
      *   route-metric   keeps its ON-LINK subnet route from outranking the
@@ -1141,24 +1220,38 @@ NmBackend::buildSettings(const NetworkRequest& req)
      *                  the other one.
      *
      * WAYDROID_ROUTE_METRIC sits well above NM's Wi-Fi default (600 on this
-     * host) so the host's radio always wins.  Android's traffic does not flow
-     * over this link today anyway -- wlan0 is a veth onto waydroid0 -- so this
-     * profile carries no route worth preferring.
+     * host) so the host's radio always wins.  When NOT yielding both are
+     * omitted, so the profile behaves like any other and NM's own metric
+     * applies -- a profile that is meant to BE the default route must not carry
+     * a metric chosen to lose.
+     *
+     * Logged either way.  docs/35-wifi-stage5.md's lesson was that the one
+     * handler which logged nothing was the one quietly breaking Wi-Fi.
      */
+    bool yield = yieldDefaultRouteToHost();
+
+    GINFO("connect(%s): %s", req.ssid.c_str(), yield ?
+        "another device carries the host's default route -- "
+        "never-default set on our profile" :
+        "this radio is the host's own path off the machine -- "
+        "letting our profile carry the default route");
+
     g_variant_builder_init(&ipv4, G_VARIANT_TYPE("a{sv}"));
     g_variant_builder_add(&ipv4, "{sv}", "method",
         g_variant_new_string("auto"));
-    g_variant_builder_add(&ipv4, "{sv}", "never-default",
-        g_variant_new_boolean(TRUE));
-    g_variant_builder_add(&ipv4, "{sv}", "route-metric",
-        g_variant_new_int64(WAYDROID_ROUTE_METRIC));
     g_variant_builder_init(&ipv6, G_VARIANT_TYPE("a{sv}"));
     g_variant_builder_add(&ipv6, "{sv}", "method",
         g_variant_new_string("auto"));
-    g_variant_builder_add(&ipv6, "{sv}", "never-default",
-        g_variant_new_boolean(TRUE));
-    g_variant_builder_add(&ipv6, "{sv}", "route-metric",
-        g_variant_new_int64(WAYDROID_ROUTE_METRIC));
+    if (yield) {
+        g_variant_builder_add(&ipv4, "{sv}", "never-default",
+            g_variant_new_boolean(TRUE));
+        g_variant_builder_add(&ipv4, "{sv}", "route-metric",
+            g_variant_new_int64(WAYDROID_ROUTE_METRIC));
+        g_variant_builder_add(&ipv6, "{sv}", "never-default",
+            g_variant_new_boolean(TRUE));
+        g_variant_builder_add(&ipv6, "{sv}", "route-metric",
+            g_variant_new_int64(WAYDROID_ROUTE_METRIC));
+    }
 
     g_variant_builder_init(&outer, G_VARIANT_TYPE("a{sa{sv}}"));
     g_variant_builder_add(&outer, "{sa{sv}}", "connection", &conn);
