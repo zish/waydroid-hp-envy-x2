@@ -24,6 +24,16 @@ namespace waydroid {
 #define BACKLIGHT_ROOT  "/sys/class/backlight"
 
 /*
+ * The dimmest the panel may be left when Android stops owning it.
+ *
+ * NOT mMinPercent, which floors a non-zero request from a LIVE Android and is
+ * deliberately allowed to be very dim.  This one only applies when handing the
+ * panel back to the host, where the only requirement is that a person can see
+ * the screen.  10% of max is ~94 raw on this machine.
+ */
+#define RECOVER_FLOOR_PERCENT   10.0
+
+/*
  * /var/lib/waydroid rather than /etc: this daemon inherits
  * system_u:system_r:waydroid_t:s0 from container_manager.py, and that domain
  * reads and writes /var/lib/waydroid routinely (waydroid.log lives there).
@@ -316,13 +326,39 @@ Backlight::ReadRaw(const char* attr) const
 }
 
 void
-Backlight::RestoreInitial()
+Backlight::RestoreInitial(const char* why)
 {
-    if (!Available() || mInitialRaw < 0 || mInitialRaw == mLastRaw)
+    if (!Available())
         return;
-    GINFO("Restoring backlight to %d on exit", mInitialRaw);
-    WriteRaw(mInitialRaw);
-    mLastRaw = mInitialRaw;
+
+    /*
+     * The floor is half the point, not a nicety.  mInitialRaw is whatever the
+     * panel read when this daemon started, so a daemon that started while the
+     * screen was dark would "restore" to dark and leave the machine exactly as
+     * unusable as it found it.  Never hand back a panel nobody can read.
+     */
+    int target = mInitialRaw;
+    const int floor_raw =
+        (int) lround(RECOVER_FLOOR_PERCENT / 100.0 * (double) mMaxRaw);
+
+    if (target < floor_raw)
+        target = floor_raw;
+    if (target > mMaxRaw)
+        target = mMaxRaw;
+    if (target < 1)
+        target = 1;
+
+    /*
+     * Against the panel, not against mLastRaw.  Our bookkeeping only knows what
+     * WE wrote, and the recovery case is precisely the one where somebody else
+     * -- a rescue ssh, logind, the greeter -- may have moved it since.
+     */
+    if (ReadRaw() == target)
+        return;
+
+    GINFO("Restoring backlight to %d (%s)", target, why);
+    WriteRaw(target);
+    mLastRaw = target;
 }
 
 }  /* namespace waydroid */

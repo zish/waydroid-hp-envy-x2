@@ -70,7 +70,13 @@ public:
     /* Put back whatever the panel was at when we started.  Called on clean
      * exit: if the daemon goes away while Android has it dimmed, nothing is
      * left that could ever brighten it again. */
-    void RestoreInitial();
+    /*
+     * Put the panel back where the host had it, never dimmer than
+     * RECOVER_FLOOR_PERCENT.  Called on exit AND whenever Android goes
+     * away -- see the note in app_sm_presence_handler() for why the exit
+     * path alone is not enough.  "why" is logged.
+     */
+    void RestoreInitial(const char* why);
 
 private:
     bool Discover();

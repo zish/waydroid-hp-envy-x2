@@ -234,6 +234,53 @@ invocation, and `bin/brightness-test.sh` reports a dimmed measurement as **SKIPP
 (inconclusive) rather than 1 (failed). It also cross-checks the last `setLight` the daemon logged
 against the panel, which validates the mapping regardless of display policy.
 
+## Android leaving is not the same as this daemon exiting
+
+**2026-09-09, found the hard way.** Android was rebooted from inside the guest. The Waydroid
+session stopped, SDDM's greeter came back — and the screen stayed black. The panel read
+`brightness 0` with `bl_power 0`: powered, rendering, and completely dark. The machine was
+recoverable only by ssh from another host, which is exactly the recovery a kiosk user does not
+have.
+
+`RestoreInitial()` existed and was correct. It was simply never reached.
+
+The daemon **deliberately outlives the container**. `app_sm_presence_handler()` keeps it alive when
+the guest's service manager disappears, so it can re-register when a new one appears — that is what
+makes a container restart cheap. It also means stopping a Waydroid session never signals the
+daemon, so the `RestoreInitial()` on the exit path in `main()`, guarded by a comment that correctly
+explains why it must exist, does not run. The process was still alive as pid 137858 long after,
+holding nothing but a dark panel.
+
+Two things were wrong, and both are fixed:
+
+- **The restore was hooked to the wrong event.** It now also runs from the service-manager-death
+  branch of the presence handler, which is the event that actually occurs. The exit path is kept,
+  and both now log which one fired and why.
+- **The restore had no floor.** `mInitialRaw` is whatever the panel read when the daemon started,
+  so a daemon that started while the screen was dark would "restore" to dark and leave the machine
+  exactly as unusable as it found it. `RECOVER_FLOOR_PERCENT` (10%, ~94 raw here) is now the
+  dimmest the panel may be left when Android stops owning it. This is **not** `mMinPercent`, which
+  floors a non-zero request from a *live* Android and is deliberately allowed to be much dimmer:
+  Android asking for 0 while it is still running is still honoured.
+
+It also compares the target against the panel rather than against `mLastRaw`, because the recovery
+case is precisely the one where something else — a rescue ssh, logind, the greeter — may have moved
+it since we last wrote.
+
+### What was considered and rejected
+
+An `ExecStopPost=` drop-in on `waydroid-container.service`, as a safety net for a daemon that is
+killed rather than signalled. It does not work for this fault, and
+[`artifacts/shutdown/graceful-shutdown.conf`](../artifacts/shutdown/graceful-shutdown.conf) already
+records why: session-driven stops — logout, `waydroid session stop`, Android powering itself off —
+never reach that unit's `ExecStop`. It is the wrong hook, and shipping it would have looked like
+cover while providing none.
+
+**Residual risk, accepted.** If the daemon is `SIGKILL`ed after Android has dimmed the panel and
+before the session ends, nothing restores it. That window is narrow — a dead daemon is not serving
+`ILight`, so it cannot be what dimmed the panel except in a tight race — and every other available
+hook either fires in the wrong place or runs unprivileged and cannot write sysfs.
+
 ## Still open
 
 - **Deployment is not durable yet.** The daemon was hand-swapped, which wins the name because it
@@ -243,9 +290,10 @@ against the panel, which validates the mapping regardless of display policy.
   machine.
 - **The default curve is untuned.** Linear is honest, not necessarily pleasant. Try `gamma=1.8`
   or `2.2` and judge by eye; it reloads live.
-- **Screen-off blanking is untested.** `v == 0` should now blank the panel where docs/27 found it
-  stuck at full. Whether Android actually sends 0 on its screen-off path here has not been
-  observed.
+- ~~**Screen-off blanking is untested.**~~ **Observed, and it bit.** Android does send 0 and the
+  panel does blank, where docs/27 found it stuck at full. It was observed by blanking at Android's
+  shutdown and staying that way — see the section above. Whether Android also sends 0 on an
+  ordinary idle screen-off, as distinct from shutdown, is still unconfirmed.
 - **Keyboard backlight: none exists.** `/sys/class/leds` holds only capslock, numlock, scrolllock,
   `hda::mute` and the two radio LEDs, so `Type::KEYBOARD` and the notification types are declined
   rather than silently accepted.

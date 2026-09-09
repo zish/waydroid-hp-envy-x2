@@ -537,6 +537,20 @@ app_sm_presence_handler(
     } else {
         GINFO("Service manager has died");
         app->service->killLoops();
+        /*
+         * Android is gone; this daemon deliberately is not.  It stays up so it
+         * can re-register when a new container appears, which means stopping a
+         * Waydroid session never signals us and the RestoreInitial() on the
+         * exit path in main() is simply never reached.
+         *
+         * On 2026-09-09 that left the panel at 0 with the SDDM greeter behind
+         * it: a black screen on a machine whose only other input is ssh from
+         * somewhere else.  Nothing on the host but this process is holding the
+         * value Android dimmed away from, so the restore has to happen here.
+         * See docs/37-brightness.md.
+         */
+        if (app->backlight)
+            app->backlight->RestoreInitial("Android went away");
     }
 }
 
@@ -676,7 +690,7 @@ int main(int argc, char* argv[])
         /* Leaving the panel wherever Android last dimmed it would be a trap:
          * once this process is gone, nothing on the host is left that could
          * ever brighten it again. */
-        app.backlight->RestoreInitial();
+        app.backlight->RestoreInitial("daemon exiting");
         if (app.lightObj)
             gbinder_local_object_unref(app.lightObj);
         gbinder_local_object_unref(app.obj);
