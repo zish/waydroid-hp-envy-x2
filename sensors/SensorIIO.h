@@ -97,7 +97,6 @@ struct SensorIIO {
     void RegisterSensors(sensor_event_cb_t cb, void *userdata);
 
     bool IsSensorAvailable(int id);
-    bool IsSensorEventEnable(int id);
     int EnableSensorEvents(int id);
     int DisableSensorEvents(int id);
 

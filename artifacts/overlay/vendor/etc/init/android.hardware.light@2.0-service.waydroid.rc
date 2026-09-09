@@ -1,0 +1,64 @@
+# Stock /vendor/etc/init/android.hardware.light@2.0-service.waydroid.rc,
+# neutered: the service still EXISTS by name but execs a no-op.
+#
+# WHY
+#
+# The shipped binary is a 15 KB stub. It registers
+# android.hardware.light@2.0::ILight/default and discards every call -- it
+# contains no file path strings at all, so it writes nowhere and Android's
+# brightness slider has never moved anything. waydroid-sensord now serves that
+# interface for real, mapping Android's 0..255 onto the host's
+# /sys/class/backlight/intel_backlight (see sensors/Backlight.h).
+#
+# Both register the same name, and addService() overwrites, so the last one to
+# register owns it. We always lose that race without this file:
+# container_manager.py starts waydroid-sensord BEFORE lxc-start, so the guest
+# stub is guaranteed to register second.
+#
+# WHY THE "interface" LINE IS DROPPED AND NOT KEPT
+#
+# This is the part 34-wifi-second-radio.md paid for the hard way with wificond.
+# "disabled" alone was not enough there: it only means "do not auto-start at
+# class main", and something still asked init to start the service on demand,
+# which beat the host daemon every time. An `interface` line in a service block
+# is exactly what lets init do that -- it is how init knows which service to
+# start when a client waits for a HIDL name. Removing the line removes the
+# trigger, so the three guards work together:
+#
+#   /system/bin/true  execs and exits immediately, so it can never reach
+#                     addService() and can never take the name. It is a toybox
+#                     symlink present in this image; checked, not assumed.
+#   oneshot           init must NOT restart it when it exits. Without this the
+#                     no-op respawns forever on a 5 s backoff.
+#   disabled          not started at class hal either.
+#
+# "shutdown critical" goes with the real binary: it exists to let a lights HAL
+# turn LEDs off during power-down, which /system/bin/true has no use for.
+#
+# EFFECT AND RISK
+#
+# waydroid-sensord owns ILight/default from whenever it starts. If it is not
+# running, nothing serves the interface at all -- which is not a regression,
+# because the stub it replaces did nothing anyway. The vendor VINTF manifest
+# still declares the HAL; an undeclared-but-registered or declared-but-absent
+# HAL is a VTS complaint, not a runtime failure.
+#
+# Reverting is deleting this file, which restores the stub and with it a
+# brightness slider that moves nothing.
+#
+# Deploy to
+# /var/lib/waydroid/overlay/vendor/etc/init/android.hardware.light@2.0-service.waydroid.rc
+# (0644 root:root). Dropping the file in is NOT enough: the overlay lowerdir is
+# already mounted, so it needs `systemctl restart waydroid-container.service`
+# and a fresh session. See AGENTS.md and 32-wifi-stage3.md.
+#
+# Original for comparison:
+#   artifacts/overlay/vendor/etc/init/android.hardware.light@2.0-service.waydroid.rc.orig
+# Evidence and full reasoning: docs/37-brightness.md
+
+service vendor.light-hal-2-0 /system/bin/true
+    class hal
+    user system
+    group system graphics
+    disabled
+    oneshot

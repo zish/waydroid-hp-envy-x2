@@ -39,6 +39,29 @@
 # leaves only glib + libgbinder -- both already on bigtab01 as Waydroid's own
 # dependencies (libgbinder-1.1.47, libglibutil-1.0.82).
 #
+# WHY THE LIGHTS HAL IS IN A BINARY CALLED "SENSORD"
+#
+# Because the name is the install hook, and nothing else is. container_manager.py
+# starts exactly one host daemon, gated on a literal name:
+#
+#     if which("waydroid-sensord"):
+#         ... run ["waydroid-sensord", "/dev/" + args.HWBINDER_DRIVER]
+#
+# Riding that buys three things a separate waydroid-lightd would have to earn
+# back. It needs no systemd unit, and therefore cannot repeat the trap that cost
+# Wi-Fi Stage 5 a day: a systemd-started bin_t binary runs as
+# unconfined_service_t, and container_runtime_t is denied binder { transfer } to
+# it under a dontaudit rule, so the failure is invisible in ausearch. Spawned
+# from container_manager.py we inherit waydroid_t, which already works -- the
+# same reason service.cpp's lock file lives where it does. It runs as root, so
+# the backlight is a plain sysfs write rather than a logind session call. And
+# ILight is hwbinder/hidl exactly like ISensors, so it is one more local object
+# on the connection this process already holds.
+#
+# The cost is a misleading binary name. That is cheaper than the alternative.
+# Lights are kept in their own translation units (Backlight.cpp, Lights.cpp) so
+# the two halves stay separable if the hook ever changes.
+#
 # BUILD POLICY
 #
 # Builds run on the dev box, never on bigtab01 (8 GB RAM, immutable OS). We
@@ -127,7 +150,7 @@ LDFLAGS=(
 	-static-libstdc++ -static-libgcc
 )
 
-SRCS=(SensorIIO.cpp Sensors.cpp service.cpp)
+SRCS=(SensorIIO.cpp Sensors.cpp Backlight.cpp Lights.cpp service.cpp)
 OBJS=()
 
 echo "== compiling"
@@ -190,4 +213,8 @@ if [ "$DO_INSTALL" = 1 ]; then
 	echo "Now restart the session so waydroid.prop is regenerated without"
 	echo "waydroid.stub_sensors_hal=1:"
 	echo "    waydroid session stop && waydroid session start"
+	echo
+	echo "For the ILight half, the guest stub must also be neutered, or it will"
+	echo "take the \"default\" name after us -- we start before lxc-start does:"
+	echo "    artifacts/overlay/install.sh   (then restart waydroid-container)"
 fi

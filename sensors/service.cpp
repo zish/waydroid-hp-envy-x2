@@ -21,10 +21,12 @@
  */
 
 #include "Sensors.h"
+#include "Lights.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <unistd.h>
@@ -60,6 +62,10 @@ typedef struct app {
     GBinderLocalObject* obj;
     int ret;
     Sensors *service;
+    /* The lights half. Registered as a second name on the same hwbinder
+     * connection; see build.sh for why it shares this process. */
+    GBinderLocalObject* lightObj;
+    waydroid::Backlight* backlight;
 } App;
 
 typedef struct response {
@@ -488,6 +494,30 @@ app_add_service_done(
     }
 }
 
+/*
+ * Deliberately not app_add_service_done: that one quits the main loop when
+ * registration fails, which is right for sensors and wrong for lights. Losing
+ * the brightness service must never cost the machine its accelerometer.
+ */
+static
+void
+lights_add_service_done(
+    GBinderServiceManager* sm,
+    int status,
+    void* user_data)
+{
+    if (status == GBINDER_STATUS_OK) {
+        /* GINFO, not printf: stdout is block-buffered once the daemon is
+         * started with its output redirected to a log, so a printf here does
+         * not appear until the buffer fills -- which for a line this rare
+         * means never. */
+        GINFO("Added \"%s/%s\"", LIGHT_IFACE, LIGHT_NAME);
+    } else {
+        GERR("Failed to add \"%s/%s\" (%d); brightness control is off, "
+             "sensors continue", LIGHT_IFACE, LIGHT_NAME, status);
+    }
+}
+
 static
 void
 app_sm_presence_handler(
@@ -500,6 +530,10 @@ app_sm_presence_handler(
         GINFO("Service manager has reappeared");
         gbinder_servicemanager_add_service(app->sm, DEFAULT_NAME, app->obj,
             app_add_service_done, app);
+        if (app->lightObj) {
+            gbinder_servicemanager_add_service(app->sm, LIGHT_NAME,
+                app->lightObj, lights_add_service_done, app);
+        }
     } else {
         GINFO("Service manager has died");
         app->service->killLoops();
@@ -511,7 +545,6 @@ void
 app_run(
    App* app)
 {
-    const char* name = DEFAULT_NAME;
     guint sigtrm = g_unix_signal_add(SIGTERM, app_signal, app);
     guint sigint = g_unix_signal_add(SIGINT, app_signal, app);
     gulong presence_id = gbinder_servicemanager_add_presence_handler
@@ -521,6 +554,10 @@ app_run(
 
     gbinder_servicemanager_add_service(app->sm, DEFAULT_NAME, app->obj,
         app_add_service_done, app);
+    if (app->lightObj) {
+        gbinder_servicemanager_add_service(app->sm, LIGHT_NAME, app->lightObj,
+            lights_add_service_done, app);
+    }
 
     GINFO("Waydroid Sensors HAL service ready.");
 
@@ -537,6 +574,8 @@ int main(int argc, char* argv[])
 {
     const char* device = DEFAULT_DEVICE;
     gboolean selftest = FALSE;
+    gboolean backlight_info = FALSE;
+    int backlight_set = -1;
     App app;
 
     gutil_log_timestamp = FALSE;
@@ -546,6 +585,14 @@ int main(int argc, char* argv[])
     for (int i = 1; i < argc; i++) {
         if (!g_strcmp0(argv[i], "--selftest")) {
             selftest = TRUE;
+        } else if (!g_strcmp0(argv[i], "--backlight-info")) {
+            backlight_info = TRUE;
+        } else if (!g_strcmp0(argv[i], "--backlight")) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--backlight needs a value 0..255\n");
+                return RET_INVARG;
+            }
+            backlight_set = atoi(argv[++i]);
         } else if (!g_strcmp0(argv[i], "--verbose") ||
                    !g_strcmp0(argv[i], "-v")) {
             gutil_log_default.level = GLOG_LEVEL_VERBOSE;
@@ -557,13 +604,45 @@ int main(int argc, char* argv[])
                    "  Registers %s/%s on BINDER_DEVICE\n"
                    "  (default %s).\n"
                    "\n"
-                   "  --selftest  read the sensors, cross-check them against\n"
-                   "              each other and exit; needs no container.\n",
-                   argv[0], DEFAULT_IFACE, DEFAULT_NAME, DEFAULT_DEVICE);
+                   "  Also serves %s/%s, mapping Android's\n"
+                   "  0..255 brightness onto the host panel backlight.\n"
+                   "\n"
+                   "  --selftest        read the sensors, cross-check them against\n"
+                   "                    each other and exit; needs no container.\n"
+                   "  --backlight-info  print the backlight device and the whole\n"
+                   "                    0..255 -> raw mapping, and exit.\n"
+                   "  --backlight N     set brightness to Android value N (0..255)\n"
+                   "                    and exit. Needs no container either.\n",
+                   argv[0], DEFAULT_IFACE, DEFAULT_NAME, DEFAULT_DEVICE,
+                   LIGHT_IFACE, LIGHT_NAME);
             return RET_OK;
         } else {
             device = argv[i];
         }
+    }
+
+    if (backlight_info || backlight_set >= 0) {
+        waydroid::Backlight bl;
+        if (!bl.Available()) {
+            fprintf(stderr, "no usable backlight found\n");
+            return RET_NOTFOUND;
+        }
+        printf("device      %s\n", bl.Name().c_str());
+        printf("max_brightness  %d\n", bl.MaxRaw());
+        printf("actual          %d\n", bl.ReadRaw());
+
+        if (backlight_info) {
+            printf("\nandroid -> raw\n");
+            for (int v = 0; v <= 255; v += 15)
+                printf("  %3d -> %6d  (%5.1f%%)\n", v, bl.AndroidToRaw(v),
+                       100.0 * bl.AndroidToRaw(v) / bl.MaxRaw());
+        }
+        if (backlight_set >= 0) {
+            const int raw = bl.SetAndroidBrightness(backlight_set);
+            printf("\nset %d/255 -> raw %d; panel now reads %d\n",
+                   backlight_set, raw, bl.ReadRaw());
+        }
+        return RET_OK;
     }
 
     if (selftest) {
@@ -582,12 +661,24 @@ int main(int argc, char* argv[])
     memset(&app, 0, sizeof(app));
     app.ret = RET_INVARG;
     app.service = new Sensors();
+    app.backlight = new waydroid::Backlight();
 
     app.sm = gbinder_servicemanager_new2(device, "hidl", "hidl");
     if (gbinder_servicemanager_wait(app.sm, -1)) {
         app.obj = gbinder_servicemanager_new_local_object
             (app.sm, DEFAULT_IFACE, app_reply, &app);
+        if (app.backlight->Available()) {
+            app.lightObj = waydroid::lights_new_object(app.sm, app.backlight);
+        } else {
+            GWARN("No backlight device; ILight will not be registered");
+        }
         app_run(&app);
+        /* Leaving the panel wherever Android last dimmed it would be a trap:
+         * once this process is gone, nothing on the host is left that could
+         * ever brighten it again. */
+        app.backlight->RestoreInitial();
+        if (app.lightObj)
+            gbinder_local_object_unref(app.lightObj);
         gbinder_local_object_unref(app.obj);
         gbinder_servicemanager_unref(app.sm);
     }

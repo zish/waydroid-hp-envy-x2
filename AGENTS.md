@@ -192,6 +192,23 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    Exposing the user's `/run/media/<username>` directory is probably sufficient. **Deprioritised
    below Wi-Fi on 2026-09-07** at the owner's request.
 
+**Screen brightness — DONE, and not on the list above.** Added at the owner's request on
+2026-09-09, between Wi-Fi Stage 5 and goal 5. Android's brightness slider now drives the real
+panel backlight. The machine has **no ambient light sensor** — the ITE8350 declares only five
+sensor types and there is no `ACPI0008` and no ALS on either i2c bus — so *auto*-brightness can
+never work here and Android already knows it (`mAutoBrightnessAvailable=false`). Manual control
+was broken because Waydroid's shipped light HAL is a 15 KB stub that registers `ILight` and
+discards every call; it contains no file path strings at all. `waydroid-sensord` now serves
+`android.hardware.light@2.0::ILight` as a second name on the hwbinder connection it already
+holds — it lives there because `container_manager.py` gates its one host daemon on that literal
+binary name, which also means it inherits `waydroid_t` instead of the `unconfined_service_t` that
+cost Wi-Fi Stage 5 a day. Android 13 reaches `ILight` rather than the composer here
+(`useSurfaceControl=false`, because Waydroid ships composer 2.1), which was verified before any
+code was written. See [docs/37-brightness.md](docs/37-brightness.md); verify with
+`bin/brightness-test.sh`. **Not yet durable**: the daemon was hand-swapped, and the overlay `.rc`
+that stands the guest stub down is staged in the repo but not in `/var/lib/waydroid/overlay`, so
+the next container restart hands `ILight` back to the stub.
+
 Work the list in order. Don't start a later item until the one before it is either done or
 explicitly parked.
 
@@ -215,9 +232,14 @@ and the reasoning behind each change.
   whether the power button reports a *held* press at all, and `netflix-trace.sh`, which straces a
   container app **from the host** — the trick that settled the Netflix question when every
   in-container avenue had run out, plus the Wi-Fi pair (`wifi-wlan0.sh`, which puts a netdev
-  in the container's network namespace, and `wifi-test.sh`)
+  in the container's network namespace, and `wifi-test.sh`), and `brightness-test.sh`, which
+  reports a dimmed display as SKIPPED rather than failing, because Android pins the panel at its
+  dim value and ignores the brightness setting entirely while display policy is DIM
 - `sensors/` — source for `waydroid-sensord`, the host-side sensors daemon (goal 2). Build with
-  `sensors/build.sh`; see the header comment for why it is a host daemon and not a guest HAL
+  `sensors/build.sh`; see the header comment for why it is a host daemon and not a guest HAL.
+  It also serves `android.hardware.light@2.0::ILight` from `Lights.cpp` and `Backlight.cpp`, so
+  Android's brightness reaches `/sys/class/backlight` — in this binary because its *name* is the
+  install hook; build.sh's header explains the trade
 - `wifi/` — source for `waydroid-wifid`, the host-side wificond replacement (goal 4). Same shape as
   `sensors/`. `WifiBackend.h` is the pluggable seam: everything above it speaks AIDL to Android,
   everything below it speaks to whatever owns the radio on the host, and `NmBackend` is the first

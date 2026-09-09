@@ -388,11 +388,6 @@ bool SensorIIO::IsSensorAvailable(int id)
     return ID_CHECK(id) && mSensors[id].available;
 }
 
-bool SensorIIO::IsSensorEventEnable(int id)
-{
-    return ID_CHECK(id) && mSensors[id].enabled;
-}
-
 int SensorIIO::EnableSensorEvents(int id)
 {
     if (!ID_CHECK(id) || !mSensors[id].available)
