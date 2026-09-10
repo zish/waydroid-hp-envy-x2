@@ -1,0 +1,38 @@
+;; waydroid_backlight -- let waydroid-sensord write the panel backlight.
+;;
+;; WHY THIS EXISTS
+;;
+;; container_manager.py spawns waydroid-sensord as waydroid_t. That domain may
+;; read sysfs but not write it:
+;;
+;;   avc: denied { write } for scontext=system_u:system_r:waydroid_t:s0
+;;        tcontext=system_u:object_r:sysfs_t:s0 tclass=file permissive=0
+;;
+;; and the rule is dontaudit'ed, so ausearch shows nothing. Being uid 0 does
+;; not help; SELinux denies the domain, not the user. So ILight's setLight
+;; returned Status::UNKNOWN on every call and the slider moved nothing.
+;;
+;; Written in CIL rather than .te on purpose: semodule compiles CIL directly,
+;; so this needs no selinux-policy-devel, which on an rpm-ostree host would
+;; cost a layered install and a reboot.
+;;
+;; WHY A PRIVATE TYPE AND NOT `allow waydroid_t sysfs_t:file write`
+;;
+;; That one-liner would let the container runtime write anywhere in sysfs.
+;; This grants exactly one attribute of one device instead.
+
+(type waydroid_backlight_t)
+(roletype object_r waydroid_backlight_t)
+(typeattributeset file_type (waydroid_backlight_t))
+
+;; The file lives on sysfs, so its type must be allowed to associate with that
+;; filesystem or the relabel itself is refused -- this is the permission
+;; device_t lacked when the approach was probed.
+(allow waydroid_backlight_t sysfs_t (filesystem (associate)))
+
+;; The daemon: read the current value back, write a new one.
+(allow waydroid_t waydroid_backlight_t (file (getattr open read write append)))
+
+;; Whoever applies the label -- udev at device add, or a hand-run chcon.
+(allow udev_t waydroid_backlight_t (file (relabelto relabelfrom getattr open read write)))
+(allow unconfined_t waydroid_backlight_t (file (relabelto relabelfrom getattr open read write)))

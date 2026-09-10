@@ -283,11 +283,17 @@ hook either fires in the wrong place or runs unprivileged and cannot write sysfs
 
 ## Still open
 
-- **Deployment is not durable yet.** The daemon was hand-swapped, which wins the name because it
-  registers *after* the stub. The overlay `.rc` is written and staged in the repo but is not in
-  `/var/lib/waydroid/overlay` on the host, so the next container restart returns `ILight` to the
-  stub. Deploying it needs `systemctl restart waydroid-container.service` and someone at the
-  machine.
+- ~~**Deployment is not durable yet.**~~ **Done, and it uncovered a second fault that this
+  document got wrong.** The overlay `.rc` was deployed on 2026-09-09 and the container restarted,
+  so the stub is neutered for good and `ILight` is ours automatically. But the hand-swap this
+  entry treated as a mere deployment shortcut was **load-bearing**: a hand-started daemon runs as
+  `unconfined_t`, while `container_manager.py` spawns it as `waydroid_t`, and `waydroid_t` is
+  denied `write` on `sysfs_t` under a `dontaudit` rule. So the slider never worked from a
+  properly-spawned daemon and could not have — every `setLight` returned `Status::UNKNOWN` from
+  an `EACCES` on `open()`. Benefit 2 above ("Root, so the backlight is a plain sysfs write") is
+  **false as stated**: SELinux denies the domain, not the user. Fixed with a private type for the
+  one attribute plus a udev rule to apply it; see
+  [42-backlight-selinux.md](42-backlight-selinux.md) and `artifacts/backlight/install.sh`.
 - **The default curve is untuned.** Linear is honest, not necessarily pleasant. Try `gamma=1.8`
   or `2.2` and judge by eye; it reloads live.
 - ~~**Screen-off blanking is untested.**~~ **Observed, and it bit.** Android does send 0 and the

@@ -1,0 +1,28 @@
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Label the panel backlight so waydroid-sensord may write it.
+#
+# container_manager.py spawns the daemon as waydroid_t, and that domain is
+# denied write on sysfs_t:
+#
+#   avc: denied { write } for scontext=system_u:system_r:waydroid_t:s0
+#        tcontext=system_u:object_r:sysfs_t:s0 tclass=file permissive=0
+#
+# The rule is dontaudit'ed, so ausearch shows nothing at all -- the failure
+# surfaced only as "LightsService: Unknown error setting light." in logcat and
+# an EACCES from the daemon's own open(). See docs/42-backlight-selinux.md.
+#
+# This rule reapplies the label on every device add because sysfs is rebuilt
+# from scratch on each boot: chcon does not persist there the way a relabel on
+# a real filesystem does.
+#
+# It lives here rather than in artifacts/udev/ because it is inert without the
+# waydroid_backlight SELinux module that declares waydroid_backlight_t, and
+# that module is useless without this rule. They install and revert together.
+#
+# Only "brightness" is relabelled. The daemon reads actual_brightness and
+# max_brightness, and waydroid_t is already allowed to read sysfs_t, so
+# widening those would buy nothing.
+
+ACTION=="add|change", SUBSYSTEM=="backlight", RUN+="/usr/bin/chcon -t waydroid_backlight_t /sys%p/brightness"
