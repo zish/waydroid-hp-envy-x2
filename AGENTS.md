@@ -59,7 +59,11 @@ that line is still valid.
   needs someone at the machine. Always confirm a file is in effect by reading it from *inside* the
   container, never by `ls`-ing the overlay directory. See
   [docs/32-wifi-stage3.md](docs/32-wifi-stage3.md); this bit a Stage 0 file that had silently not
-  been in effect for a day.
+  been in effect for a day. Overlay content is now packaged rather than hand-copied:
+  `waydroid-overlay-sync` reconciles `/var/lib/waydroid/overlay` from payload in
+  `/usr/share/waydroid-overlay` before the container starts, so a wiped overlay repairs
+  itself and `waydroid-overlay-sync --verify` answers whether the live overlay still matches
+  ([docs/36-packaging.md](docs/36-packaging.md)).
 
 ### Where builds happen
 
@@ -113,6 +117,12 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    automatic on resume via a `systemd-sleep` hook, and the daemon re-resolves its IIO nodes by
    name so the reprobe costs nothing. See
    [docs/19-sensor-hub-suspend-wedge.md](docs/19-sensor-hub-suspend-wedge.md).
+   A third SELinux-shaped trap lived here too: the daemon was losing **every** binder priority
+   inheritance — about a million a boot, each logged as `binder: <tid> RLIMIT_NICE not set` —
+   because `waydroid_t` is not allowed `capability sys_nice` and the kernel asks with the
+   *noaudit* variant, so `ausearch` shows nothing. Fixed by giving the container a real
+   `RLIMIT_NICE` through a `waydroid-container.service` drop-in rather than a policy module. See
+   [docs/40-binder-nice.md](docs/40-binder-nice.md).
    **Vibration is the remaining part and is blocked a layer lower** — the motor exists but Linux
    exposes no interface to it at all, so that part starts with the DSDT, not with Waydroid.
 3. **Power** — **DONE.** Battery level, voltage, charge status and AC adapter state now come from
@@ -123,6 +133,11 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [docs/10-battery-fixed.md](docs/10-battery-fixed.md); verify with `bin/battery-test.sh`.
    Temperature is still unreported — that needs an NDK rebuild of the HAL (battery temp) or a new
    thermal HAL (system temps); both are scoped in docs/10.
+   Separately, and not about Android: do not trust a battery percentage on this machine. The
+   pack's gauge is uncalibrated and reads high — it hard-cut at roughly 18% on 2026-09-09, with no
+   shutdown and no suspend — and `dunst` fails on every session start, so the host has **no**
+   working notification path for a low-battery warning or anything else. See
+   [docs/41-battery-cutoff.md](docs/41-battery-cutoff.md).
 4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** **In progress: Stages 0 and 2–5
    largely done; some Stage 5 polish outstanding.** The whole Android Wi-Fi framework was already present and dormant in
    the image (`com.android.wifi` APEX, `wificond`); what was missing was the feature XML, a
@@ -191,6 +206,22 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
 5. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.
    Exposing the user's `/run/media/<username>` directory is probably sufficient. **Deprioritised
    below Wi-Fi on 2026-09-07** at the owner's request.
+6. **Android's per-app freezer** — make `CachedAppOptimizer`'s cgroup v2 freezer actually
+   work, so cached apps stop burning CPU while the machine is awake but idle. **Added 2026-09-10
+   at the owner's request; scoped, nothing built.** Android does **not** use CRIU for this and
+   never has — CRIU is ruled out here anyway, since `strings /usr/bin/criu | grep -c binder`
+   returns **0** and every Android process is full of binder fds. The feature is off
+   (`use_freezer=false`, `use_compaction=false`) and **cannot simply be switched on**: Waydroid's
+   own LXC config mounts the container's `/sys/fs/cgroup` read-only
+   (`lxc.mount.auto = cgroup:ro sys:ro proc`, the same line [docs/17](docs/17-hybrid-sleep.md)
+   quotes for ACPI), so `libprocessgroup` never created any `uid_*` cgroup and the writes beneath
+   the flag would fail. Beware a convincing red herring: logcat is full of
+   `ActivityManager: <pkg> is exempt from freezer`, which is exemption bookkeeping that runs
+   whether or not anything is ever frozen. A cheaper thing already works and should be tried
+   first — the host can freeze the **whole container** via
+   `/sys/fs/cgroup/lxc.payload.waydroid/cgroup.freeze` (81 processes, **1534 tasks**), untested,
+   with the `CLOCK_MONOTONIC` jump on thaw as the expected failure mode. Measure whether idle apps
+   cost anything before building any of it. See [docs/38-app-freezer.md](docs/38-app-freezer.md).
 
 **Screen brightness — DONE, and not on the list above.** Added at the owner's request on
 2026-09-09, between Wi-Fi Stage 5 and goal 5. Android's brightness slider now drives the real
@@ -205,9 +236,29 @@ binary name, which also means it inherits `waydroid_t` instead of the `unconfine
 cost Wi-Fi Stage 5 a day. Android 13 reaches `ILight` rather than the composer here
 (`useSurfaceControl=false`, because Waydroid ships composer 2.1), which was verified before any
 code was written. See [docs/37-brightness.md](docs/37-brightness.md); verify with
-`bin/brightness-test.sh`. **Not yet durable**: the daemon was hand-swapped, and the overlay `.rc`
-that stands the guest stub down is staged in the repo but not in `/var/lib/waydroid/overlay`, so
-the next container restart hands `ILight` back to the stub.
+`bin/brightness-test.sh`. **It is durable now, and making it durable is what exposed a second
+fault.** The overlay `.rc` was deployed on 2026-09-09, which retired the hand-swap — and the
+hand-swap turned out to be load-bearing. A hand-started daemon is `unconfined_t`;
+`container_manager.py` spawns it as `waydroid_t`, and `waydroid_t` is denied `write` on `sysfs_t`,
+so every `setLight` returned `Status::UNKNOWN` from an `EACCES` and the slider moved nothing.
+Being root does not help — SELinux denies the domain, not the user, which falsifies `Backlight.h`'s
+premise. The denial is `dontaudit`ed, so `ausearch` was silent, exactly as in
+[docs/40](docs/40-binder-nice.md) and [docs/35](docs/35-wifi-stage5.md); the way out is to ask the
+kernel with `selinux.selinux_check_access()` rather than wait for an audit record that will never
+come. Fixed with a private type on the one sysfs attribute plus a udev rule to reapply it each
+boot, since sysfs labels do not persist — `artifacts/backlight/install.sh`, written in CIL so it
+needs no `selinux-policy-devel` and no reboot. See
+[docs/42-backlight-selinux.md](docs/42-backlight-selinux.md). **Verified end to end by a reboot on 2026-09-10**: udev
+labelled the attribute on the real boot path, `container_manager.py` respawned the daemon as
+`waydroid_t`, there were zero `EACCES` lines against 697 before, and the full 0.2/0.5/0.8/1.0 sweep
+passed within 4 raw units. Note `runcon` cannot stand in for that reboot — `waydroid_t` is denied
+`entrypoint` on `bin_t`, so the daemon *inherits* the domain from `container_manager.py` rather
+than transitioning into it. Two things found while verifying: `bin/brightness-test.sh`'s
+user-activity poke **does not work** (injected keyevents and taps leave
+`mLastUserActivityTime` frozen, and `svc power stayon` loses to WindowManager's 10 s override), so
+a full-range run needs a human touching the machine throughout; and Android's dim policy now
+drives the *physical* panel, so the whole display dims 10 s after the last touch of Android even
+when someone is using the host.
 
 Work the list in order. Don't start a later item until the one before it is either done or
 explicitly parked.
@@ -267,7 +318,19 @@ and the reasoning behind each change.
   `sensor-app/`; `drm-probe/build.sh --install` deploys, runs and prints the report. See
   [docs/21-netflix-widevine.md](docs/21-netflix-widevine.md) for the Widevine fix and
   [docs/22-netflix-container-detection.md](docs/22-netflix-container-detection.md) for why Netflix still refuses to run
-- `artifacts/` — configs pulled from or staged for the host, with originals kept alongside
+- `artifacts/` — configs pulled from or staged for the host, with originals kept alongside.
+  Each subdirectory's `install.sh` honours `DESTDIR`/`PREFIX`/`UNITDIR`, so the same script
+  is both the by-hand install and the RPM's `%install` step — one description of the layout.
+  `artifacts/overlay/install.sh` holds the only written-down mapping from repo file to
+  overlay path, and `artifacts/overlay-manager/` is `waydroid-overlay-sync`, and
+  `artifacts/container/` holds the `waydroid-container.service` drop-ins.
+  `artifacts/backlight/` is the SELinux half of the brightness fix — a CIL module and the
+  udev rule that applies its type — kept in one directory because either half alone is inert
+- `packaging/` — RPM specs and `build-rpms.sh`. Four source packages: the noarch
+  `waydroid-bigtab01`, the two compiled daemons, and `waydroid-overlay`, whose subpackages
+  stage overlay payload into `/usr` and let `waydroid-overlay-sync` deploy it to `/var`
+  before the container starts. `packaging/README.md` records what has actually been built;
+  the design is [docs/36-packaging.md](docs/36-packaging.md)
 
 Record what was *ruled out* and why, not just what worked. Distinguish clearly between what has
 been verified on the host and what is still hypothesis.
