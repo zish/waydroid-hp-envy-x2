@@ -593,7 +593,7 @@ A fourth set — the LPSS UARTs being `_OSI`-gated, `GPS0._STA` meaning the rece
 driver, a USB or WWAN-attached GPS, and the module merely being held in reset — was disproven while
 answering the GPS question; see [13-gps.md](13-gps.md).
 
-## Goals 3-5
+## Goals 3-6
 
 Goal 3 is **done** — see [docs/10](10-battery-fixed.md). Two things it deliberately left alone, both
 scoped in that doc: battery *temperature* (needs an NDK rebuild of the health HAL so the board hook
@@ -606,6 +606,13 @@ Goal 4 is now **Wi-Fi** — scoped 2026-09-07, nothing built; see
 [28-wifi-feasibility.md](28-wifi-feasibility.md) and [29-wifi-plan.md](29-wifi-plan.md). Removable
 media moved to goal 5. It is untouched and remains the cheapest remaining item, but the owner
 deprioritised it below Wi-Fi.
+
+Goal 6 is **Android's per-app freezer**, added 2026-09-10; scoped, nothing built. See
+[43-app-freezer.md](43-app-freezer.md). Two things to know before touching it. It is blocked by the
+container's read-only `/sys/fs/cgroup`, not by a missing flag, so `use_freezer=true` alone would
+change nothing. And logcat's `<pkg> is exempt from freezer` lines are exemption bookkeeping that
+runs with the freezer disabled — they look like proof it works and are not. Doc suggests measuring
+the idle cost first, and trying the host-side whole-container freeze before widening the mount.
 
 ## Loose ends unrelated to the goals
 

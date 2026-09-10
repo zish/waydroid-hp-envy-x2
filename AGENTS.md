@@ -221,7 +221,7 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    first — the host can freeze the **whole container** via
    `/sys/fs/cgroup/lxc.payload.waydroid/cgroup.freeze` (81 processes, **1534 tasks**), untested,
    with the `CLOCK_MONOTONIC` jump on thaw as the expected failure mode. Measure whether idle apps
-   cost anything before building any of it. See [docs/38-app-freezer.md](docs/38-app-freezer.md).
+   cost anything before building any of it. See [docs/43-app-freezer.md](docs/43-app-freezer.md).
 
 **Screen brightness — DONE, and not on the list above.** Added at the owner's request on
 2026-09-09, between Wi-Fi Stage 5 and goal 5. Android's brightness slider now drives the real
