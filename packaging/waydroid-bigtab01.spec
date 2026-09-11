@@ -43,6 +43,11 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
 
+# For %{_unitdir} and %{_userunitdir}. Nothing here compiles; this is the only
+# build-time dependency, and it is what keeps the unit paths distro-portable
+# rather than hardcoded. See docs/36-packaging.md.
+BuildRequires:  systemd-rpm-macros
+
 # Everything here is shell and stdlib Python; nothing is compiled.
 Requires:       waydroid
 Requires:       systemd
@@ -63,7 +68,13 @@ Summary:        Shut Android down cleanly when a Waydroid session ends
 Requires:       waydroid
 Requires:       systemd
 # Owns /usr/share/sway/config.d; this package installs into it without owning it.
+# The package that owns it is distro-specific -- Fedora splits the distribution
+# config out, others ship it in sway itself.
+%if 0%{?fedora}
 Requires:       sway-config-fedora
+%else
+Requires:       sway
+%endif
 
 %description    graceful-exit
 Shuts Android down rather than killing it when the user logs out, both from a key
@@ -89,16 +100,18 @@ exit. See docs/25.
 %install
 # UNITDIR is passed explicitly: the installers default to /etc/systemd/system, which
 # is right for a manual install on an immutable host but is not a path an RPM may
-# own. /usr/lib/systemd/system is labelled systemd_unit_file_t, so the reason the
-# manual install avoids $PREFIX/lib (SELinux lib_t, which init_t may not start) does
-# not apply here. docs/27 has the measurement.
-%global waydroid_units %{_prefix}/lib/systemd/system
+# own. %{_unitdir} is labelled systemd_unit_file_t, so the reason the manual
+# install avoids $PREFIX/lib (SELinux lib_t, which init_t may not start) does not
+# apply here. docs/27 has the measurement.
 
-DESTDIR=%{buildroot} PREFIX=%{_prefix} UNITDIR=%{waydroid_units} \
+DESTDIR=%{buildroot} PREFIX=%{_prefix} UNITDIR=%{_unitdir} \
     sh artifacts/android-power/install.sh
 
-DESTDIR=%{buildroot} PREFIX=%{_prefix} UNITDIR=%{waydroid_units} \
+DESTDIR=%{buildroot} PREFIX=%{_prefix} UNITDIR=%{_unitdir} \
     sh artifacts/sensor-hub/install.sh
+
+DESTDIR=%{buildroot} PREFIX=%{_prefix} UNITDIR=%{_unitdir} \
+    sh artifacts/container/install.sh
 
 DESTDIR=%{buildroot} PREFIX=%{_prefix} SWAY_CONFD=%{_datadir}/sway/config.d \
     sh artifacts/graceful-exit/install.sh
@@ -116,24 +129,29 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} SESSIONDIR=%{_datadir}/wayland-sessions \
 %files
 %license LICENSE
 %doc docs/27-android-power-button.md docs/19-sensor-hub-suspend-wedge.md
+%doc docs/40-binder-nice.md
 %{_bindir}/waydroid-android-key
 %{_bindir}/waydroid-android-lock
 %{_bindir}/ite8350-resume-check
-%{waydroid_units}/waydroid-android-lock.service
-%{waydroid_units}/ite8350-sleep.service
-%{waydroid_units}/ite8350-resume-check.service
+%{_unitdir}/waydroid-android-lock.service
+%{_unitdir}/ite8350-sleep.service
+%{_unitdir}/ite8350-resume-check.service
 # Created by this package; systemd owns the parent but not this .wants directory.
-%dir %{waydroid_units}/sleep.target.wants
-%{waydroid_units}/sleep.target.wants/waydroid-android-lock.service
-%{waydroid_units}/sleep.target.wants/ite8350-sleep.service
+%dir %{_unitdir}/sleep.target.wants
+%{_unitdir}/sleep.target.wants/waydroid-android-lock.service
+%{_unitdir}/sleep.target.wants/ite8350-sleep.service
+# Likewise: the waydroid package owns waydroid-container.service, but nothing
+# owns its drop-in directory until something drops a file in it. docs/40.
+%dir %{_unitdir}/waydroid-container.service.d
+%{_unitdir}/waydroid-container.service.d/nice-limit.conf
 
 %files graceful-exit
 %license LICENSE
 %doc docs/24-graceful-logout.md
 %{_bindir}/waydroid-graceful-exit
-%{_prefix}/lib/systemd/user/waydroid-graceful-exit.service
-%dir %{_prefix}/lib/systemd/user/graphical-session.target.wants
-%{_prefix}/lib/systemd/user/graphical-session.target.wants/waydroid-graceful-exit.service
+%{_userunitdir}/waydroid-graceful-exit.service
+%dir %{_userunitdir}/graphical-session.target.wants
+%{_userunitdir}/graphical-session.target.wants/waydroid-graceful-exit.service
 %{_datadir}/sway/config.d/95-waydroid-graceful-exit.conf
 
 %files cage

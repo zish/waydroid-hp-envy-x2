@@ -1,0 +1,33 @@
+# Rebuild Waydroid's overlay from the packaged staging trees, every boot.
+#
+# This is what makes the overlay repeatable rather than something that was
+# copied into place once by hand. /var/lib/waydroid/overlay is state and can be
+# emptied by `waydroid init -f`, an image upgrade, a container rebuild or a
+# restore of /var; the payload in /usr/share/waydroid-overlay cannot, because it
+# is part of the ostree deployment. This unit closes the gap on every boot.
+#
+# Before=waydroid-container.service is the whole point of the ordering: the
+# overlay directory becomes the lowerdir of an overlayfs mount when the
+# container starts, and files added after that mount are invisible to Android.
+# Running first means the sync is always applied, never merely on disk.
+#
+# It is deliberately NOT Requires=/RequiredBy= anything. A sync that fails must
+# not stop Android from booting -- the overlay's contents are improvements to a
+# system that runs without them.
+
+[Unit]
+Description=Rebuild Waydroid's overlay from the packaged staging trees
+Documentation=file:///usr/share/doc/waydroid-overlay/36-packaging.md
+Before=waydroid-container.service
+After=local-fs.target
+ConditionPathIsDirectory=/var/lib/waydroid
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# --quiet: the journal gets a line per file only when something actually
+# changed, which on a healthy host is never.
+ExecStart=@BINDIR@/waydroid-overlay-sync --quiet
+
+[Install]
+WantedBy=multi-user.target

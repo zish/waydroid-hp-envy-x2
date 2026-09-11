@@ -48,7 +48,7 @@ Type=simple
 # no arguments the daemon auto-selects a radio that is not carrying the host's
 # default route, which is a guard rather than a guarantee -- see the conf file.
 EnvironmentFile=-/etc/waydroid-wifid.conf
-ExecStart=/usr/local/bin/waydroid-wifid $WAYDROID_WIFID_ARGS /dev/binderfs/binder
+ExecStart=@BINDIR@/waydroid-wifid $WAYDROID_WIFID_ARGS /dev/binderfs/binder
 
 # Run in the domain this daemon has ALWAYS run in, and the only one it works in.
 #
@@ -92,7 +92,7 @@ SELinuxContext=system_u:unconfined_r:unconfined_t:s0
 # up to about 45 s.  That is tolerable because nothing depends on this unit, and
 # it is better than reporting the service started while Wi-Fi is still down.
 # At boot it detects that Android was not already running and returns at once.
-ExecStartPost=-/usr/local/bin/waydroid-wifi-nudge
+ExecStartPost=-@BINDIR@/waydroid-wifi-nudge
 
 Restart=always
 RestartSec=5

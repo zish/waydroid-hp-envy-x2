@@ -204,13 +204,22 @@ fi
 if [ "$DO_UNIT" = 1 ]; then
 	echo
 	echo "== installing the systemd unit on $HOST"
-	scp -q "$repo/artifacts/wifi/waydroid-wifid.service" \
-	       "$repo/artifacts/wifi/waydroid-wifid.conf" \
-	       "$repo/artifacts/wifi/waydroid-wifi-nudge" \
-	       "$repo/artifacts/wifi/waydroid-wifi-sync" \
-	       "$repo/artifacts/wifi/waydroid-wifi-sync.service" \
-	       "$repo/artifacts/wifi/waydroid-wifi-sync.timer" \
-	       "$repo/artifacts/wifi/waydroid-wifi-share.conf" "$HOST:/tmp/"
+	# The units carry @BINDIR@ rather than a hardcoded path, because the RPM
+	# installs these same files with BINDIR=/usr/bin -- see
+	# artifacts/wifi/install.sh and packaging/waydroid-wifid.spec. Substituting
+	# /usr/local/bin here keeps this by-hand install exactly what it was.
+	stage="$OUT/unit"
+	rm -rf "$stage"
+	mkdir -p "$stage"
+	for f in waydroid-wifid.service waydroid-wifid.conf waydroid-wifi-nudge \
+	         waydroid-wifi-sync waydroid-wifi-sync.service \
+	         waydroid-wifi-sync.timer waydroid-wifi-share.conf; do
+		sed 's|@BINDIR@|/usr/local/bin|g' "$repo/artifacts/wifi/$f" >"$stage/$f"
+	done
+	scp -q "$stage"/waydroid-wifid.service "$stage"/waydroid-wifid.conf \
+	       "$stage"/waydroid-wifi-nudge "$stage"/waydroid-wifi-sync \
+	       "$stage"/waydroid-wifi-sync.service "$stage"/waydroid-wifi-sync.timer \
+	       "$stage"/waydroid-wifi-share.conf "$HOST:/tmp/"
 	ssh "$HOST" 'set -e
 	    sudo install -m 0644 -o root -g root \
 	        /tmp/waydroid-wifid.service /etc/systemd/system/waydroid-wifid.service

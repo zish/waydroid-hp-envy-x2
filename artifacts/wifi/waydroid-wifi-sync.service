@@ -26,7 +26,7 @@ Type=oneshot
 # a dontaudit'ed denial later.
 SELinuxContext=system_u:unconfined_r:unconfined_t:s0
 
-ExecStart=/usr/local/bin/waydroid-wifi-sync
+ExecStart=@BINDIR@/waydroid-wifi-sync
 
 # Bounded: it talks to a container that may be mid-boot or wedged, and a sync
 # that hangs must not sit in the timer's way forever.

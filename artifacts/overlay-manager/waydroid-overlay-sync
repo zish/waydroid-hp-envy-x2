@@ -1,0 +1,297 @@
+#!/bin/sh
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# waydroid-overlay-sync -- rebuild Waydroid's overlay from packaged staging trees.
+#
+# WHY THE PACKAGES DO NOT SIMPLY OWN THE OVERLAY FILES
+#
+# /var/lib/waydroid/overlay is state, not installed content. Three things can
+# empty it or diverge it from what the packages say it should hold, and none of
+# them are package operations:
+#
+#   * `waydroid init -f`, an image upgrade, or a rebuild of the container after
+#     a bad session -- all of which rewrite /var/lib/waydroid,
+#   * a manual edit made while chasing something, then forgotten,
+#   * a restore of /var from a backup older than the packages.
+#
+# An RPM that listed those paths in %files would put them back only on install
+# or `rpm -V`-driven repair, and on an rpm-ostree host /var is deliberately
+# outside the deployment altogether -- content shipped there by a package is not
+# part of the ostree commit and is not restored by a rollback. So the packages
+# ship the payload into /usr (read-only, versioned, part of the commit) and this
+# tool materialises it into /var. Boot runs it before waydroid-container.service
+# via waydroid-overlay-sync.service, so a wiped overlay repairs itself with
+# nobody watching, and `waydroid-overlay-sync --verify` answers "is the overlay
+# what the packages say it should be?" at any time.
+#
+# THE TRAP THIS TOOL EXISTS TO ANNOUNCE
+#
+# The overlay directory is the lowerdir of an overlayfs mount that
+# waydroid-container.service creates once, at container start. Adding a file to
+# a mounted lowerdir is undefined behaviour and here it is simply invisible:
+# the file is on disk, `ls` shows it, and Android cannot see it. Nothing warns
+# you. So when this tool changes anything while the container is up it says so
+# loudly and names the restart that would apply it -- it does not restart
+# anything by itself, because on a kiosk host that drops the session back to the
+# greeter and needs someone at the machine. --apply opts into that.
+#
+# LAYOUT
+#
+#   /usr/share/waydroid-overlay/<component>/{system,vendor}/...   payload
+#   /usr/share/waydroid-overlay/manifests/<component>.manifest    mode sha path
+#   /var/lib/waydroid-overlay/deployed.list                       what we placed
+#
+# /usr/local/share/waydroid-overlay is read too and wins over /usr/share, so a
+# hand-staged component can override a packaged one on an immutable host without
+# layering anything. Both are searched by default; --stage-dir replaces the list.
+#
+# Usage:
+#   waydroid-overlay-sync              reconcile the overlay
+#   waydroid-overlay-sync --verify     report drift, change nothing (exit 3 if any)
+#   waydroid-overlay-sync --apply      reconcile, then restart the container
+#   waydroid-overlay-sync --quiet      only speak when something changed or broke
+#
+# Env: STAGE_DIRS, OVERLAY_DIR, STATE_DIR
+set -eu
+
+STAGE_DIRS=${STAGE_DIRS:-"/usr/share/waydroid-overlay /usr/local/share/waydroid-overlay"}
+OVERLAY_DIR=${OVERLAY_DIR:-/var/lib/waydroid/overlay}
+STATE_DIR=${STATE_DIR:-/var/lib/waydroid-overlay}
+WAYDROID_CFG=${WAYDROID_CFG:-/var/lib/waydroid/waydroid.cfg}
+
+VERIFY=0
+APPLY=0
+FORCE=0
+QUIET=0
+stage_override=""
+
+usage() {
+	sed -n '4,8p;56,62p' "$0" | sed 's/^# \{0,1\}//'
+	exit "${1:-0}"
+}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--verify|-n|--dry-run) VERIFY=1; shift ;;
+	--apply)               APPLY=1; shift ;;
+	--force)               FORCE=1; shift ;;
+	--quiet|-q)            QUIET=1; shift ;;
+	--stage-dir)           stage_override="$stage_override $2"; shift 2 ;;
+	--overlay-dir)         OVERLAY_DIR="$2"; shift 2 ;;
+	--state-dir)           STATE_DIR="$2"; shift 2 ;;
+	-h|--help)             usage 0 ;;
+	*) echo "unknown argument: $1" >&2; usage 2 ;;
+	esac
+done
+
+[ -n "$stage_override" ] && STAGE_DIRS="$stage_override"
+
+say()  { [ "$QUIET" = 1 ] || echo "$@"; }
+warn() { echo "$@" >&2; }
+
+rc=0
+changed=0
+drift=0
+
+# ------------------------------------------------------------------ preflight
+
+if [ ! -d "$(dirname "$OVERLAY_DIR")" ]; then
+	# Not an error: the packages may well be installed before `waydroid init`,
+	# and the boot unit runs on every boot, so the next one after init picks it
+	# up. Creating half a waydroid tree here would be worse than waiting.
+	say "waydroid is not initialised ($(dirname "$OVERLAY_DIR") does not exist) -- nothing to do"
+	exit 0
+fi
+
+if [ -r "$WAYDROID_CFG" ] && ! grep -qi '^[[:space:]]*mount_overlays[[:space:]]*=[[:space:]]*True' "$WAYDROID_CFG"; then
+	warn "warning: mount_overlays is not True in $WAYDROID_CFG --"
+	warn "         Waydroid will not mount this overlay at all, so nothing here reaches Android."
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+# ------------------------------------------------------- what should be there
+#
+# One line per file: "stagedir component mode sha relpath". Collected in stage
+# dir order, so a later stage dir overriding an earlier one is just the last
+# line for that path winning. Two components inside the SAME stage dir claiming
+# one path is a packaging bug and is reported rather than silently resolved.
+
+for dir in $STAGE_DIRS; do
+	[ -d "$dir/manifests" ] || continue
+	for m in "$dir"/manifests/*.manifest; do
+		[ -e "$m" ] || continue
+		comp=$(basename "$m" .manifest)
+		while read -r mode sha rel; do
+			case "$mode" in ''|\#*) continue ;; esac
+			printf '%s %s %s %s %s\n' "$dir" "$comp" "$mode" "$sha" "$rel"
+		done <"$m"
+	done
+done >"$tmp/all"
+
+if [ ! -s "$tmp/all" ]; then
+	say "no overlay components staged in:$(for d in $STAGE_DIRS; do printf ' %s' "$d"; done)"
+	say "nothing to do"
+	exit 0
+fi
+
+awk '
+{
+	rel = ""
+	for (i = 5; i <= NF; i++) rel = rel (i > 5 ? " " : "") $i
+	if (rel in owner && owner[rel] == $1 && comp[rel] != $2)
+		printf("conflict: %s is claimed by both %s and %s in %s\n",
+		       rel, comp[rel], $2, $1) >"/dev/stderr"
+	owner[rel] = $1; comp[rel] = $2; mode[rel] = $3; sha[rel] = $4
+}
+END {
+	for (rel in owner)
+		printf("%s %s %s %s %s\n", owner[rel], comp[rel], mode[rel], sha[rel], rel)
+}' "$tmp/all" | sort -k5 >"$tmp/want" || rc=1
+
+# ------------------------------------------------------------------- install
+
+while read -r dir comp mode sha rel; do
+	src="$dir/$comp/$rel"
+	dst="$OVERLAY_DIR/$rel"
+
+	if [ ! -f "$src" ]; then
+		warn "error: $comp lists $rel but $src is missing"
+		rc=1
+		continue
+	fi
+
+	if [ -f "$dst" ]; then
+		cur_sha=$(sha256sum "$dst" | cut -d' ' -f1)
+		# Both sides get a leading 0 before the arithmetic, because the manifest
+		# writes 0644 and `stat -c %a` writes 644: compared as strings those are
+		# never equal and every file looks changed on every run.
+		cur_mode=$(stat -c %a "$dst")
+		if [ "$cur_sha" = "$sha" ] && [ "$((0$cur_mode))" -eq "$((0$mode))" ]; then
+			continue
+		fi
+	fi
+
+	# The staged payload is the authority, so check the authority first: a bad
+	# read out of /usr must not be copied over a good file in /var.
+	src_sha=$(sha256sum "$src" | cut -d' ' -f1)
+	if [ "$src_sha" != "$sha" ]; then
+		warn "error: $src does not match the $comp manifest (staged payload is corrupt)"
+		warn "       manifest $sha"
+		warn "       file     $src_sha"
+		rc=1
+		continue
+	fi
+
+	if [ "$VERIFY" = 1 ]; then
+		if [ -e "$dst" ]; then say "differs: $rel  ($comp)"; else say "missing: $rel  ($comp)"; fi
+		drift=1
+		continue
+	fi
+
+	install -D -m "$mode" "$src" "$dst"
+	say "installed: $rel  ($comp)"
+	changed=1
+	echo "$dst" >>"$tmp/relabel"
+done <"$tmp/want"
+
+# --------------------------------------------------------------------- remove
+#
+# Only files this tool placed, recorded in deployed.list, and only while they
+# still hold the bytes it placed. Anything edited since is somebody's work in
+# progress: it is reported and left alone unless --force.
+
+if [ -f "$STATE_DIR/deployed.list" ]; then
+	while read -r sha rel; do
+		case "$sha" in ''|\#*) continue ;; esac
+		if awk -v r="$rel" '{ x=""; for (i=5;i<=NF;i++) x = x (i>5?" ":"") $i; if (x == r) found=1 }
+		                     END { exit !found }' "$tmp/want"; then
+			continue
+		fi
+		dst="$OVERLAY_DIR/$rel"
+		[ -e "$dst" ] || continue
+		cur_sha=$(sha256sum "$dst" | cut -d' ' -f1)
+		if [ "$cur_sha" != "$sha" ] && [ "$FORCE" != 1 ]; then
+			warn "changed since deployment, NOT removing: $rel"
+			warn "  (its component is gone; remove it yourself, or re-run with --force)"
+			# Carried into the new state file on purpose. Dropping it here would
+			# be the tool forgetting it ever placed the file, which makes the
+			# warning a one-off and leaves --force with nothing to act on.
+			printf '%s %s\n' "$sha" "$rel" >>"$tmp/keep"
+			drift=1
+			continue
+		fi
+		if [ "$VERIFY" = 1 ]; then
+			say "orphan:  $rel"
+			drift=1
+			continue
+		fi
+		rm -f "$dst"
+		say "removed:   $rel"
+		changed=1
+		# Take the directories it leaves empty with it, never above the overlay.
+		d=$(dirname "$dst")
+		while [ "$d" != "$OVERLAY_DIR" ] && [ "$d" != "/" ]; do
+			rmdir "$d" 2>/dev/null || break
+			d=$(dirname "$d")
+		done
+	done <"$STATE_DIR/deployed.list"
+fi
+
+# ---------------------------------------------------------------------- state
+
+if [ "$VERIFY" != 1 ]; then
+	mkdir -p "$STATE_DIR"
+	{
+		echo "# written by waydroid-overlay-sync -- do not edit"
+		echo "# sha256 <space> path relative to $OVERLAY_DIR"
+		while read -r dir comp mode sha rel; do
+			printf '%s %s\n' "$sha" "$rel"
+		done <"$tmp/want"
+		# Orphans that were left in place because somebody had edited them.
+		if [ -f "$tmp/keep" ]; then cat "$tmp/keep"; fi
+	} >"$STATE_DIR/deployed.list.new"
+	mv -f "$STATE_DIR/deployed.list.new" "$STATE_DIR/deployed.list"
+fi
+
+# SELinux: named files only. The overlay is var_lib_t and that is what the
+# container's lowerdir expects; a blanket restorecon -R over /var/lib/waydroid
+# would reach the images and the LXC config, which are none of our business.
+if [ -f "$tmp/relabel" ] && command -v restorecon >/dev/null 2>&1; then
+	# shellcheck disable=SC2046
+	restorecon -F $(cat "$tmp/relabel") 2>/dev/null || true
+fi
+
+# ------------------------------------------------------- did any of it land?
+
+if [ "$VERIFY" = 1 ]; then
+	if [ "$drift" = 0 ]; then
+		say "overlay matches the staged components"
+		exit "$rc"
+	fi
+	exit 3
+fi
+
+if [ "$changed" = 1 ] && systemctl is-active --quiet waydroid-container.service 2>/dev/null; then
+	if [ "$APPLY" = 1 ]; then
+		warn "restarting waydroid-container.service -- any running session ends here"
+		systemctl restart waydroid-container.service
+	else
+		warn ""
+		warn "The container is RUNNING, so none of the above is visible to Android yet:"
+		warn "the overlay directory is a mounted overlayfs lowerdir and files added to it"
+		warn "after the mount are ignored. Apply with:"
+		warn ""
+		warn "    systemctl restart waydroid-container.service"
+		warn ""
+		warn "That ends the running session -- on a kiosk host it drops back to the"
+		warn "greeter and someone has to be at the machine. Re-run with --apply to do"
+		warn "it from here instead."
+	fi
+elif [ "$changed" = 0 ]; then
+	say "overlay already matches the staged components"
+fi
+
+exit "$rc"
