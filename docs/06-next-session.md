@@ -593,7 +593,7 @@ A fourth set — the LPSS UARTs being `_OSI`-gated, `GPS0._STA` meaning the rece
 driver, a USB or WWAN-attached GPS, and the module merely being held in reset — was disproven while
 answering the GPS question; see [13-gps.md](13-gps.md).
 
-## Goals 3-6
+## Goals 3-7
 
 Goal 3 is **done** — see [docs/10](10-battery-fixed.md). Two things it deliberately left alone, both
 scoped in that doc: battery *temperature* (needs an NDK rebuild of the health HAL so the board hook
@@ -604,10 +604,23 @@ goal. Goal 3 also has one unverified behaviour: the battery sat at 100% on AC th
 
 Goal 4 is now **Wi-Fi** — scoped 2026-09-07, nothing built; see
 [28-wifi-feasibility.md](28-wifi-feasibility.md) and [29-wifi-plan.md](29-wifi-plan.md). Removable
-media moved to goal 5. It is untouched and remains the cheapest remaining item, but the owner
+media is now goal 6. It is untouched and remains the cheapest remaining item, but the owner
 deprioritised it below Wi-Fi.
 
-Goal 6 is **Android's per-app freezer**, added 2026-09-10; scoped, nothing built. See
+Goal 5 is **audio**, added 2026-09-11; scoped, nothing built. See
+[44-audio-alsa-backend.md](44-audio-alsa-backend.md). Phase 1 is a `--audio-backend
+{auto,alsa,pulse,none}` CLI option probed before Android boots; phase 2 is a DAW-grade HAL. Three
+things to know before touching it. Nobody is building a native PipeWire client for Waydroid and
+there is a good reason not to, but the HAL is **already an ALSA client** — it opens the alsa-lib
+name `"pulse"`, which is just a config alias — so redirecting it is small. Sharing a card with the
+host is not possible (one substream per PCM here, dmix cannot cross the container's IPC namespace,
+PipeWire opens `hw:` directly), so this means dedicating a device, exactly like the second radio in
+[34](34-wifi-second-radio.md). And an availability probe run as root will lie, because root opens
+`/dev/snd/*` regardless while Android's audioserver is uid 1041 — `/dev/video0` being
+world-accessible is the only reason the camera works today. Nothing about audio has ever been
+tested on this machine, including whether it works at all right now.
+
+Goal 7 is **Android's per-app freezer**, added 2026-09-10; scoped, nothing built. See
 [43-app-freezer.md](43-app-freezer.md). Two things to know before touching it. It is blocked by the
 container's read-only `/sys/fs/cgroup`, not by a missing flag, so `use_freezer=true` alone would
 change nothing. And logcat's `<pkg> is exempt from freezer` lines are exemption bookkeeping that

@@ -203,10 +203,39 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    mandatory discriminator before reprobing — it saved a wasted reprobe this session);
    `NmBackend::forget()` is implemented but nothing calls it, so forgetting a network in Android
    leaves its PSK in NetworkManager; and signal/state fidelity in Android's UI is unreviewed.
-5. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.
+5. **Audio — direct ALSA as a selectable backend, and eventually a DAW-grade HAL.**
+   **Added 2026-09-11 at the owner's request; scoped, nothing built.** Two phases.
+   **Phase 1 is a backend choice** — `--audio-backend {auto,alsa,pulse,none}`, probed before Android
+   boots, so `waydroid in cage` can own a dedicated interface while every other user keeps today's
+   path. That path is three shims deep: the HAL calls `snd_pcm_open(..., "pulse")`, alsa-lib
+   resolves that *name* from `/vendor/usr/share/alsa/alsa.conf` (defined inline at line 662 of
+   Waydroid's fork), the pulse plugin talks libpulse to the bind-mounted socket, and
+   `pipewire-pulse` terminates it. **Nobody is building a native PipeWire client** — not upstream,
+   not in a fork, and the reason is sound: `pipewire-pulse` already terminates the PA protocol
+   natively, and that protocol is version-independent where PipeWire's is not. But **the HAL is
+   already an ALSA client**, so pointing it at a real card is far smaller than a PipeWire port, and
+   all three hooks exist: `/dev/snd` is simply missing from `generate_nodes_lxc_config()`; the probe
+   belongs exactly where `make_prop()` already tests the host to set `waydroid.stub_sensors_hal`,
+   which runs on every container start before init boots; and the device name is one
+   `property_get` away in the HAL. **Sharing a card is not on the table** — every PCM on this
+   machine reports `subdevices_count: 1`, dmix cannot rendezvous across the container's own IPC
+   namespace, and PipeWire opens `hw:` directly — so this means *dedicating* a device, which is the
+   [second-radio answer](docs/34-wifi-second-radio.md) again. Beware that **a probe run as root will
+   lie**: root opens `/dev/snd/*` regardless, Android's audioserver is uid 1041 with no idmap, and
+   `/dev/video0` being world-accessible is the only reason the camera works today.
+   **Phase 2 is the DAW-grade HAL**, which is the real objective — the shipped one is hardcoded to
+   48 kHz **stereo** out with an 85 ms buffer, **16 kHz** capture, and no `create_mmap_buffer`, so
+   AAudio's low-latency path never engages. LXC adds nothing to the audio path — same kernel, same
+   ALSA, same interrupt timing — so the ceiling is those 1100 lines of C, not the architecture, and
+   `audio.primary.waydroid.so` is a vendor `.so` exactly like `libgbm_mesa_wrapper.so`, so the
+   NDK-plus-vendor-overlay route from [docs/08](docs/08-camera-fixed.md) applies with no AOSP tree.
+   **Local first, upstream if it works.** See
+   [docs/44-audio-alsa-backend.md](docs/44-audio-alsa-backend.md). Nothing about audio has been
+   tested on this machine at all — including whether it works today.
+6. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.
    Exposing the user's `/run/media/<username>` directory is probably sufficient. **Deprioritised
    below Wi-Fi on 2026-09-07** at the owner's request.
-6. **Android's per-app freezer** — make `CachedAppOptimizer`'s cgroup v2 freezer actually
+7. **Android's per-app freezer** — make `CachedAppOptimizer`'s cgroup v2 freezer actually
    work, so cached apps stop burning CPU while the machine is awake but idle. **Added 2026-09-10
    at the owner's request; scoped, nothing built.** Android does **not** use CRIU for this and
    never has — CRIU is ruled out here anyway, since `strings /usr/bin/criu | grep -c binder`
@@ -224,7 +253,7 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    cost anything before building any of it. See [docs/43-app-freezer.md](docs/43-app-freezer.md).
 
 **Screen brightness — DONE, and not on the list above.** Added at the owner's request on
-2026-09-09, between Wi-Fi Stage 5 and goal 5. Android's brightness slider now drives the real
+2026-09-09, between Wi-Fi Stage 5 and removable media. Android's brightness slider now drives the real
 panel backlight. The machine has **no ambient light sensor** — the ITE8350 declares only five
 sensor types and there is no `ACPI0008` and no ALS on either i2c bus — so *auto*-brightness can
 never work here and Android already knows it (`mAutoBrightnessAvailable=false`). Manual control
