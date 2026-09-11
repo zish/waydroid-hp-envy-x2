@@ -96,6 +96,46 @@ The pack delivered roughly **a quarter** of what the gauge promised. Under load 
 cutoff voltage while the gauge still reads in the high teens, which is why no threshold below ~20%
 can be relied on here.
 
+## 2026-09-10: the gauge re-estimated by 18 points on plug-in
+
+A second discharge, measured live, refines the section above. **The rate is accurate; the zero
+point is not.** Those are separate faults and only the second one matters.
+
+**The coulomb counting is sound.** The machine idled at a measured 3.4 W (panel dimmed) for 100
+minutes while the gauge fell from 81% to 59%:
+
+```
+energy actually consumed   3.4 W x 1.667 h           = 5.67 Wh
+energy the gauge claims    22% x 3282 mAh x ~7.7 V   = 5.56 Wh
+```
+
+Agreement within 2%. Over this range the gauge tracks real energy leaving the pack correctly, which
+is *not* what "delivered roughly a quarter of what it promised" above would lead you to expect. That
+finding was drawn from the final minutes of the 2026-09-09 discharge and applies to the tail, not to
+the curve as a whole.
+
+**The absolute reading is not sound, and plugging in proves it in one step.** At an indicated 59%,
+discharging at 450 mA, the charger was connected. Immediately:
+
+| | indicated | `charge_now` | `voltage_now` |
+|---|---|---|---|
+| unplugged | **59%** | 1929000 µAh | 7.504 V |
+| plugged in, seconds later | **41%** | 1439000 µAh | 7.982 V |
+
+**490 mAh and 18 percentage points vanished with no energy transferred.** The EC simply produced a
+different estimate once the load dropped and the terminal voltage recovered. The pre-plug voltage
+corroborates the lower figure: 7.504 V is 3.75 V/cell against the 4.28 V/cell seen at full, which on
+this chemistry is roughly 30-40% state of charge, not 59%.
+
+Note also that `charge_full` drifted from `3272000` to `3282000` within this single session — more
+of the same wandering that produced five separate UPower history files.
+
+**The working model, then:** the pack discharges linearly and reports it honestly, against a total
+capacity it does not have. It therefore reads high by a margin that grows as it empties, and it
+reaches true cell cutoff while still indicating something in the high teens — which is exactly the
+hard cut on 2026-09-09. Under load the indicated figure should be treated as an upper bound with
+roughly 15-20 points of overstatement, not as a measurement.
+
 ## Android's warning: present, configured, and almost certainly fired
 
 `dumpsys activity service com.android.systemui`, PowerUI section:
