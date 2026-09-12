@@ -1,7 +1,14 @@
 # Android's per-app freezer, and why it does nothing here
 
-**Status: scoped, nothing built.** Added to the goal list on 2026-09-10 at the owner's request.
-Everything below is verified on the host; none of it is a plan that has been tried.
+**Status: scoped; the freezer itself is still unbuilt, but one containment fix shipped on
+2026-09-12** — see *dex2oat contained, without cgroups*. Added to the goal list on 2026-09-10 at
+the owner's request. Everything here is verified on the host; where something is still hypothesis
+it says so.
+
+**Read the 2026-09-12 sections before acting on the 2026-09-10 ones.** They establish that there
+are two independent faults rather than one, that the second is not fixable by the mount change
+proposed below, that the battery verdict survives a deliberately hostile re-measurement, and that
+compaction — the other half of `CachedAppOptimizer` — is not blocked at all.
 
 ## What the feature is
 
@@ -55,6 +62,10 @@ The consequence is visible: `/sys/fs/cgroup/uid_0` does not exist, and no `uid_*
 all, because `libprocessgroup` was never able to create one. So flipping `use_freezer` alone would
 change nothing — the writes underneath it would fail.
 
+This is only half the story. The read-only v2 mount costs the freezer and process groups; a second,
+larger fault costs Android its entire scheduling-policy layer and is **not** fixed by widening this
+mount. See *there are two faults, and the mount is the smaller one*, 2026-09-12, below.
+
 Worth noting that [17-hybrid-sleep.md](17-hybrid-sleep.md) already quotes this exact config line,
 for the unrelated reason that `sys:ro` stops the container reading ACPI state. It is the same
 constraint biting a second subsystem.
@@ -64,6 +75,9 @@ constraint biting a second subsystem.
 1. **Delegate a writable cgroup subtree to the container** — `cgroup:rw` or `cgroup:mixed` in
    `lxc.mount.auto`, or an explicit delegated subtree. This is the substantive part and the risky
    one: it widens what the container can do to the host's cgroup hierarchy.
+   **Superseded twice by the 2026-09-12 findings.** It is not risky — the container is already
+   privileged with no idmap and `CAP_SYS_ADMIN` — and it is not sufficient, because it buys back
+   only the freezer and process groups, not the scheduling layer.
 2. **Enable the feature** — `device_config put activity_manager_native_boot use_freezer true`.
 3. **Get `libprocessgroup` to build the `uid_N/pid_M` hierarchy** it expects. Whether it does this
    correctly against a delegated subtree in a container is **unknown and untested**.
@@ -257,14 +271,351 @@ completely silent — [35](35-wifi-stage5.md), [40](40-binder-nice.md), [42](42-
 Ask the kernel directly with `selinux.selinux_check_access()` before building anything; do not wait
 for an audit record that will never be written.
 
+## 2026-09-12: there are two faults, and the mount is the smaller one
+
+Everything above treats the read-only `/sys/fs/cgroup` as *the* problem. It is one of two, and it
+is the less consequential one. Both are stock upstream Waydroid; neither is anything this host did.
+
+### Fault B: the v1 hierarchies never mounted, and never can
+
+`/system/etc/cgroups.json` asks for four cgroup **v1** controllers — `blkio` at `/dev/blkio`,
+`cpu` at `/dev/cpuctl`, `cpuset` at `/dev/cpuset`, `memory` at `/dev/memcg`. All four directories
+exist inside the container, complete with the `background`, `foreground` and `top-app`
+subdirectories `init.rc` creates, and every one of them is an **empty tmpfs stub**: no `tasks`
+file, no `cgroup.procs`, no controller file anywhere beneath them. `/dev/stune` is there too,
+equally empty, and is not even in `cgroups.json`. `/proc/mounts` inside the container has exactly
+one cgroup line — the read-only v2 mount.
+
+The reason is on the host, not in the container:
+
+```
+$ cat /proc/cgroups
+#subsys_name    hierarchy   num_cgroups   enabled
+cpu             0           86            1
+cpuacct         0           86            1
+blkio           0           86            1
+memory          0           86            1
+cpuset …        0           86            1        (all fourteen identical)
+```
+
+`hierarchy` is **0** for every controller. Fedora 44 is cgroup v2 unified, as every distro has
+been since roughly 2021, so the v1 controllers are bound to v2 and a v1 mount of them can never
+succeed. **Widening `lxc.mount.auto` does not fix this**, and no amount of delegation will.
+
+This is not exactly a Waydroid bug. It is Waydroid shipping an AOSP image whose cgroup
+configuration assumes a v1 host, onto hosts that stopped being v1 years ago. Fixing it upstream
+means shipping a v2 `cgroups.json` and `task_profiles.json`. Both files live in `/system/etc`, so
+locally they are overlay-able with no image change — the route every other fix here took.
+
+### What Fault B costs, counted
+
+`task_profiles.json` makes 45 controller references. **44 name a controller with no mount** —
+`cpuset` 19, `cpu` 12, `memory` 9, `blkio` 4 — and the lone survivor is the single `freezer`
+reference, which lands on the read-only v2 mount. Roughly sixty profile names are therefore
+no-ops, among them `HighPerformance`, `UClampLatencySensitive`, `ProcessCapacityHigh`,
+`SFMainPolicy`, `VMCompilationPerformance` and `LowIoPriority`.
+
+The result is visible per process: `system_server`, SystemUI and a cached browser all read `0::/`,
+with no differentiation whatever between the framework and a background app.
+
+### `nice` is not quietly covering for it
+
+The obvious hope is that `setpriority` still separates foreground from background — it is a
+syscall, it needs no cgroup, and `Process.setThreadPriority` still works. Measured, it is not
+covering anything. Thread-level `nice` distributions, sampled together:
+
+```
+org.mozilla.firefox   (cached,     adj 945):  51 threads @ 0,  8 @ -5,  4 @ 10,  3 @ -20
+com.linkedin.android  (cached,     adj 910):  86 threads @ 0,  4 @ -10, 14 @ 10,  2 @ -20
+com.android.settings  (foreground, adj   0):  26 threads @ 0,  5 @ -10,  2 @ 10,  2 @ -20
+```
+
+Cached and foreground are the same shape, and a *cached* app is holding `nice -20` threads. Those
+values are what each app set for itself; AMS's backgrounding contributes nothing, because
+`setProcessGroup` goes through task profiles and task profiles go through the cgroups that do not
+exist. Background apps get **zero** CPU deprioritisation here, not "most of it".
+
+### Stage 1 of the plan below is settled: the container is cgroup-namespaced
+
+The question the plan said must be answered before anything is changed now has an answer, and it
+is the favourable one:
+
+```
+host:       readlink /proc/self/ns/cgroup      -> cgroup:[4026531835]
+container:  readlink /proc/<pid>/ns/cgroup     -> cgroup:[4026532767]
+inside:     cat /proc/1/cgroup                 -> 0::/
+```
+
+The container has its own cgroup namespace and its `/sys/fs/cgroup` root *is*
+`lxc.payload.waydroid`, so `cgroup:mixed:force` would delegate that subtree and nothing else —
+the ordinary, safe v2 delegation pattern. `cgroup.controllers` on that cgroup already offers
+`cpuset cpu io memory hugetlb pids rdma misc dmem`.
+
+### And the security cost of delegating is about zero, because the container is already privileged
+
+"This widens what the container can do to the host's cgroup hierarchy", in **What would have to
+change** above, overstates it. `/var/lib/waydroid/lxc/waydroid/config` has **no `lxc.idmap`** and
+keeps a long capability set:
+
+```
+lxc.cap.keep = audit_control sys_nice wake_alarm setpcap setgid setuid sys_ptrace sys_admin
+               wake_alarm block_suspend sys_time net_admin net_raw net_bind_service kill
+               dac_override dac_read_search fsetid mknod syslog chown sys_resource fowner
+               ipc_lock sys_chroot
+```
+
+This is a privileged container running as real host root with `CAP_SYS_ADMIN`. A delegated cgroup
+subtree adds essentially nothing it could not already do. The thing actually holding the line is
+host SELinux — the container's processes are `container_runtime_t` — and that stays in place
+whatever the mount says.
+
+### Both faults are upstream defaults, verified
+
+```
+/usr/lib/waydroid/data/configs/config_base:10:lxc.mount.auto = cgroup:ro sys:ro proc
+/var/lib/waydroid/lxc/waydroid/config:10:     lxc.mount.auto = cgroup:ro sys:ro proc
+```
+
+Byte-identical: the read-only cgroup mount is upstream's shipped default, not a local edit. Every
+Waydroid user on a current distro has both faults.
+
+## 2026-09-12: the battery case re-measured, deliberately unfavourably
+
+The 2026-09-10 measurement was challenged on a fair point — a snapshot with a thin cached set
+would understate what the freezer is worth. It was re-run with a **fatter** one (Photos, Brave,
+Firefox and LinkedIn all cached), over 300 s, machine idle, load 0.08 → 0.27, nothing else
+touching it:
+
+| | |
+|---|---|
+| container total (`cpu.stat`, authoritative) | **4.32% of one core** |
+| freezer-eligible (`adj >= 900`) | **0.887% of one core** |
+
+Per process, the top of the table:
+
+| process | adj | % of one core |
+|---|---|---|
+| `system_server` | -800 | 1.18 |
+| `com.android.systemui` | -800 | 0.56 |
+| **`com.google.android.apps.photos`** | **915** | **0.44** |
+| `surfaceflinger` | -1000 | 0.41 |
+| `composer@2.1` | -1000 | 0.30 |
+| `gms.persistent` | 100 | 0.23 |
+| `com.linkedin.android` | 905 | 0.15 |
+
+Stacking the sample against the conclusion roughly **doubles** the eligible work — 0.887% against
+the 0.43% recorded on 2026-09-10 — which by this note's own 15 mW-per-1%-of-a-core calibration is
+**~13 mW rather than ~7 mW**. Against a measured 9.6 W that is 0.14%; against the 3.44 W
+dimmed-panel floor, 0.4%. **The verdict survives a hostile sample, which is a stronger result
+than the original.** The one honest argument in the table is `com.google.android.apps.photos`,
+cached at adj 915 and burning 0.44% of a core doing nothing anybody asked for — and on its own
+that is about 7 mW.
+
+Two by-products worth keeping:
+
+- **There is no `system_server` regression.** It measures 1.18% of one core, against the 1.07%
+  implied by the 2026-09-10 figures. An intermediate 60 s sample appeared to show 9.16% and was
+  wrong by exactly 10×: ticks are 10 ms, so over a window of *W* seconds one core is *W* × 100
+  ticks and the percentage is `ticks / W`. Anyone re-deriving these numbers should check that
+  divisor first.
+- **Wi-Fi Stage 5 costs nothing at idle.** Inside `system_server` the top threads are
+  `SensorService` (0.30% of a core), `android.ui` (0.26%) and the main thread (0.26%);
+  `WifiHandlerThread` is 13 ticks over 300 s, **0.04%**.
+
+## 2026-09-12: the real cost is performance, and it was caught in the act
+
+46 minutes after a reboot, on AC and idle — textbook conditions for Play Store's background
+dexopt job — the machine went to this, measured over 20 s:
+
+```
+system-wide:      91.6% busy across all 4 CPUs, 8.4% idle
+container total:  365% of one core  (3.65 of the 4 logical CPUs)
+CPU pressure:     some avg10 = 35.03%
+IO  pressure:     some avg10 =  9.73%,  full avg10 = 1.27%
+MemFree:          201 MB
+```
+
+with `com.android.vending:background` at 86.2% of a core at `nice=0`, `gms.persistent` at 16.5%,
+`system_server` at 13.1%, and a stream of short-lived `dex2oat32` processes accounting for the
+rest. dex2oat's own log line read `(threads: 4)`.
+
+The storm itself is correct Android — every device does this, and goal 3 is what made the trigger
+honest, since before [10-battery-fixed.md](10-battery-fixed.md) healthd faked "charging"
+unconditionally. What is wrong is that **nothing contained it**. On a stock device `dex2oat` lives
+in `/dev/cpuctl/dex2oat`, `vending:background` in the `background` cpuset, and the foreground app
+in `top-app` with a `uclamp.min` floor. Here all of them are `nice=0` in `0::/`, competing on
+equal terms with SurfaceFlinger.
+
+This is the axis where the missing cgroups demonstrably cost something. Battery: no, measured
+twice. Security: no, and restoring them would not cost any either. **Performance: yes, and this is
+what it looks like.**
+
+### uclamp would work here, which is unusual on x86
+
+Worth recording because it changes whether the v2 rewrite is worth attempting. `intel_pstate` is
+in **passive** mode with the **schedutil** governor, and `cpu.uclamp.min` / `cpu.uclamp.max` exist
+on the container's cgroup. On the usual x86 configuration (intel_pstate active with HWP) uclamp
+has no effect on frequency at all and the whole `UClampLatencySensitive` family would be pointless
+to restore. Here it is not. Likewise `io.weight` is enabled on the container cgroup and **bfq** is
+the scheduler on both `mmcblk0` and `sda`, and `/data` is btrfs on the LUKS device — a real SSD,
+not behind the `none`-scheduled loop devices that carry `system.img` and `vendor.img`. So the
+`/dev/blkio` half has a working v2 counterpart too.
+
+### The host side of the boundary is already writable, and needs no delegation
+
+```
+/sys/fs/cgroup/lxc.payload.waydroid/cpu.weight       100
+/sys/fs/cgroup/lxc.payload.waydroid/cpu.max          max 100000
+/sys/fs/cgroup/lxc.payload.waydroid/io.weight        default 100
+/sys/fs/cgroup/lxc.payload.waydroid/cpu.uclamp.max   max
+/sys/fs/cgroup/lxc.payload.waydroid/cpuset.cpus      (empty = all)
+```
+
+Whole-container granularity, host root, one write, instantly reversible, no container change and
+no restart. If the goal is ever "Waydroid must not make the host janky", it is one write away. It
+does nothing for prioritisation *inside* Android, which is exactly what delegation would buy. An
+A/B of `cpu.max` against a real dexopt storm was attempted on 2026-09-12 and lost its load —
+dexopt finished first. Still untested.
+
+## 2026-09-12: dex2oat contained, without cgroups — deployed
+
+The single worst offender above has a fix that bypasses the whole cgroup problem. `installd` reads
+six properties and passes them to dex2oat as `-j` and `--cpu-set`, verified against this image
+rather than from memory:
+
+```
+$ strings /system/bin/installd | grep -E 'dex2oat-(threads|cpu-set)'
+dalvik.vm.boot-dex2oat-cpu-set      dalvik.vm.boot-dex2oat-threads
+dalvik.vm.dex2oat-cpu-set           dalvik.vm.dex2oat-threads
+dalvik.vm.restore-dex2oat-cpu-set   dalvik.vm.restore-dex2oat-threads
+```
+
+**`--cpu-set` is a `sched_setaffinity()` call, not a cgroup.** That is the whole point: it is the
+one containment lever that still works on a host where Android's cgroup layer is inert. All six
+properties were unset, which is why the storm ran `threads: 4`.
+
+Deployed via `artifacts/dexopt/install.sh`:
+
+```
+dalvik.vm.dex2oat-threads=2
+dalvik.vm.dex2oat-cpu-set=0,2
+```
+
+`cpu0`+`cpu2` are the two threads of physical core 0 (`cpu1`+`cpu3` are core 1), so dex2oat gets
+one whole physical core and the UI keeps the other one intact. Pinning to `0,1` would instead take
+one thread from each core and slow everything down. `boot-` and `restore-` are deliberately left
+unset — boot dexopt runs before there is any UI to protect.
+
+These are not `ro.*` properties, so [../artifacts/build-prop/README.md](../artifacts/build-prop/README.md)'s
+first trap does not apply, and no `build.prop` in the image defines them. They go in
+`waydroid_base.prop`, which `make_prop()` copies verbatim into `waydroid.prop` and bind-mounts
+into the container. **No container restart is needed** — `installd` reads them per invocation
+rather than latching them at boot, so `install.sh` also applies them live with `setprop`.
+
+Verified end to end by forcing a recompile:
+
+```
+I dex2oat32: … --compilation-reason=cmdline … --cpu-set=0,2 -j2
+I dex2oat32: dex2oat took 2.731s (4.632s cpu) (threads: 2) …
+```
+
+**Durability trap, shared with the LXC config.** `make_base_props()` rewrites
+`waydroid_base.prop` and is called from exactly two places — `initializer.py:164` and
+`upgrader.py:58` — the same two that call `set_lxc_config()`. So this edit survives reboots and
+container restarts and is erased by `waydroid init -f` or `waydroid upgrade`, exactly like the
+`lxc.net.0.name = wlan0` rename from [34-wifi-second-radio.md](34-wifi-second-radio.md). There are
+now **two** files in `/var/lib/waydroid` carrying hand edits with that profile, which strengthens
+the case for the single idempotent `ExecStartPre` reconciler already proposed in step 3 below.
+
+## 2026-09-12: compaction is not blocked, and needs no kernel patch
+
+This note has always paired the freezer with compaction. Compaction turns out to be the half that
+is nearly free, and an earlier reading of it here was wrong.
+
+`/proc/<pid>/reclaim` **does not exist on this kernel**, and it never will: it is not upstream
+Linux and never was. It began as Minchan Kim's per-process reclaim patchset, was rejected upstream,
+and survives only as an `ANDROID:` out-of-tree patch in the Android common kernel trees. Patching
+it into Fedora's kernel would mean carrying that patch, rebuilding the kernel, and
+`rpm-ostree override replace`-ing it on an immutable host for every kernel update, with Secure Boot
+signing on top.
+
+**None of that is necessary, because upstream solved it differently and Android already uses the
+upstream answer.** `process_madvise(2)` — same author — was merged in Linux **5.10** with
+`MADV_PAGEOUT` / `MADV_COLD`, and AOSP's `CachedAppOptimizer` prefers it, keeping the procfs path
+only as a fallback for old kernels. Four things were checked here, all positive:
+
+| check | result |
+|---|---|
+| `libandroid_servers.so` strings | contains **both** `process_madvise` and `/proc/%d/reclaim` |
+| bionic `libc.so` | exports `process_madvise` |
+| kernel 7.1.13-200.fc44.x86_64 | `syscall(440, -1, …)` returns **EBADF**, not ENOSYS — present |
+| `CAP_SYS_NICE`, which the syscall requires | `lxc.cap.keep` includes `sys_nice`, and SELinux **allows** `container_runtime_t` `capability sys_nice` |
+
+That last row was the one worth checking rather than assuming, because
+[40-binder-nice.md](40-binder-nice.md) found `waydroid_t` **denied** exactly that capability with
+the denial `dontaudit`ed. `waydroid_t` is the *host daemon* domain; the container's own processes
+are `container_runtime_t`, and they are allowed it.
+
+So compaction appears to be **one `device_config` flag away** (`use_compaction` is `false`), needs
+**no cgroups**, and needs **no kernel patch** — `process_madvise` takes a pidfd, not a cgroup. It
+is also the half that would address the case below, which the freezer would not. Untested; this is
+the most promising unexplored lead in this note.
+
+## 2026-09-12: what leaving an app open actually costs — Firefox, measured
+
+Worth recording because it is the question users actually ask, and because the answer is not the
+one this note was written to investigate.
+
+Cached, `org.mozilla.firefox` burned **0 CPU ticks over 60 s** across all its processes. Gecko
+parks its own timers when backgrounded, so the freezer would be enforcing something Firefox
+already does voluntarily. What it holds is memory: **8 processes, 2000 MB resident**, spread
+across the adj ladder as Android retires them independently —
+
+```
+adj=200  443MB  org.mozilla.firefox          adj=940  128MB  :utility
+adj=200  265MB  :tab_…27                     adj=950  219MB  :gpu
+adj=900  352MB  :tab_…16                     adj=970  496MB  :tab_…36
+```
+
+Swap absorbs it rather than lmkd killing it: `/dev/zram0` is 7.7 GB at priority 100, with a 16 GB
+`/var/swapfile` behind it at priority -1. Idle pages get compressed into RAM, which is why
+`MemAvailable` stayed near 5 GB with 2 GB of Firefox resident.
+
+lmkd kills in adj order once free memory crosses `sys.lmk.minfree_levels`
+(`…,55296:900,80640:950`): `adj >= 950` at ~315 MB free, `adj >= 900` at ~216 MB free. **During
+the dexopt storm above, `MemFree` hit 201 MB** — under that second threshold — so Firefox's
+`:tab_…36`, `:gpu` and `:utility` would have been killed right then. Coming back is a tab reload
+from session store, not a crash.
+
+**The freezer would change none of this.** A cached browser's cost here is memory, and freezing a
+process does not reclaim a page. Compaction would — see above. zram is already doing much of that
+job, and arguably doing it better.
+
 ## Suggested order of work
 
+Revised 2026-09-12. The battery question is closed; what is left is a performance question and one
+cheap untested lead.
+
 1. ~~Measure what cached Android apps actually cost while idle. If it is negligible, stop here.~~
-   **Done 2026-09-10 — it is negligible.** ~7 mW out of a 9.6 W machine. See above.
-2. Test the host-side whole-container freeze, short then long, and characterise the thaw. Still
-   undone, and still the cheapest way to bound the idea — but the ceiling is now known to be
-   ~40 mW, so this is a curiosity rather than a lead. `bin/power-ab.sh --freeze` runs it as a
-   measured arm with an automatic thaw.
-3. ~~Only then decide whether per-app granularity justifies widening the cgroup mount.~~
-   **Decided 2026-09-10: not on battery grounds.** Build it for completeness of goal 6 if wanted,
-   with eyes open about the payoff.
+   **Done 2026-09-10, re-done against a hostile sample 2026-09-12 — it is negligible.** ~13 mW out
+   of a 9.6 W machine, having doubled the cached set on purpose to try to break the conclusion.
+2. ~~Contain background dexopt.~~ **Done 2026-09-12** — `artifacts/dexopt/`, two properties, no
+   cgroups, no restart, verified by forcing a recompile. This addressed the one case where the
+   missing cgroups measurably hurt.
+3. **Try `use_compaction`.** The cheapest unexplored thing in this note: one `device_config` flag,
+   no cgroups, no kernel patch, and the only mechanism here that would reduce what a left-open
+   browser costs. Everything it depends on has been verified present; only the flag is untested.
+4. **Demonstrate the jank before building the v2 rewrite.** Scroll something in Android while a
+   Play Store install or dexopt pass runs, now that dex2oat is contained, and see whether what is
+   left is actually bad. If it is, the project is rewriting `cgroups.json` and `task_profiles.json`
+   to the v2 layout (`cpu.weight`, `cpu.uclamp.min`, `cpuset.cpus`, `io.weight`) in the overlay —
+   worth attempting here specifically because schedutil and bfq mean uclamp and `io.weight` would
+   really work, which is not true of most x86 hosts.
+5. Test the host-side whole-container freeze, short then long, and characterise the thaw. Still
+   undone; ceiling known to be ~40 mW, so a curiosity rather than a lead. `bin/power-ab.sh --freeze`
+   runs it as a measured arm with an automatic thaw. The `cpu.max` A/B on the same cgroup is the
+   more useful experiment and is also still undone — it lost its load on 2026-09-12 when dexopt
+   finished first.
+6. ~~Only then decide whether per-app granularity justifies widening the cgroup mount.~~
+   **Decided 2026-09-10, unchanged 2026-09-12: not on battery grounds.** If it is built, build it
+   for responsiveness, and know that the mount change alone does not deliver that.
