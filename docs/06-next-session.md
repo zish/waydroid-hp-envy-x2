@@ -345,7 +345,6 @@ Goal 1 is complete for the stated purpose, but these were never exercised
   Awaiting a maintainer reply; see [docs/09](09-upstream-report.md)
 
 ## State left on bigtab01
-
 | Item | State |
 |---|---|
 | **`/usr/local/bin/waydroid-sync`**, **`waydroid-bt-restore`** | periodic sync-window scripts, mode `0755`. See [17](17-hybrid-sleep.md). Delete to revert |
@@ -402,6 +401,9 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | Toolbox container | `fedora-toolbox-44`, still never used. Safe to delete |
 | **GPIO pin 91 (`GP91_UART0_RXD`)** | left muxed as a GPIO input by [bin/gps-probe.py](../bin/gps-probe.py) — `pinctrl-lynxpoint` does not restore the native function on release. Harmless (UART0 is disabled in firmware anyway) and **a reboot restores it**. See [13](13-gps.md) |
 | GPIO pin 17 (`GP17`, GPS0 enable) | driven high during the probe, **restored to low**. Back as found |
+| **`/var/lib/waydroid/waydroid_base.prop`** | **two dex2oat properties added 2026-09-12** — `dalvik.vm.dex2oat-threads=2`, `dalvik.vm.dex2oat-cpu-set=0,2`, pinning background dexopt to one physical core so it stops saturating the machine. Stock file kept at `waydroid_base.prop.pre-dexopt`. Survives reboots and container restarts; **erased by `waydroid init -f` or `waydroid upgrade`** — re-run `artifacts/dexopt/install.sh`. See [43](43-app-freezer.md) |
+| `/usr/local/share/waydroid-dexopt/dexopt.prop` | payload for the above, mode `0644`. Staged by the same installer so it doubles as the RPM's `%install` step |
+| `use_compaction=true` (Android `device_config`) | **set, working, and ephemeral.** Enables `CachedAppOptimizer`'s compaction half. Verified to reclaim memory only when the flag is in effect *at container start*, and it is **lost on every container restart** — `device_config get` reads `null` afterwards. Nothing re-applies it yet; see `packaging/README.md`'s planned `ExecStartPost` one-shot |
 
 Nothing destructive was done. No packages layered onto the immutable OS. The vendor and system
 images were never modified — everything is overlay files.
@@ -620,12 +622,36 @@ PipeWire opens `hw:` directly), so this means dedicating a device, exactly like 
 world-accessible is the only reason the camera works today. Nothing about audio has ever been
 tested on this machine, including whether it works at all right now.
 
-Goal 7 is **Android's per-app freezer**, added 2026-09-10; scoped, nothing built. See
-[43-app-freezer.md](43-app-freezer.md). Two things to know before touching it. It is blocked by the
-container's read-only `/sys/fs/cgroup`, not by a missing flag, so `use_freezer=true` alone would
-change nothing. And logcat's `<pkg> is exempt from freezer` lines are exemption bookkeeping that
-runs with the freezer disabled — they look like proof it works and are not. Doc suggests measuring
-the idle cost first, and trying the host-side whole-container freeze before widening the mount.
+Goal 7 is **Android's per-app freezer**, added 2026-09-10. See
+[43-app-freezer.md](43-app-freezer.md), which was substantially rewritten on 2026-09-12. The
+freezer itself is still unbuilt and the battery case against it is now measured twice; two
+*adjacent* things were built instead, and both work.
+
+Four things to know before touching it.
+
+**There are two faults, not one.** The read-only `/sys/fs/cgroup` costs the freezer and process
+groups. Separately, the four cgroup **v1** controllers Android asks for — `/dev/cpuctl`,
+`/dev/cpuset`, `/dev/blkio`, `/dev/memcg` — never mounted and never can, because this host is
+cgroup v2 unified (`/proc/cgroups` shows hierarchy `0` for all fourteen). Those directories exist
+inside the container as empty tmpfs stubs. **Widening `lxc.mount.auto` does not fix that one**, and
+it is the larger of the two: 44 of the 45 controller references in `task_profiles.json` are dead,
+so Android's entire scheduling-policy layer is inert and `nice` is not covering for it.
+
+**The cost is performance, not battery.** Freezer-eligible work re-measured against a deliberately
+fatter cached set is 0.887% of a core, about 13 mW of a 9.6 W machine. What it does cost showed up
+on its own: Play Store's post-reboot dexopt took the machine to 91.6% busy with CPU pressure at
+`some avg10=35%`, uncontained, because the `dex2oat` cgroup does not exist. That is fixed —
+`artifacts/dexopt/` pins dex2oat with `--cpu-set`, which is `sched_setaffinity` and needs no cgroup.
+
+**Compaction — the other half of `CachedAppOptimizer` — works, and is worth more than the freezer.**
+It needs no cgroups and no kernel patch: `/proc/<pid>/reclaim` is an out-of-tree Android patch this
+kernel will never have, but upstream's `process_madvise(2)` is present and is what Android 13
+actually uses. `use_compaction=true` must be in effect **when the container starts** and **does not
+survive a restart**, so it needs re-applying every time. `bin/waydroid-reclaim.py` does the same job
+from the host with none of those conditions and recovered **~558 MB of RAM** in one measured run.
+
+**And the old warning still stands:** logcat's `<pkg> is exempt from freezer` lines are exemption
+bookkeeping that runs with the freezer disabled — they look like proof it works and are not.
 
 ## Loose ends unrelated to the goals
 

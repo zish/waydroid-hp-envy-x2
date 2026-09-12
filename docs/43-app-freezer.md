@@ -556,10 +556,11 @@ That last row was the one worth checking rather than assuming, because
 the denial `dontaudit`ed. `waydroid_t` is the *host daemon* domain; the container's own processes
 are `container_runtime_t`, and they are allowed it.
 
-So compaction appears to be **one `device_config` flag away** (`use_compaction` is `false`), needs
-**no cgroups**, and needs **no kernel patch** — `process_madvise` takes a pidfd, not a cgroup. It
-is also the half that would address the case below, which the freezer would not. Untested; this is
-the most promising unexplored lead in this note.
+So compaction needs **no cgroups** and **no kernel patch** — `process_madvise` takes a pidfd, not a
+cgroup — and it is the half that addresses the case below, which the freezer would not.
+**Tested on 2026-09-12: it works, but it is not merely one flag away.** The flag must be in effect
+when the container *starts*, and it does not survive a restart, so it has to be re-applied every
+time. See *compaction tested* below.
 
 ## 2026-09-12: what leaving an app open actually costs — Firefox, measured
 
@@ -591,6 +592,90 @@ from session store, not a crash.
 process does not reclaim a page. Compaction would — see above. zram is already doing much of that
 job, and arguably doing it better.
 
+## 2026-09-12, later: compaction tested — it works, with two conditions
+
+`use_compaction` was enabled and the result measured. It works. Two things about *how* it works
+matter more than the flag itself.
+
+### A live flag flip does nothing; the container restart is the discriminator
+
+Setting `device_config put activity_manager use_compaction true` on a running container reads back
+as `true` and a `CachedAppOptimi` thread appears — but nothing is ever compacted:
+
+```
+Requested:  0 some, 4 full          Performed: 0 some, 0 full
+NoPid: 0   OomAdj: 0   Time: 0   RSS: 0   Misc: 0   Unaccounted: 0
+```
+
+Requests are counted, *nothing* rejects them, and the work simply never happens, with no logcat at
+all. `system_server` is not the obstacle — it holds `CAP_SYS_NICE` and `CAP_SYS_PTRACE` in its
+effective set (`CapEff: 0000001002887420`), which was worth checking rather than assuming, given
+[40-binder-nice.md](40-binder-nice.md).
+
+After `systemctl restart waydroid-container.service`, the same request performs:
+
+```
+org.mozilla.firefox (adj 935)
+BEFORE  RSS=303 MB  swap= 0 MB   zram=17 MB
+AFTER   RSS=245 MB  swap=56 MB   zram=33 MB     -58 MB RSS for +16 MB zram
+Performed: 1 -> 2,  Throttled: 37 (unchanged — nothing rejected it)
+```
+
+So the flag has to be in effect **when the container starts**, not merely set afterwards. The
+restart drops the kiosk session to the SDDM greeter and needs someone at the machine.
+
+### The flag does not survive the restart, and that is the packaging consequence
+
+After the restart `device_config get activity_manager use_compaction` returns **`null`** and
+`settings list config` has no compaction entry at all — the value written beforehand is simply
+gone. This is therefore not a set-once change. It must be re-applied on **every** container start,
+and because it needs `system_server` running it cannot be an `ExecStartPre` alongside the overlay
+and the props: it is an `ExecStartPost` one-shot. It is the only thing in this project that has to
+be applied *after* the container comes up rather than before.
+
+### `Misc Throttled` is the disabled-flag skip
+
+Worth recording because the counter name gives no clue. On the clean boot, before the flag was
+re-applied: `Requested: 38, Performed: 1, Throttled: 37`, of which **`Misc Throttled: 36`** and
+`Time Throttled: 1`. Once the flag was set, further requests performed and the Misc count stopped
+rising. `Misc` here means "compaction is disabled", not "something went wrong".
+
+## 2026-09-12: `bin/waydroid-reclaim.py`, the host-side alternative, measured
+
+AMS compaction works but is deliberately conservative — it throttles on time, on RSS delta and on
+oom_adj, which is right for a phone on battery and leaves a great deal on the table on a machine
+with 8 GB and a 7.7 GB zram device. `bin/waydroid-reclaim.py` does the same thing from the host, on
+demand, with no dependency on the flag, the restart, AMS plumbing, cgroups or any image change —
+the same shape as `waydroid-sensord` and `waydroid-wifid`.
+
+It walks the container's own `cgroup.procs`, filters by `oom_score_adj` (default `>= 900`, Android's
+CACHED_APP floor and the same threshold `compact_throttle_min_oom_adj` uses), and calls
+`process_madvise(MADV_PAGEOUT)` over each process's private writable anonymous mappings. Stdlib
+only, for the same reason as `bin/v4l2-*.py`.
+
+Measured across 61 cached processes holding 9196 MB of RSS:
+
+```
+reclaimed 736 MB of RSS for 178 MB of zram (4.1:1) -- net ~558 MB of RAM
+```
+
+corroborated independently by `free -m` — `free` 191 → 729 MB, `available` 5060 → 5599 MB, `used`
+2791 → 2252 MB. Afterwards: **0 crashes, 0 ANRs**, and the container's process count went *up*
+(94 → 127) rather than down, so nothing was killed.
+
+Two honest qualifications:
+
+- **RSS double-counts shared pages.** The ART boot image is mapped into every app, so 9196 MB is
+  not 9 GB of unique memory, and the wins are lopsided: the large apps gave 50–150 MB each while
+  the sixty-odd small ones gave 3–4 MB, because most of a small app's RSS is that shared image.
+- **Nothing is freed outright.** Pages move to zram, so the honest figure is the pair and the
+  ratio, which is what the tool reports. They fault back in on next touch. `MADV_PAGEOUT` is
+  non-destructive; nothing is stopped and nothing is killed.
+
+Which to use is a real choice rather than a redundancy. AMS compaction is automatic, throttled and
+policy-driven, and needs the flag re-applied at every container start. The reclaimer is manual and
+unthrottled and answers "give me half a gigabyte back, now". Running both is coherent.
+
 ## Suggested order of work
 
 Revised 2026-09-12. The battery question is closed; what is left is a performance question and one
@@ -602,9 +687,10 @@ cheap untested lead.
 2. ~~Contain background dexopt.~~ **Done 2026-09-12** — `artifacts/dexopt/`, two properties, no
    cgroups, no restart, verified by forcing a recompile. This addressed the one case where the
    missing cgroups measurably hurt.
-3. **Try `use_compaction`.** The cheapest unexplored thing in this note: one `device_config` flag,
-   no cgroups, no kernel patch, and the only mechanism here that would reduce what a left-open
-   browser costs. Everything it depends on has been verified present; only the flag is untested.
+3. ~~Try `use_compaction`.~~ **Done 2026-09-12 — it works.** Not one flag, though: the flag must be
+   set *before* the container starts and does not survive a restart, so it needs an `ExecStartPost`
+   one-shot. `bin/waydroid-reclaim.py` is the host-side alternative that needs none of that and
+   recovered **~558 MB of RAM** in one run. Both are measured above.
 4. **Demonstrate the jank before building the v2 rewrite.** Scroll something in Android while a
    Play Store install or dexopt pass runs, now that dex2oat is contained, and see whether what is
    left is actually bad. If it is, the project is rewriting `cgroups.json` and `task_profiles.json`
