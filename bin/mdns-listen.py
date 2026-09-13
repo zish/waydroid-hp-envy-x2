@@ -14,9 +14,26 @@ onto waydroid0, avahi re-originates it on wlp1s0, a LAN device answers, avahi
 re-originates the answer back -- rather than just proving something is noisy.
 
   mdns-listen.py -i wlan0 -q _services._dns-sd._udp.local -q _ipp._tcp.local
+
+`--unicast` is the mode that matters for debugging *clients*, not the network.
+A query sent from port 5353 gets a multicast answer that everything on the
+segment sees.  A query sent from an ephemeral port is a "one-shot" / legacy
+unicast query (RFC 6762 s6.7), and the responder must answer **unicast back to
+that port** -- so the answer is invisible to anything watching the multicast
+group, including this script's default mode.  Android's own mDNS stack
+(`MdnsSocketClient`, behind `NsdManager`) and most bundled app stacks query this
+way, so testing only the multicast path can report a failure that is not real,
+or miss one that is.  `--unicast` sends from an ephemeral port with the QU bit
+set and watches both sockets, labelling which one each packet arrived on.
+
+Beware one trap in the default mode: avahi ignores queries arriving from its own
+address, so running this *on the host* against an interface the host's avahi
+owns (e.g. `-i waydroid0` from bigtab01) will never be answered, no matter how
+healthy the reflector is.  Run it inside the container's netns instead.
 """
 
 import argparse
+import select
 import socket
 import struct
 import sys
@@ -103,6 +120,28 @@ def parse(buf):
     return questions, records
 
 
+def open_socket(interface, ifindex, port, join):
+    """UDP socket on `interface`; joins the mDNS group when `join` is set."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
+                        interface.encode())
+    except PermissionError:
+        print("warning: SO_BINDTODEVICE needs root; other interfaces may leak in")
+    sock.bind(("", port))
+
+    # ip_mreqn: multiaddr, local addr, ifindex
+    mreq = struct.pack("4s4si", socket.inet_aton(MDNS_ADDR),
+                       socket.inet_aton("0.0.0.0"), ifindex)
+    if join:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, mreq)
+    # RFC 6762 wants 255 so receivers can verify the packet is link-local.
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+    return sock
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -112,6 +151,10 @@ def main():
                     help="send a PTR query for this name (repeatable)")
     ap.add_argument("-t", "--timeout", type=float, default=10.0,
                     help="seconds to listen (default 10)")
+    ap.add_argument("-u", "--unicast", action="store_true",
+                    help="send queries from an ephemeral port with the QU bit "
+                         "set, the way Android's stack does, and watch for the "
+                         "unicast reply as well as the multicast group")
     args = ap.parse_args()
 
     try:
@@ -119,27 +162,23 @@ def main():
     except OSError:
         sys.exit("no such interface: %s" % args.interface)
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
-                        args.interface.encode())
-    except PermissionError:
-        print("warning: SO_BINDTODEVICE needs root; other interfaces may leak in")
-    sock.bind(("", MDNS_PORT))
+    mcast = open_socket(args.interface, ifindex, MDNS_PORT, join=True)
+    socks = {mcast.fileno(): (mcast, "mcast")}
 
-    # ip_mreqn: multiaddr, local addr, ifindex
-    mreq = struct.pack("4s4si", socket.inet_aton(MDNS_ADDR),
-                       socket.inet_aton("0.0.0.0"), ifindex)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, mreq)
-    # RFC 6762 wants 255 so receivers can verify the packet is link-local.
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+    sender, qclass = mcast, 1
+    if args.unicast:
+        # Ephemeral port -> the responder must answer unicast to it.  The QU bit
+        # (top bit of QCLASS) asks for that explicitly.
+        sender = open_socket(args.interface, ifindex, 0, join=False)
+        qclass = 0x8001
+        socks[sender.fileno()] = (sender, "unicast")
+        print("querying from ephemeral port %d with the QU bit set"
+              % sender.getsockname()[1])
 
     for name in args.query:
         header = struct.pack("!HHHHHH", 0, 0, 1, 0, 0, 0)
-        pkt = header + encode_name(name) + struct.pack("!HH", 12, 1)
-        sock.sendto(pkt, (MDNS_ADDR, MDNS_PORT))
+        pkt = header + encode_name(name) + struct.pack("!HH", 12, qclass)
+        sender.sendto(pkt, (MDNS_ADDR, MDNS_PORT))
         print("-> query %s PTR on %s" % (name, args.interface))
 
     print("listening on %s for %.0fs ...\n" % (args.interface, args.timeout))
@@ -149,22 +188,21 @@ def main():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        sock.settimeout(remaining)
-        try:
+        ready, _, _ = select.select(list(socks), [], [], remaining)
+        for fd in ready:
+            sock, label = socks[fd]
             data, addr = sock.recvfrom(9000)
-        except socket.timeout:
-            break
-        parsed = parse(data)
-        if not parsed:
-            continue
-        questions, records = parsed
-        seen += 1
-        print("from %s:%d" % addr)
-        for name, rtype in questions:
-            print("    ?  %-6s %s" % (rtype, name))
-        for name, rtype, detail in records:
-            print("    .  %-6s %-52s %s" % (rtype, name, detail))
-        print()
+            parsed = parse(data)
+            if not parsed:
+                continue
+            questions, records = parsed
+            seen += 1
+            print("[%s] from %s:%d" % (label, addr[0], addr[1]))
+            for name, rtype in questions:
+                print("    ?  %-6s %s" % (rtype, name))
+            for name, rtype, detail in records:
+                print("    .  %-6s %-52s %s" % (rtype, name, detail))
+            print()
 
     print("%d packet(s) in %.0fs" % (seen, args.timeout))
 

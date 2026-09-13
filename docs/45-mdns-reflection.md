@@ -1,9 +1,11 @@
 # mDNS reflection into the Waydroid container
 
-**Status: working and verified at the network layer on 2026-09-11.** The host's LAN mDNS
-services now arrive inside the container, and the container can reach them. One
-application-level check (Android's built-in print service) is **not** verified and is blocked
-on a UI problem unrelated to mDNS -- see [What is still unverified](#what-is-still-unverified).
+**Status: done, and verified end to end on 2026-09-11 -- a test page was printed.** The host's
+LAN mDNS services arrive inside the container, Android discovers the Canon, and a real print
+job reaches paper. Getting there needed **two** changes, not one: the avahi reflector below,
+and a firewalld rich rule without which any client that sends one-shot mDNS queries -- the
+Mopria Print Service among them -- discovers nothing. See
+[Two print services, two query modes](#two-print-services-two-query-modes-and-only-one-works).
 
 The question was: can mDNS broadcasts received on host interfaces be forwarded to the
 container, and could that even work for discovery given the container is not on the same
@@ -154,8 +156,135 @@ IPP connect OK: ('192.168.240.112', 42554) -> ('10.42.0.1', 631)
 So **container -> LAN discovery and connection both work end to end**. That is the direction
 that matters for printers, CUPS, Chromecast, DLNA, Home Assistant, Jellyfin.
 
-(Incidentally `vidiot01.local` resolves to `10.42.0.1`, the default gateway -- the print server
-is the router, which makes it the most reachable address it could possibly have had.)
+### The address Android shows is the CUPS server, not the printer
+
+Worth stating plainly, because it looks wrong at first glance: Android reports the Canon's
+address as **`10.42.0.1`**, which is the default gateway. That is correct.
+
+Nothing here is the printer advertising itself. The service instance is
+`Canon-MF642C-643C-644C-UFR-II @ vidiot01` -- a **CUPS queue shared from the host `vidiot01`**,
+whose SRV record targets `vidiot01.local:631` and whose A record is `10.42.0.1`. `vidiot01`
+happens to also be the router, so the print server has the most reachable address on the LAN
+that it could possibly have had. Confirmed from the host:
+
+```
+$ avahi-browse -rtp _ipp._tcp | grep -i canon
+=;wlp1s0;IPv4;Canon-MF642C-643C-644C-UFR-II\032\064\032vidiot01;_ipp._tcp;local;\
+    vidiot01.local;10.42.0.1;631;... "rp=printers/Canon-MF642C-643C-644C-UFR-II" \
+    "ty=Canon MF642C/643C/644C UFR II" "mopria-certified=1.3" "URF=V1.4,CP1,W8,PQ4,..."
+
+$ ip route get 10.42.0.1
+10.42.0.1 dev wlp1s0 src 10.42.0.137
+
+$ curl -s http://10.42.0.1:631/printers/ | grep -o 'Canon[A-Za-z0-9_-]*'
+Canon-MF642C-643C-644C-UFR-II
+```
+
+The printer's own IP never enters the picture -- Android talks IPP to CUPS, and CUPS talks to
+the printer. The `mopria-certified=1.3` and `URF=` keys in that TXT record are the ones
+`com.android.bips` needs, so the queue is the IPP Everywhere kind the built-in print service
+can drive without a vendor plugin.
+
+## Two print services, two query modes, and only one works
+
+**`com.android.bips` sees the Canon; the Mopria Print Service searches forever.** The
+discriminator is not the print service at all -- it is *how each one asks*. Measured from
+inside the container's netns with `bin/mdns-listen.py`:
+
+| query source port | QU bit | Canon answer |
+|---|---|---|
+| 5353 (proper multicast query) | no | **arrives immediately, from `192.168.240.1:5353`** |
+| ephemeral (one-shot / legacy unicast) | yes | **nothing, on either socket** |
+
+Mopria asks the second way. The container emits `_ipp`+`_ipps` PTR bursts every few seconds
+from a *fresh* ephemeral port each time (46273, 60172, 51728, 36397, 43010, ...), and logcat
+attributes them:
+
+```
+ActivityManager: Start proc 45197:org.mopria.printplugin/u0a205 for service
+                 {org.mopria.printplugin/org.mopria.printplugin.MopriaPrintService}
+```
+
+So Mopria is installed, bound and genuinely searching; its multicast leaves the container
+fine. **No `MulticastLock` and no vendor HAL are implicated** -- consistent with the baseline
+finding above. RFC 6762 s6.7 says a query from a source port other than 5353 is a *one-shot*
+(legacy unicast) query and **must be answered unicast back to that port**. That reply never
+lands. `com.android.bips` goes through `NsdManager` and the platform mDNS stack, which queries
+from 5353 and takes the multicast answer, so it is unaffected.
+
+**In effect the reflector setup only served clients that query from port 5353.** That was ours,
+not a Mopria bug -- and it is now fixed.
+
+**Confirmed at the application layer: with the firewall rule in place, Mopria discovers the
+Canon and a test page printed successfully.** That is the first real print job through this
+path, so it also retires the older open question of whether discovery was merely cosmetic. The
+data plane works exactly as predicted -- Android makes an ordinary unicast IPP connection to
+`10.42.0.1:631`, out through the container's gateway and the host's masquerade.
+
+### Confirmed cause: firewalld drops the unicast reply
+
+`wlp1s0` is in firewalld's `public` zone, whose only relevant allowance is the `mdns` service
+-- destination UDP **5353**:
+
+```
+public (default, active)
+  interfaces: wlp1s0
+  services: dhcpv6-client mdns ssh
+  rich rules:
+```
+
+avahi reflects a legacy unicast query by re-originating it on the other segment **from its own
+ephemeral slot port**, which was observed directly (`10.42.0.137:57943` on `wlp1s0` carrying
+the container's `_ipp`/`_ipps` questions). `vidiot01` then answers unicast to that port. That
+packet has destination port 57943, matches no rule, and **matches no conntrack entry either** --
+the outbound tuple was `10.42.0.137:57943 -> 224.0.0.251:5353`, so a reply sourced from
+`10.42.0.1:5353` is not ESTABLISHED. It is dropped.
+
+**Proven by experiment.** Adding one runtime rich rule that accepts UDP by *source* port:
+
+```bash
+sudo firewall-cmd --zone=public \
+    --add-rich-rule='rule family="ipv4" source-port port="5353" protocol="udp" accept'
+```
+
+turns the same probe from silence into a complete answer -- and note the `[unicast]` label,
+which is the socket the reply arrived on:
+
+```
+[unicast] from 192.168.240.1:5353
+    ?  PTR    _ipp._tcp.local
+    .  PTR    _ipp._tcp.local    Canon-MF642C-643C-644C-UFR-II @ vidiot01._ipp._tcp.local
+    .  SRV    Canon-... @ vidiot01._ipp._tcp.local    vidiot01.local:631
+    .  A      vidiot01.local                          10.42.0.1
+```
+
+(The question echoed back inside the answer packet is the RFC 6762 s6.7 legacy-unicast reply
+format, not a stray query.)
+
+**The rule is now permanent**, in both runtime and `/etc/firewalld/zones/public.xml`, captured
+in [../artifacts/mdns/](../artifacts/mdns/) as `firewalld-public.xml` with the pre-change
+`firewalld-public.xml.orig` alongside. It was added with `--permanent` *after* the runtime rule
+was already live, deliberately avoiding `firewall-cmd --reload`: a reload flushes and rebuilds,
+and while `waydroid0`'s `trusted` assignment is permanent (checked -- so a reload would not
+strand the container), the cost of being wrong is a container restart, which drops the kiosk
+session to the SDDM greeter and needs a human at the machine.
+
+Understand what the rule costs. It accepts UDP from any LAN host willing to send **from** port
+5353 to **any** high port on this machine. That is a real, if small, widening of the host's
+exposure. It is accepted here because it is the only way to serve one-shot mDNS clients through
+a reflector -- avahi re-originates from an unpredictable ephemeral port, so there is no narrower
+destination-port rule to write.
+
+**`reflect-filters` is an alternative suspect and is considered unlikely.** The multicast query
+for `_ipp._tcp` is answered *with the filters active*, so that name passes the filter; for the
+filter to be the cause it would have to discriminate by query mode. Testing it by commenting
+the line out was attempted and not completed.
+
+### The meta-query is not reflected
+
+`_services._dns-sd._udp.local` is not in `reflect-filters`, so a client that enumerates service
+types before browsing them would find nothing. Nothing observed here does that -- both print
+services query `_ipp`/`_ipps` directly -- but it is a trap for the next client.
 
 ### The reverse direction is broken, by design
 
@@ -181,9 +310,16 @@ other side is listening.
 
 ## What is still unverified
 
-**Android's built-in print service never bound, so the application-level test did not
-complete.** This is an Android print-framework lifecycle matter, orthogonal to mDNS, and the
-network-layer evidence above does not depend on it.
+**Discovery is confirmed; a print job is not.** With a human at the console the Canon appears
+in Default Print Service as expected. Whether a page actually comes out -- rendering,
+`image/urf` conversion, the job going through CUPS on `vidiot01` -- has not been tried.
+
+The rest of this section records how the *headless* attempt failed, which is worth keeping
+because the obstacle was never mDNS and will block any future UI-dependent test.
+
+**Headlessly, Android's built-in print service never bound.** This is an Android
+print-framework lifecycle matter, orthogonal to mDNS, and the network-layer evidence above does
+not depend on it.
 
 - `com.android.bips`, `com.android.printspooler` and
   `com.google.android.printservice.recommendation` are all present in the image.
@@ -209,8 +345,9 @@ the brightness work in [37-brightness.md](37-brightness.md) and AGENTS.md: injec
 headless UI manipulation do not take on this machine, and a full check needs a human at the
 console.
 
-**To finish this test:** dismiss the shade on the device, then open Settings -> Connected
-devices -> Printing -> Default Print Service and confirm the Canon appears.
+**Doing it with a human at the console works**, which is how discovery was confirmed: dismiss
+the shade, open Settings -> Connected devices -> Connection preferences -> Printing -> Default
+Print Service, and the Canon is listed.
 
 ## Ruled out
 
@@ -253,7 +390,14 @@ this stays a documented manual change with the original preserved alongside.
 
 ## Open questions
 
-- Does `com.android.bips` actually discover and print to the Canon? Needs a human (above).
+- **Printing works via Mopria** (test page, 2026-09-11). `com.android.bips` discovers the Canon
+  but has not had a job put through it specifically. Near-certain to work, since it is the same
+  IPP-to-CUPS path, but not tested.
+- The rich rule is permanent but has **not been watched across a reboot** -- neither has the
+  avahi reflector (below). One reboot settles both.
+- The firewalld rule is captured in `artifacts/mdns/` but not packaged; it has the same
+  unresolved packaging question as `avahi-daemon.conf`, though a firewalld zone is the easier
+  of the two since it is a whole file firewalld already owns.
 - Is the shade-holds-focus state persistent or a one-off? Worth knowing generally -- it would
   block any future UI-dependent test, not just this one.
 - Does the reflector survive a reboot cleanly, with `waydroid0` appearing after avahi starts?
