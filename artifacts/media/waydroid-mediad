@@ -1,0 +1,515 @@
+#!/usr/bin/python3
+"""waydroid-mediad -- expose host removable media to Waydroid's Android.
+
+Goal 6. See docs/46-removable-media.md for why this shape and not another.
+
+The short version: Android apps reach external storage through a FUSE mount
+(/storage/emulated/0) whose LOWER directory is, on this host, literally
+~<user>/.local/share/waydroid/data/media/0. FUSE serves *content*, so it crosses
+the per-app mount namespaces that make an in-container bind useless. Measured
+2026-09-15: a host mount under that directory propagates into the container by
+itself -- /var/home is `shared`, Waydroid's LXC config sets no propagation
+options, and nothing has to be restarted.
+
+So the whole job is: mount removable devices on the host, under
+
+    <data>/media/0/Removable/<label>
+
+and they appear inside Android at /sdcard/Removable/<label>, browsable by
+DocumentsUI with no helper-app file I/O, no LXC config edit, no nsenter, no
+container restart and therefore no drop to the SDDM greeter.
+
+Deliberately NOT used:
+
+  * gvfs -- never automounts without a desktop shell (there is none under cage),
+    and its FUSE view has no allow_other so it cannot cross into the container.
+  * udisks2 as the mounting mechanism -- a systemd --user service is not in a
+    login session, so polkit falls through to auth_admin; and udisks2 filters
+    mount options, which we need control of. It is not needed as an event
+    source either: udev covers the same ground, including optical media-change.
+  * SELinux policy -- an earlier draft assumed `waydroid_t`. Android actually
+    runs as container_runtime_t, which reads dosfs_t fine. Measured, no module.
+
+Reconciliation, not event-diffing: any udev block event just wakes the loop,
+which then compares "what should be mounted" against "what is mounted" and
+fixes the difference. Idempotent, survives missed events, and makes startup
+identical to steady state.
+
+Stdlib only -- the host is an immutable Atomic image where every dependency
+costs a layered install and a reboot.
+"""
+
+import argparse
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+BASE_SUBDIR = "media/0/Removable"
+
+# How Android asks for a volume to be ejected.
+#
+# There is no channel from inside the container back out to the host -- the
+# daemon can push with `am broadcast`, but nothing pulls. So the helper app
+# drops a marker file in ITS OWN app-private directory, which on this host is
+# plain host filesystem underneath, and the daemon watches for it.
+#
+# Note this does NOT break the app's "no file I/O" property: the marker lives in
+# the app's own sandbox, never on the removable volume, and carries no data --
+# it is a control signal whose entire content is its filename.
+EJECT_SUBDIR = "data/lan.syshlt.removablemedia/files/eject"
+
+# Android's media_rw. There is no idmap, so the container's uids ARE the host's
+# raw uids and this is host uid/gid 1023 too. /data/media/0 is media_rw:media_rw
+# mode 0770, and matching it is what makes the mount readable through FUSE.
+MEDIA_RW = 1023
+
+# Filesystems we will never mount: either not data, or someone else's business.
+SKIP_FSTYPES = {
+    "crypto_LUKS", "LVM2_member", "linux_raid_member", "swap",
+    "zfs_member", "DM_snapshot_cow", "ddf_raid_member", "isw_raid_member",
+}
+
+# Per-filesystem mount options. The uid/gid pair is the point: it makes files
+# land as media_rw:media_rw so MediaProvider's FUSE daemon can read them.
+FS_OPTS = {
+    "vfat":    "uid=%d,gid=%d,dmask=0007,fmask=0007,utf8=1,flush" % (MEDIA_RW, MEDIA_RW),
+    "exfat":   "uid=%d,gid=%d,dmask=0007,fmask=0007" % (MEDIA_RW, MEDIA_RW),
+    "msdos":   "uid=%d,gid=%d,dmask=0007,fmask=0007" % (MEDIA_RW, MEDIA_RW),
+    "ntfs":    "uid=%d,gid=%d,dmask=0007,fmask=0007" % (MEDIA_RW, MEDIA_RW),
+    "ntfs3":   "uid=%d,gid=%d,dmask=0007,fmask=0007" % (MEDIA_RW, MEDIA_RW),
+    # iso9660/udf are read-only by nature; these are the optical/isohybrid cases.
+    "iso9660": "ro,uid=%d,gid=%d,mode=0550,dmode=0550" % (MEDIA_RW, MEDIA_RW),
+    "udf":     "ro,uid=%d,gid=%d,umask=0027" % (MEDIA_RW, MEDIA_RW),
+}
+
+
+def log(msg):
+    sys.stdout.write("%s\n" % msg)
+    sys.stdout.flush()
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def safe_name(dev):
+    """A stable, filesystem-safe directory name for a device.
+
+    This name is what the user sees in Android's file manager, so an unlabelled
+    card should not read as "4CFC-8D0". Prefer the volume label; otherwise name
+    it by what it physically is, disambiguated by a short UUID only when there
+    is a UUID to use. Collisions are resolved by the caller, because two
+    unlabelled sticks are an ordinary thing to have.
+    """
+    label = dev.get("label")
+    if label:
+        cleaned = re.sub(r"[^A-Za-z0-9._+-]", "_", label).strip("._")
+        if cleaned and cleaned not in (".", ".."):
+            return cleaned[:48]
+
+    name = dev.get("name") or os.path.basename(dev["path"])
+    if dev.get("type") == "rom" or name.startswith("sr"):
+        kind = "Disc"
+    elif dev.get("tran") == "mmc" or name.startswith("mmcblk"):
+        kind = "SD_Card"
+    elif dev.get("tran") == "usb":
+        kind = "USB_Drive"
+    else:
+        kind = "Volume"
+    uuid = re.sub(r"[^A-Za-z0-9]", "", dev.get("uuid") or "")[:6]
+    return "%s_%s" % (kind, uuid) if uuid else kind
+
+
+def lsblk():
+    """Every block device, flattened, with parent transport inherited."""
+    cols = "NAME,PATH,TYPE,TRAN,FSTYPE,LABEL,UUID,MOUNTPOINT,RM,PKNAME,SIZE"
+    proc = run(["lsblk", "-J", "-b", "-o", cols])
+    if proc.returncode != 0:
+        log("lsblk failed: %s" % proc.stderr.strip())
+        return []
+    out = []
+
+    def walk(nodes, parent_tran):
+        for node in nodes:
+            tran = node.get("tran") or parent_tran
+            node["tran"] = tran
+            out.append(node)
+            walk(node.get("children") or [], tran)
+
+    walk(json.loads(proc.stdout).get("blockdevices", []), None)
+    return out
+
+
+def protected_names(devices, base_real):
+    """Every device we must never touch, by kernel name.
+
+    Derived from lsblk rather than from `findmnt /`: this host is rpm-ostree, so
+    the source of / is "overlay" and not a block device at all. An earlier cut
+    asked findmnt, got None, and silently ran with NO system-disk guard -- the
+    internal disk was spared only by the transport allowlist below. This asks a
+    question that always has an answer: if anything on a disk is mounted, the
+    whole disk and all of its children are off limits.
+
+    Mounts we made ourselves do not count, or reconcile() would unmount its own
+    work on the next pass.
+    """
+    by_name = {d.get("name"): d for d in devices}
+    protected = set()
+    for dev in devices:
+        mountpoint = dev.get("mountpoint")
+        if not mountpoint or is_ours(mountpoint, base_real):
+            continue
+        cur = dev
+        while cur is not None:
+            protected.add(cur.get("name"))
+            parent = cur.get("pkname")
+            cur = by_name.get(parent) if parent else None
+    return protected
+
+
+def is_ours(mountpoint, base_real):
+    """Is this mount one of ours?
+
+    realpath matters: /home is a symlink to /var/home on an Atomic host, so
+    lsblk reports /var/home/... while the configured base says /home/... . A
+    plain string compare misses every one of our own mounts.
+    """
+    if not mountpoint:
+        return False
+    resolved = os.path.realpath(mountpoint)
+    return resolved == base_real or resolved.startswith(base_real + os.sep)
+
+
+def candidates(devices, protected, base_real):
+    """Removable filesystems we are willing to mount.
+
+    Strict allowlist rather than a denylist. Getting this wrong means mounting
+    the host's system disk into Android, so it errs toward refusing.
+    """
+    found = []
+    for dev in devices:
+        name = dev.get("name") or ""
+        fstype = dev.get("fstype")
+        if dev.get("type") not in ("disk", "part", "rom"):
+            continue
+        if not fstype or fstype in SKIP_FSTYPES:
+            continue
+        if name in protected or (dev.get("pkname") or "") in protected:
+            continue
+        mountpoint = dev.get("mountpoint")
+        if mountpoint and not is_ours(mountpoint, base_real):
+            continue                       # somebody else got there first
+        is_usb = dev.get("tran") == "usb"
+        is_mmc = dev.get("tran") == "mmc" or name.startswith("mmcblk")
+        is_optical = dev.get("type") == "rom" or name.startswith("sr")
+        if not (is_usb or is_mmc or is_optical):
+            continue
+        found.append(dev)
+
+    # An isohybrid image carries a filesystem on the WHOLE DISK and repeats it in
+    # a partition -- /dev/sdb is iso9660 and so is /dev/sdb1. Mounting the disk
+    # makes its partitions unopenable, which showed up as two "Can't open
+    # blockdev" failures per insertion. When the disk itself is mountable it is
+    # the one to use, so drop its children.
+    whole = {d.get("name") for d in found if d.get("type") in ("disk", "rom")}
+    return [d for d in found if (d.get("pkname") or "") not in whole]
+
+
+class Mounter:
+    def __init__(self, base, read_only, notify):
+        self.base = base
+        # /home is a symlink to /var/home here, and lsblk reports the resolved
+        # path -- so every "is this mount ours?" test has to use realpath.
+        self.base_real = os.path.realpath(base)
+        self.read_only = read_only
+        self.notify = notify
+        self.mounted = {}          # device path -> mount point
+        self.ejected = set()       # device paths ejected but still plugged in
+        # reconcile() runs on the udev thread, eject requests on another.
+        self.lock = threading.RLock()
+
+    def mount_options(self, fstype):
+        opts = FS_OPTS.get(fstype)
+        if opts is None:
+            # ext4/btrfs/xfs and friends carry real on-disk ownership and have
+            # no uid= option, so Android would see whatever arbitrary uids the
+            # volume was written with. Read-only is the honest default there,
+            # and for anything we do not recognise at all: mounting a stranger
+            # writable as the wrong uid is worse than not writing to it.
+            opts = "ro"
+        if self.read_only and "ro" not in opts.split(","):
+            opts = "ro," + opts
+        return opts
+
+    def target_for(self, dev, taken):
+        name = safe_name(dev)
+        target = os.path.join(self.base, name)
+        suffix = 2
+        while target in taken:
+            target = os.path.join(self.base, "%s_%d" % (name, suffix))
+            suffix += 1
+        return target
+
+    def mount(self, dev, target):
+        fstype = dev["fstype"]
+        opts = self.mount_options(fstype)
+        os.makedirs(target, exist_ok=True)
+        try:
+            os.chown(target, MEDIA_RW, MEDIA_RW)
+        except OSError:
+            pass
+        proc = run(["mount", "-t", fstype, "-o", opts, dev["path"], target])
+        if proc.returncode != 0:
+            log("mount FAILED %s (%s) -> %s: %s"
+                % (dev["path"], fstype, target, proc.stderr.strip()))
+            try:
+                os.rmdir(target)
+            except OSError:
+                pass
+            return False
+        log("mounted %s (%s, %s) -> %s" % (dev["path"], fstype, opts, target))
+        self.mounted[dev["path"]] = target
+        self.notify("mounted", target, dev)
+        return True
+
+    def unmount(self, devpath, target):
+        proc = run(["umount", target])
+        if proc.returncode != 0:
+            run(["umount", "-l", target])
+            log("lazy-unmounted %s (busy): %s" % (target, proc.stderr.strip()))
+        else:
+            log("unmounted %s" % target)
+        try:
+            os.rmdir(target)
+        except OSError:
+            pass
+        self.mounted.pop(devpath, None)
+        self.notify("unmounted", target, {})
+
+    def adopt(self):
+        """Re-claim mounts a previous run of ourselves left behind.
+
+        Without this, a restart (Restart=on-failure, or a --once test run
+        followed by the service) would see those devices as already mounted,
+        skip them as somebody else's business, and then never unmount them on
+        stop. Anything mounted under our own base directory is ours.
+        """
+        if not os.path.isdir(self.base):
+            return
+        for entry in sorted(os.listdir(self.base)):
+            target = os.path.join(self.base, entry)
+            if not os.path.ismount(target):
+                continue
+            proc = run(["findmnt", "-n", "-o", "SOURCE", "--target", target])
+            source = (proc.stdout or "").strip().splitlines()
+            if source and source[0].startswith("/dev/"):
+                self.mounted[source[0].strip()] = target
+                log("adopted existing mount %s -> %s" % (source[0].strip(), target))
+
+    def eject(self, label):
+        """Unmount one volume by its directory name, at Android's request."""
+        with self.lock:
+            for devpath, target in list(self.mounted.items()):
+                if os.path.basename(target) == label:
+                    log("eject requested from Android: %s" % label)
+                    self.unmount(devpath, target)
+                    # Without this the next udev event -- or the next reconcile
+                    # for any reason -- would see a still-plugged-in device with
+                    # no mount and helpfully mount it straight back. An eject
+                    # has to stick until the device is physically removed.
+                    self.ejected.add(devpath)
+                    return True
+        log("eject requested for unknown volume %r, ignoring" % label)
+        return False
+
+    def reconcile(self):
+        # lsblk outside the lock: it shells out, and an eject arriving while we
+        # are waiting on it should not block.
+        devices = lsblk()
+        protected = protected_names(devices, self.base_real)
+        wanted = {d["path"]: d
+                  for d in candidates(devices, protected, self.base_real)}
+
+        with self.lock:
+            for devpath, target in list(self.mounted.items()):
+                if devpath not in wanted or not os.path.ismount(target):
+                    self.unmount(devpath, target)
+
+            # Forget ejections for devices that have since been unplugged, so
+            # re-inserting the same stick mounts it again.
+            self.ejected &= set(wanted)
+
+            taken = set(self.mounted.values())
+            for devpath, dev in wanted.items():
+                if devpath in self.mounted or devpath in self.ejected:
+                    continue
+                target = self.target_for(dev, taken)
+                if self.mount(dev, target):
+                    taken.add(target)
+
+    def unmount_all(self):
+        for devpath, target in list(self.mounted.items()):
+            self.unmount(devpath, target)
+
+
+def watch_ejects(mounter, eject_dir, stopping, interval=1.0):
+    """Poll for eject markers dropped by the helper app.
+
+    Polling rather than inotify because the stdlib has no inotify binding and
+    this host is an immutable image where a dependency costs a reboot. One
+    scandir a second on a directory that is almost always empty is not a cost
+    worth optimising.
+
+    The directory is created by the app inside its own sandbox; the daemon only
+    ever reads and unlinks, and deliberately does not create it -- creating it
+    as root would leave it owned by the wrong uid and the app could not write.
+    """
+    while not stopping["now"]:
+        try:
+            names = os.listdir(eject_dir)
+        except OSError:
+            names = []                       # not created yet, or app removed
+        for name in names:
+            marker = os.path.join(eject_dir, name)
+            try:
+                os.unlink(marker)            # consume first: never loop on it
+            except OSError:
+                continue
+            mounter.eject(name)
+        time.sleep(interval)
+
+
+def find_data_dir(explicit):
+    if explicit:
+        return explicit
+    proc = run(["waydroid", "status"])
+    match = re.search(r"Session user:\s*(\S+?)\(", proc.stdout or "")
+    if match:
+        path = os.path.expanduser("~%s/.local/share/waydroid/data" % match.group(1))
+        if os.path.isdir(path):
+            return path
+    import glob
+    for path in sorted(glob.glob("/home/*/.local/share/waydroid/data")):
+        return path
+    return None
+
+
+def make_notifier(enabled):
+    """Tell Android a volume arrived or left.
+
+    A broadcast rather than a binder service: 'a directory appeared' does not
+    justify a HAL, and waydroid shell is already root inside the container.
+    Failure is never fatal -- the mount is useful whether or not anything in
+    Android is listening yet.
+    """
+    action = "lan.syshlt.bigtab01.media.VOLUME_%s"
+    package = "lan.syshlt.removablemedia"
+
+    def notify(event, target, dev):
+        if not enabled:
+            return
+        # Three flags, each load-bearing, each measured on this host:
+        #
+        #  -p <package>  Android 8 and later refuse to deliver IMPLICIT
+        #                broadcasts to manifest-declared receivers. Measured
+        #                here: the same broadcast without -p reports
+        #                "Broadcast completed: result=0" and fires nothing,
+        #                while with -p it fires. Targeting the package rather
+        #                than the component (-n) keeps dispatch action-based,
+        #                so renaming the receiver class cannot break this.
+        #  -f 32         FLAG_INCLUDE_STOPPED_PACKAGES. A freshly installed app
+        #                has never been launched and is in the "stopped" state,
+        #                and Android has withheld broadcasts from those since
+        #                3.1. Looks exactly like a broken receiver.
+        #  --user 0      there is only ever one Android user here.
+        args = ["waydroid", "shell", "--", "am", "broadcast",
+                "--user", "0", "-f", "32", "-p", package,
+                "-a", action % event.upper(),
+                "--es", "path", "/sdcard/Removable/" + os.path.basename(target),
+                "--es", "label", os.path.basename(target)]
+        if dev:
+            args += ["--es", "fstype", dev.get("fstype") or "",
+                     "--es", "device", dev.get("path") or ""]
+        proc = run(args)
+        if proc.returncode != 0:
+            log("broadcast %s failed (container down?): %s"
+                % (event, (proc.stderr or "").strip().splitlines()[:1]))
+
+    return notify
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--data-dir", help="Waydroid data dir (default: autodetect)")
+    parser.add_argument("--read-only", action="store_true",
+                        help="mount everything read-only")
+    parser.add_argument("--no-broadcast", action="store_true",
+                        help="do not tell Android about volumes")
+    parser.add_argument("--once", action="store_true",
+                        help="reconcile once and exit (for testing)")
+    args = parser.parse_args()
+
+    if os.geteuid() != 0:
+        sys.exit("waydroid-mediad must run as root (it mounts filesystems)")
+
+    data_dir = find_data_dir(args.data_dir)
+    if not data_dir:
+        sys.exit("could not find the Waydroid data directory; pass --data-dir")
+
+    base = os.path.join(data_dir, BASE_SUBDIR)
+    os.makedirs(base, exist_ok=True)
+    try:
+        os.chown(base, MEDIA_RW, MEDIA_RW)
+        os.chmod(base, 0o770)
+    except OSError as exc:
+        log("warning: could not chown %s: %s" % (base, exc))
+
+    mounter = Mounter(base, args.read_only, make_notifier(not args.no_broadcast))
+    log("waydroid-mediad: base=%s (real: %s) protected=%s"
+        % (base, mounter.base_real,
+           sorted(n for n in protected_names(lsblk(), mounter.base_real) if n)))
+
+    mounter.adopt()
+    mounter.reconcile()
+    if args.once:
+        return
+
+    stopping = {"now": False}
+
+    def stop(signum, frame):
+        stopping["now"] = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    eject_dir = os.path.join(data_dir, EJECT_SUBDIR)
+    log("watching for eject requests in %s" % eject_dir)
+    threading.Thread(target=watch_ejects, args=(mounter, eject_dir, stopping),
+                     daemon=True).start()
+
+    # udev events are only a wake-up; reconcile() is what decides anything.
+    monitor = subprocess.Popen(
+        ["stdbuf", "-oL", "udevadm", "monitor", "--udev", "--subsystem-match=block"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        for line in monitor.stdout:
+            if stopping["now"]:
+                break
+            if " add " in line or " remove " in line or " change " in line:
+                # Coalesce the burst a partitioned device emits, and give the
+                # kernel a moment to publish ID_FS_* before lsblk is asked.
+                time.sleep(0.6)
+                mounter.reconcile()
+    finally:
+        monitor.terminate()
+        log("waydroid-mediad: stopping, unmounting everything it mounted")
+        mounter.unmount_all()
+
+
+if __name__ == "__main__":
+    main()

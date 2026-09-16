@@ -33,7 +33,7 @@
 # of that is packaged here.
 
 Name:           waydroid-bigtab01
-Version:        1.0.0
+Version:        1.1.0
 Release:        1%{?dist}
 Summary:        Host-side Waydroid integration for the HP Envy x2 (bigtab01)
 
@@ -97,6 +97,29 @@ exit. See docs/25.
 %build
 # Nothing to build.
 
+%package        media
+Summary:        Expose host removable media to Waydroid's Android
+Requires:       waydroid
+Requires:       systemd
+Requires:       python3
+# lsblk, findmnt and mount. The daemon shells out to all three rather than
+# linking anything, so this is a real runtime dependency and not a build one.
+Requires:       util-linux
+
+%description    media
+Mounts USB sticks, memory cards and optical media into the Waydroid data
+directory, where they surface inside Android at /sdcard/Removable/<label> and are
+browsable in any file manager. No LXC configuration change, no container restart.
+
+Watches udev for block events and reconciles what should be mounted against what
+is, so startup, a missed event and a hotplug are one code path. Mounts are made
+directly rather than through udisks2, which cannot be reached without a login
+session and would not pass the uid/gid options Android needs.
+
+The Android-side helper that turns volume events into a notification is NOT in
+this package: it is an APK, installed with media-app/build.sh --install. Mounting
+works without it; only the notification and its Eject action need it.
+
 %install
 # UNITDIR is passed explicitly: the installers default to /etc/systemd/system, which
 # is right for a manual install on an immutable host but is not a path an RPM may
@@ -118,6 +141,9 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} SWAY_CONFD=%{_datadir}/sway/config.d \
 
 DESTDIR=%{buildroot} PREFIX=%{_prefix} SESSIONDIR=%{_datadir}/wayland-sessions \
     sh artifacts/cage/install.sh
+
+DESTDIR=%{buildroot} PREFIX=%{_prefix} UNITDIR=%{_unitdir} \
+    sh artifacts/media/install.sh
 
 # NOT PACKAGED: artifacts/power/install-sleep-unit.sh. It is DESTDIR-ready and would
 # slot in here unchanged, but it ships only the sleep and resume legs of the periodic
@@ -160,10 +186,23 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} SESSIONDIR=%{_datadir}/wayland-sessions \
 %{_bindir}/waydroid-cage-session
 %{_datadir}/wayland-sessions/waydroid-cage.desktop
 
+%files media
+%license LICENSE
+%doc docs/46-removable-media.md
+%{_bindir}/waydroid-mediad
+%{_unitdir}/waydroid-mediad.service
+# Nothing owns multi-user.target.wants under %{_unitdir} until a package drops a
+# symlink into it -- the same situation as the .wants directories above.
+%dir %{_unitdir}/multi-user.target.wants
+%{_unitdir}/multi-user.target.wants/waydroid-mediad.service
+
 # No %post/%postun scriptlets anywhere on purpose. Units are enabled by the packaged
 # .wants symlinks, and SELinux labels come from the rpm-ostree compose rather than
 # from a restorecon in a scriptlet -- both requirements of an ostree host. See docs/25.
 
 %changelog
+* Tue Sep 15 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
+- Add the media subpackage: waydroid-mediad and its unit (docs/46).
+
 * Mon Sep 07 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First spec. Payload verified by staging; never built.

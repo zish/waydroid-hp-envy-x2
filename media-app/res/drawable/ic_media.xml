@@ -1,0 +1,12 @@
+<!-- A plain USB/storage glyph. Notification small icons are rendered as a
+     silhouette from the alpha channel, so this is a solid single-colour path. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M15,7v4h1v2h-3V5h2l-3,-4l-3,4h2v8H8v-2h1V7H6v4h1v2c0,1.1 0.9,2 2,2h2v3H9v4h6v-4h-2v-3h2c1.1,0 2,-0.9 2,-2v-2h1V7H15z" />
+</vector>

@@ -232,9 +232,70 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    **Local first, upstream if it works.** See
    [docs/44-audio-alsa-backend.md](docs/44-audio-alsa-backend.md). Nothing about audio has been
    tested on this machine at all — including whether it works today.
-6. **Removable media** — let Waydroid see USB sticks and MicroSD cards when inserted.
-   Exposing the user's `/run/media/<username>` directory is probably sufficient. **Deprioritised
-   below Wi-Fi on 2026-09-07** at the owner's request.
+6. **Removable media** — let Waydroid see USB sticks, SD cards and more when inserted.
+   **Deprioritised below Wi-Fi on 2026-09-07**, then **promoted ahead of goal 5 (audio) on
+   2026-09-15** at the owner's request, who read the scoping note and asked to implement — so the
+   list order above no longer matches the work order, and audio is parked in practice without having
+   been declared parked. **Built and working the same day, hotplug included.** Verified end to end: a
+   real SD card and a USB stick mount on the host and their files are readable inside Android at
+   `/sdcard/Removable/<label>`, and unplugging and replugging the stick unmounts, cancels the
+   notification, remounts and re-notifies with nobody touching anything. When testing by hand, give
+   it a second or two — kernel enumeration plus the daemon's 0.6 s coalescing delay mean an
+   immediate query looks like a failure.
+   **The design is one sentence: mount the device on the host, straight into the Waydroid data
+   directory.** Android reaches external storage through FUSE (`/storage/emulated/0`), whose *lower*
+   directory is literally `~/.local/share/waydroid/data/media/0` on the host — so a host mount there
+   propagates in by itself (`/var/home` is `shared`, the LXC config sets no propagation options) and
+   FUSE serves the *content* onward, which is what crosses Android 13's per-app mount namespaces.
+   **No LXC config edit, no `nsenter`, no SELinux module, and no container restart — so it never
+   drops the kiosk to the greeter.** `waydroid-mediad` ([artifacts/media/](artifacts/media)) is a
+   stdlib-only root daemon that takes udev block events as a wake-up and then *reconciles* desired
+   mounts against actual ones, so startup, a missed event and a hotplug are one code path. The
+   Android half is [media-app/](media-app), which does **no file I/O at all** — it turns the daemon's
+   broadcasts into a persistent notification and hands DocumentsUI a `content://` URI on tap.
+   Verify with `bin/media-test.sh`. **Ejecting** is a notification action: nothing pulls from the
+   container out to the host, so the app drops a zero-byte marker named after the volume in its own
+   app-private directory and the daemon polls for it, unmounts and consumes it. An ejected volume is
+   remembered so the next reconcile does not helpfully remount a stick that is still plugged in. The
+   daemon deliberately does **not** create that marker directory — it runs as root, and a root-owned
+   `files/eject` is unwritable by the app, there being no idmap. **One trap dominates the Android half: Android 8+ silently
+   refuses to deliver *implicit* broadcasts to manifest-declared receivers.** `am broadcast -a
+   <action>` reports `Broadcast completed: result=0` and fires nothing, with no error in logcat or
+   anywhere else; adding `-p <package>` fixes it. That plus `-f 32`
+   (`FLAG_INCLUDE_STOPPED_PACKAGES`, needed because a never-launched app is in the "stopped" state)
+   are both required, and each one alone looks exactly like a broken receiver.
+   **Three earlier conclusions in this entry were wrong and are worth remembering as traps.**
+   *gvfs is still correctly ruled out* — it never automounts without a desktop shell (there is none
+   under cage) and its FUSE view has no `allow_other`, so it cannot cross into the container — but
+   **the SELinux analysis was answering the wrong question**: `waydroid_t` is the domain of the *host*
+   daemon from [docs/14](docs/14-sensors.md)/[40](docs/40-binder-nice.md)/[42](docs/42-backlight-selinux.md),
+   while Android actually runs as **`container_runtime_t`**, which reads `dosfs_t` fine. A whole
+   private-type-plus-`context=` design was scoped and never needed. **`persist.sys.fuse` is `true`**
+   (predicted false) and **`vold` runs** (predicted absent — it simply has no block devices and no
+   uevents, netlink being netns-scoped), so the proper Android volume route is ruled out on cost, not
+   absence. Four implementation bugs are recorded in [docs/46](docs/46-removable-media.md), of which
+   two generalise: **a `findmnt -o SOURCE /` guard silently protects nothing on an rpm-ostree host**
+   (the answer is `overlay`, not a device), and **`/home` is a symlink to `/var/home`**, so any
+   "is this mount mine?" test must use `realpath` or it will unmount its own work. Also note a
+   `systemd --user` watcher **cannot** mount — it is not in a login session, so polkit falls through
+   to `auth_admin` — which is why the daemon is a root system unit.
+   **Tapping a notification opens the volume in a file manager — confirmed by the owner**, as is
+   ejecting. Copying files onto a volume **fails in the old AOSP DocumentsUI** bundled with this
+   image (its `CopyJob` throws, and the exception code is one DocumentsUI cannot even decode, so it
+   presents as a silent failure) and **works in Google Files** — so use Files or Amaze for file
+   operations; DocumentsUI is fine for browsing. That cost several rounds of misdiagnosis and the
+   lesson is recorded in [docs/46](docs/46-removable-media.md): **when a failure is reported through
+   one application, try a second application before instrumenting the stack beneath it** — three
+   file managers were listed in the very first probe. Two unrelated hardware notes: the SD slot
+   needs a firm reseat (a partial insertion produces no kernel event at all, which looks exactly
+   like a software fault), and the card reports `FAT-fs … Volume was not properly unmounted` on
+   every mount, so it wants an `fsck.vfat`.
+   **Still open**:
+   unmount-while-browsing falls back to a lazy unmount; USB optical is mostly covered (iso9660/UDF
+   are handled, since the attached stick is an isohybrid image) but drive-vs-media events are a
+   separate increment; MTP needs a different mechanism entirely and all four candidate packages are
+   uninstalled; and there is no RPM yet, though `install.sh` is `DESTDIR`-clean.
+   See [docs/46-removable-media.md](docs/46-removable-media.md).
 7. **Android's per-app freezer** — make `CachedAppOptimizer`'s cgroup v2 freezer actually
    work, so cached apps stop burning CPU while the machine is awake but idle. **Added 2026-09-10
    at the owner's request; scoped, nothing built.** Android does **not** use CRIU for this and
@@ -314,7 +375,11 @@ and the reasoning behind each change.
   in-container avenue had run out, plus the Wi-Fi pair (`wifi-wlan0.sh`, which puts a netdev
   in the container's network namespace, and `wifi-test.sh`), and `brightness-test.sh`, which
   reports a dimmed display as SKIPPED rather than failing, because Android pins the panel at its
-  dim value and ignores the brightness setting entirely while display policy is DIM
+  dim value and ignores the brightness setting entirely while display policy is DIM, and
+  `removable-probe.sh`, which answers every open question in
+  [docs/46](docs/46-removable-media.md) read-only in one run, and `media-test.sh`, which walks the
+  removable-media chain from host mount to posted notification and names the link that is broken
+  rather than just failing
 - `sensors/` — source for `waydroid-sensord`, the host-side sensors daemon (goal 2). Build with
   `sensors/build.sh`; see the header comment for why it is a host daemon and not a guest HAL.
   It also serves `android.hardware.light@2.0::ILight` from `Lights.cpp` and `Backlight.cpp`, so
@@ -340,6 +405,13 @@ and the reasoning behind each change.
   no-Gradle build as `sensor-app/`; `--install` deploys and grants, `--pull` retrieves the CSVs.
   See [docs/20-quat-monitor.md](docs/20-quat-monitor.md), and read its "interpretation traps"
   before drawing conclusions from the data
+- `media-app/` — "Removable Media", a dependency-free Kotlin app that turns the host daemon's
+  volume broadcasts into a persistent notification whose tap opens the volume in the user's file
+  manager. It does **no file I/O at all** and declares no storage permission: the host mounts into
+  the FUSE lower directory, `ExternalStorageProvider` indexes it, and the app only ever hands
+  DocumentsUI a `content://` URI — even its status screen lists what it was *told*, never what is on
+  disk. Same no-Gradle build as `sensor-app/`, except it does generate `R` (the notification needs a
+  real drawable id, and `getIdentifier()` would trade a compile error for a silent runtime null)
 - `drm-probe/` — "DRM Probe", a dependency-free Kotlin app that dumps every `MediaDrm` property
   for every registered crypto scheme, plus session and decoder capability. Written to settle what
   a DRM client actually sees here instead of inferring it from Netflix's silence; it declares **no
@@ -353,6 +425,9 @@ and the reasoning behind each change.
   `artifacts/overlay/install.sh` holds the only written-down mapping from repo file to
   overlay path, and `artifacts/overlay-manager/` is `waydroid-overlay-sync`, and
   `artifacts/container/` holds the `waydroid-container.service` drop-ins.
+  `artifacts/media/` is `waydroid-mediad`, the root daemon for goal 6 — it mounts removable
+  volumes straight into the Waydroid data directory, which is the FUSE lower dir, so they surface
+  at `/sdcard/Removable/<label>` with no LXC change and no container restart.
   `artifacts/backlight/` is the SELinux half of the brightness fix — a CIL module and the
   udev rule that applies its type — kept in one directory because either half alone is inert
 - `packaging/` — RPM specs and `build-rpms.sh`. Four source packages: the noarch

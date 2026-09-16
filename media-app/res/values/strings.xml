@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Removable Media</string>
+    <string name="channel_name">Removable media</string>
+    <string name="channel_desc">Shown while a USB drive or memory card is attached.</string>
+    <string name="eject">Eject</string>
+    <string name="ejecting">Ejecting — safe to remove when this disappears</string>
+</resources>

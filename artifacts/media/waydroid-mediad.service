@@ -1,0 +1,37 @@
+[Unit]
+# Goal 6 -- removable media into Waydroid. See docs/46-removable-media.md.
+#
+# A SYSTEM unit at root, deliberately, and this is the one design point most
+# likely to be second-guessed later:
+#
+#   * mounting needs root, and so does writing into <data>/media/0, which is
+#     media_rw:media_rw mode 0770 -- the session user cannot even stat it;
+#   * the obvious alternative, a `systemd --user` unit talking to udisks2, does
+#     not work. udisks2 grants filesystem-mount implicitly to an ACTIVE session,
+#     and a --user service is not in a login session at all -- it lives under
+#     user@.service with no seat -- so polkit falls through to auth_admin and a
+#     kiosk with nobody at it deadlocks on a password prompt;
+#   * mounting by hand is also the only way to control mount options, which we
+#     need for uid=1023,gid=1023 so the files are readable through MediaProvider.
+#
+# It does NOT require the container: mounts under the data directory are just
+# host filesystem, and propagate in whenever a session next exists. Only the
+# notification broadcast needs Android, and that failing is not an error.
+Description=Expose host removable media to Waydroid
+Documentation=https://github.com/jmelanso/bigtab01-waydroid/blob/main/docs/46-removable-media.md
+Wants=waydroid-container.service
+After=waydroid-container.service systemd-udevd.service local-fs.target
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/waydroid-mediad
+Restart=on-failure
+RestartSec=5
+
+# Unmounting on stop is the daemon's own SIGTERM path, and a busy volume falls
+# back to a lazy unmount, so give it room rather than SIGKILLing mid-way.
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

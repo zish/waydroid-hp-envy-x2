@@ -12,6 +12,7 @@ Design, dependency rationale and the migration steps are in
 | `waydroid-sensord.spec` | yes (2026-09-09) | no | no | no |
 | `waydroid-wifid.spec` | yes (2026-09-09) | no | no | no |
 | `waydroid-overlay.spec` | yes (2026-09-09) | no | no | no |
+| `waydroid-bigtab01.spec` → `media` subpackage | yes (2026-09-15) | no | no | no |
 
 "Payload staged and checked" means every `install.sh` these specs call as their `%install`
 step was run with `DESTDIR` into a scratch buildroot and the resulting tree compared,
@@ -19,6 +20,45 @@ file by file, against the `%files` lists — including modes and with no unsubst
 `@BINDIR@` left anywhere. Treat `%files` as verified and everything else — macro
 expansion, dependency generation, subpackage splits — as unproven until this table says
 otherwise.
+
+## What is actually deployed on bigtab01 today
+
+Audited 2026-09-15, because "how much is packaged?" turned out to have a blunt answer.
+
+**None of it. Zero percent of this project's output is installed as an RPM.** Every spec above is
+written and payload-verified; none has been built, and `rpm -qa` on the host lists only Fedora's own
+`waydroid` and `waydroid-selinux`. Everything this repository produces is hand-placed, and survives
+only because nothing has overwritten it yet.
+
+What that means concretely — all of the following is unowned by any package (`rpm -qf` says so for
+each):
+
+| Where | What | Count |
+|---|---|---|
+| `/usr/local/bin` | `waydroid-{mediad,sensord,wifid,cage-session,graceful-exit,android-key,android-lock,shutdown-android,shutdown-inhibitor,sync,sync-sleep,bt-restore,wifi-nudge,wifi-sync}`, `ite8350-resume-check` | 15 |
+| `/etc/systemd/system` | units for mediad, wifid, wifi-sync, android-lock, sync, sync-sleep, shutdown-inhibitor, ite8350-sleep, ite8350-resume-check | 9 |
+| `/etc/systemd/system/*.d` | `waydroid-container.service.d/{graceful-shutdown,nice-limit}.conf`, `systemd-initrd-objects.service.d/bluetooth-wait.conf` | 3 |
+| `/etc/udev/rules.d` | `99-waydroid-backlight.rules`, `99-bluetooth-boot.rules` | 2 |
+| `/etc/wayland-sessions` | `waydroid-cage.desktop` | 1 |
+| SELinux | `waydroid_backlight` module, loaded via `semodule` | 1 |
+| `/var/lib/waydroid/overlay` | 12 Android files — the camera wrapper for both ABIs, the health HAL, Widevine, the Wi-Fi feature XML and `.rc` files | 12 |
+| `/var/lib/waydroid/lxc/waydroid/config` | the hand-edited `lxc.net.0.name = wlan0` | 1 line |
+
+Note `/usr/local/bin` is deliberate and not an accident of laziness: `/usr` is read-only on an
+rpm-ostree host, `/usr/local` is a symlink into `/var`, and it is the only writable bin directory. An
+RPM would install to `%{_bindir}` instead, which is why every `install.sh` takes `PREFIX`.
+
+**One discrepancy worth correcting.** AGENTS.md states that overlay content "is now packaged rather
+than hand-copied" and that `waydroid-overlay-sync` reconciles it before container start. On the host,
+`/usr/share/waydroid-overlay` does not exist and `waydroid-overlay-sync` is not installed — the
+overlay is still 12 hand-copied files with no self-repair. The machinery is written and staged; it
+has simply never been deployed, because deploying it means building and installing the RPM. The
+documentation describes the design, and the design is not in force.
+
+**The practical risk this leaves** is the one the specs exist to close: a `waydroid upgrade` or
+`waydroid init` erases the LXC config edit and the overlay, and nothing reinstalls them; an
+rpm-ostree deployment rollback keeps `/var` but nothing reconciles `/usr/local` against what the
+repo expects. Today the recovery is a human re-running installers from this tree.
 
 ## Planned, not yet specced
 

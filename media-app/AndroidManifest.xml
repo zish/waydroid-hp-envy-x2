@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Removable Media — the Android half of goal 6 (docs/46-removable-media.md).
+
+  It does NO file I/O, deliberately. The host daemon mounts volumes into the
+  FUSE lower directory so they appear under /sdcard/Removable/<label>, and
+  ExternalStorageProvider indexes them for free. All this app does is show a
+  notification and hand DocumentsUI a content:// URI when it is tapped. That is
+  why there is no READ_EXTERNAL_STORAGE here: it never opens a file.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="lan.syshlt.removablemedia">
+
+    <!-- Android 13 gates notifications behind a runtime grant.
+         build.sh —install does `pm grant`, since a kiosk has nobody to tap. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_media"
+        android:allowBackup="false">
+
+        <activity
+            android:name=".StatusActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          exported, and it has to be: the sender is `am broadcast` run by a root
+          host daemon outside Android entirely, so there is no shared uid and no
+          signature to match against. On a single-user kiosk appliance the
+          spoofing exposure is a fake "USB inserted" notification whose tap
+          opens an empty directory, which is not worth a permission dance.
+        -->
+        <!-- Not exported: it is only ever triggered by our own notification's
+             PendingIntent, so nothing outside the app has any business firing it. -->
+        <receiver
+            android:name=".EjectReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".VolumeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="lan.syshlt.bigtab01.media.VOLUME_MOUNTED" />
+                <action android:name="lan.syshlt.bigtab01.media.VOLUME_UNMOUNTED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

@@ -11,3 +11,7 @@ phase1/gbm-import-android
 # Builds run HERE on the 32 GB dev box, never on bigtab01 (8 GB). Recreate with:
 #   mkdir -p /home/coder/extra_space/bigtab01-build && ln -s /home/coder/extra_space/bigtab01-build build
 build
+
+# Python bytecode from local syntax checks
+__pycache__/
+*.pyc
