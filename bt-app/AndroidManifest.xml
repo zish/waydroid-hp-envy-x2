@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Bluetooth — the Android half of the BlueZ work (docs/50-bluetooth.md).
+  The host half is artifacts/bluetooth/waydroid-btd.
+
+  Note what is NOT here: BLUETOOTH, BLUETOOTH_ADMIN, BLUETOOTH_CONNECT,
+  BLUETOOTH_SCAN, ACCESS_FINE_LOCATION. This app never touches Android's
+  Bluetooth APIs — there is no Bluetooth stack in this image to touch — and it
+  reads no files outside its own sandbox. The radio it drives is the host's, and
+  the only thing it needs to reach it is a TCP socket on the waydroid0 bridge.
+  INTERNET is the whole permission set, and it is an install-time grant, so a
+  kiosk with nobody to tap Allow is fine.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="lan.syshlt.bluetooth">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      Theme.Material.NoActionBar, and both halves matter. NoActionBar because
+      the screen draws its own header and the default one would title it
+      "Bluetooth" immediately above a heading saying "Bluetooth". Material
+      (not Material.Light) because AlertDialog inherits the application theme,
+      and a light dialog over this dark screen is jarring.
+    -->
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_bt"
+        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:allowBackup="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Long-pressing a custom Quick Settings tile opens the app's
+                 QS_TILE_PREFERENCES activity if it declares one, and the app
+                 info page if it does not. This makes the long-press useful. -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          The Quick Settings tile that replaces the stock Bluetooth one, which
+          is inert in this image (docs/50). Three things are required and each
+          is load-bearing: the BIND_QUICK_SETTINGS_TILE permission, which is
+          what lets SystemUI and nothing else bind this; exported=true, because
+          the binder is SystemUI and not us; and the QS_TILE action, which is
+          how it is discovered at all.
+
+          android:icon here is also the tile's icon at runtime, which is why
+          BtTileService never needs a resource id and the build needs no R.
+        -->
+        <service
+            android:name=".BtTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_bt"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

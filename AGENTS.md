@@ -313,6 +313,88 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    with the `CLOCK_MONOTONIC` jump on thaw as the expected failure mode. Measure whether idle apps
    cost anything before building any of it. See [docs/43-app-freezer.md](docs/43-app-freezer.md).
 
+8. **Bluetooth — managing the host's BlueZ from an Android app.** **Added 2026-09-21 at the
+   owner's request; built, working and proven the same day — the owner paired a Galaxy S24 Ultra
+   through the app, `bonded`, `connected`, battery reported.**
+   Under cage there is no host UI at all, so pairing a headset or a keyboard means ssh-ing in and
+   running `bluetoothctl`. Two pieces close that: `waydroid-btd`
+   ([artifacts/bluetooth/](artifacts/bluetooth)), a root Python daemon that is a D-Bus client *and
+   server* to BlueZ, and "Bluetooth" ([bt-app/](bt-app)), a dependency-free Kotlin app.
+   **The first probe of the Android side was misread, and the correction is the useful part.**
+   `ls /apex | grep -i bluetooth` returns nothing, which was taken to mean the image has no
+   Bluetooth framework. It is a **false negative — the APEX is `com.android.btservices`**, and it
+   is present, with `framework-bluetooth.jar`, `service-bluetooth.jar`, `libbluetooth_jni.so`, the
+   `bt_stack.conf` set and the `com.android.bluetooth` privapp allowlist. The
+   `android.hardware.bluetooth` feature is **already declared** in `handheld_core_hardware.xml`,
+   and `BluetoothManagerService` has been *trying* since boot — `dumpsys bluetooth_manager` shows
+   `mEnable:true` and then `Bluetooth Service not connected`. What is actually missing is
+   **`Bluetooth.apk` itself** (`find` across `/system /system_ext /product /apex` for
+   `*Bluetooth*apk` returns nothing) **and any vendor HAL** (`/vendor/bin/hw`, `/vendor/lib64/hw`
+   both empty of it). So this is *not* the Wi-Fi Stage 0 shape where one overlay file woke a
+   dormant framework: the hole is an entire privileged system APK, which means an AOSP tree —
+   the one thing [docs/08](docs/08-camera-fixed.md) went to the NDK to avoid — **plus** an HCI
+   transport, which still ends with the container owning `hci0`. Handing it over was rejected the
+   same way [docs/28](docs/28-wifi-feasibility.md) rejected it for Wi-Fi: it is the only
+   controller and the owner's keyboard is paired to it. **Grepping for the obvious word is not
+   the same as looking.**
+   **The transport is TCP + newline JSON on the waydroid0 bridge, not binder**, because an ordinary
+   app cannot reach an arbitrary binder name: non-SDK `getService`, an overlay `service_contexts`
+   edit, an `untrusted_app` `find` rule, and [docs/35](docs/35-wifi-stage5.md)'s `dontaudit`ed
+   transfer trap underneath. firewalld already has `waydroid0` in the **`trusted`** zone, so no rule
+   was added. TLS is available (`--tls`) and **pinned by certificate SHA-256**, not CA-validated —
+   there is no name to verify on a bridge.
+   **The pairing agent is what forces the shape.** A prompt is BlueZ calling *out* to an
+   `org.bluez.Agent1` object, so the daemon must export one — which rules out `busctl` (it cannot
+   serve an object) and rules out scraping `bluetoothctl` (it registers a competing agent).
+   Capability is `KeyboardDisplay`, so modern devices get numeric comparison.
+   **`Pair()` cannot be called synchronously**: it blocks until pairing completes and its agent
+   callbacks arrive on the same D-Bus connection, so a blocking call deadlocks against its own
+   prompt. Every device verb is async with `reply_handler`/`error_handler`.
+   **The app is handed its token as a file, not a broadcast**, and that works because **SELinux is
+   `Disabled` inside the container** — a root-written file in the app's private dir is simply
+   readable, no labelling. A broadcast only lands if the app is running; a file survives reboots.
+   **One assumption was wrong and is corrected in the docs: BlueZ is not polkit-gated.** There is no
+   `org.bluez` polkit action on this host, and `bluetooth.conf` lets `context="default"` send to
+   `org.bluez`, so an unprivileged caller really could pair. The daemon is root for exactly one
+   reason — the profile goes into a directory owned by the app's uid, mode 0700.
+   Verify with `bin/bluetooth-test.sh` — 17 pass, measured 11 devices in a 12 s scan. The agent
+   needs no device to test: `org.bluez.Agent1` is an ordinary D-Bus object we export, so all five
+   paths were driven directly as `bluetoothd` would, confirming `Rejected` and `Canceled` come
+   back under the exact names BlueZ expects. **A trap lives in that test, not the daemon**:
+   dbus-python's `SystemBus()` is a *shared singleton*, so two overlapping blocking calls on it
+   produce a spurious `NoReply` that looks exactly like a daemon fault —
+   `dbus.SystemBus(private=True)` for the second caller.
+   The S24 came through with `legacy_pairing: false` — Secure Simple Pairing, the
+   numeric-comparison flow, which is precisely what `KeyboardDisplay` was chosen for. Pairing also
+   exposed a gap since fixed: a *successful* prompt left nothing in the journal, so afterwards
+   there was no way to tell whether it had come from us or from a stray `bluetoothctl`; the daemon
+   now logs each request and who answered it.
+   **The app also replaces the stock Quick Settings tile**, added the same day at the owner's
+   request. The stock `bt` tile is inert here (`dumpsys bluetooth_manager`: `state: OFF,
+   address: null`), so it is a control that can only fail. The lever is one **writable secure
+   setting**, `sysui_qs_tiles` — swap `bt` for `custom(lan.syshlt.bluetooth/…BtTileService)` and it
+   takes effect live, with **no overlay and no container restart, so no drop to the greeter**.
+   `bin/bt-tile.sh` does it with `--install`/`--remove`/`--status` and keeps an exact backup of the
+   original list. Note removing `bt` hides it from the shade but not from the edit-tiles tray,
+   which would need a resource overlay.
+   **Two traps here.** `cmd statusbar expand-settings` **returns 1 unless the shade is collapsed
+   first**, which looks like a permission failure; and `cmd statusbar click-tile` **must never be
+   used on this tile** — it would toggle `hci0` off and drop the owner's keyboard and phone.
+   **And one device-wide fact worth knowing before building anything else here:
+   `restricted_networking_mode` is `1`**, so an app gets network *only while foreground*
+   (`blocked=RESTRICTED_MODE, allowed=FOREGROUND|TOP|…`). A tile is fine because SystemUI's
+   binding elevates the process state, but **a plain background service could not hold a
+   connection**. A first diagnosis blamed app-standby buckets and was disproven by A/B: the tile
+   connects fine in bucket 45 with no `deviceidle` whitelist, so the bucket was never the blocker.
+   A second bug came out of it too — `BtClient` reported a socket *we* closed as a disconnection,
+   so the tile cached "Host daemon unreachable" on every shade close and painted it on the next
+   pull-down, which is the exact flash the cache exists to prevent.
+   **Still open**: only the numeric-comparison flow has met real hardware (passkey-entry and PIN
+   are synthetic only), and `remove`/`connect` have never run against a real bond; the controller does not survive
+   s2idle ([docs/27](docs/27-android-power-button.md)) and there is no automatic recovery; whether
+   A2DP audio follows through PipeWire is untested; no RPM; no BLE GATT. See
+   [docs/50-bluetooth.md](docs/50-bluetooth.md).
+
 **Screen brightness — DONE, and not on the list above.** Added at the owner's request on
 2026-09-09, between Wi-Fi Stage 5 and removable media. Android's brightness slider now drives the real
 panel backlight. The machine has **no ambient light sensor** — the ITE8350 declares only five
@@ -376,6 +458,10 @@ and the reasoning behind each change.
   in the container's network namespace, and `wifi-test.sh`), and `brightness-test.sh`, which
   reports a dimmed display as SKIPPED rather than failing, because Android pins the panel at its
   dim value and ignores the brightness setting entirely while display policy is DIM, and
+  `bluetooth-test.sh`, which walks controller, daemon, protocol, profile delivery and app and
+  reports the pairing leg as SKIPPED because it needs a human, and `bt-tile.sh`, which swaps the
+  app's Quick Settings tile in for the stock Bluetooth one by editing `sysui_qs_tiles`, keeping an
+  exact backup so `--remove` restores rather than reconstructs, and
   `removable-probe.sh`, which answers every open question in
   [docs/46](docs/46-removable-media.md) read-only in one run, and `media-test.sh`, which walks the
   removable-media chain from host mount to posted notification and names the link that is broken
@@ -412,6 +498,15 @@ and the reasoning behind each change.
   DocumentsUI a `content://` URI — even its status screen lists what it was *told*, never what is on
   disk. Same no-Gradle build as `sensor-app/`, except it does generate `R` (the notification needs a
   real drawable id, and `getIdentifier()` would trade a compile error for a silent runtime null)
+- `bt-app/` — "Bluetooth", a dependency-free Kotlin app that manages the *host's* BlueZ through
+  `waydroid-btd`. It declares only `INTERNET`: it never touches Android's Bluetooth APIs, because
+  this image has none, and the radio it drives is on the other side of a socket. It holds no state
+  of its own — every view is the last snapshot plus the events since, so a daemon or `bluetoothd`
+  restart converges with no reconciliation code. It also ships `BtTileService`, the Quick Settings
+  tile that replaces the stock Bluetooth one; the tile is bound only while the shade is open, so it
+  connects per pull-down and paints from a cached state to avoid a flash of "unavailable". Same
+  no-Gradle build as `sensor-app/`, and like it generates no `R` — the tile's icon and label come
+  from its `<service>` element. See [docs/50-bluetooth.md](docs/50-bluetooth.md)
 - `drm-probe/` — "DRM Probe", a dependency-free Kotlin app that dumps every `MediaDrm` property
   for every registered crypto scheme, plus session and decoder capability. Written to settle what
   a DRM client actually sees here instead of inferring it from Netflix's silence; it declares **no
@@ -428,6 +523,9 @@ and the reasoning behind each change.
   `artifacts/media/` is `waydroid-mediad`, the root daemon for goal 6 — it mounts removable
   volumes straight into the Waydroid data directory, which is the FUSE lower dir, so they surface
   at `/sdcard/Removable/<label>` with no LXC change and no container restart.
+  `artifacts/bluetooth/` is `waydroid-btd`, the BlueZ daemon for goal 8 — a D-Bus client *and*
+  server, because a pairing prompt is BlueZ calling out to an `org.bluez.Agent1` we export, which
+  is what rules out every read-only approach.
   `artifacts/backlight/` is the SELinux half of the brightness fix — a CIL module and the
   udev rule that applies its type — kept in one directory because either half alone is inert
 - `packaging/` — RPM specs and `build-rpms.sh`. Four source packages: the noarch

@@ -1,0 +1,39 @@
+[Unit]
+# Bluetooth management for Waydroid. See docs/50-bluetooth.md.
+#
+# Root, and a SYSTEM unit, for ONE reason -- and it is worth writing down which,
+# because the obvious guess is wrong. BlueZ is not polkit-gated the way udisks2
+# is in docs/46: there is no org.bluez polkit action on this host, and
+# /usr/share/dbus-1/system.d/bluetooth.conf allows context="default" to send to
+# org.bluez, so an unprivileged daemon could power the adapter and pair devices
+# perfectly well.
+#
+# What needs root is the connection profile. It is written into the Android
+# app's private directory, owned by the app's uid (10xxx) and mode 0700, so
+# nothing but root can put a file there. Run with --no-profile and this could be
+# a user unit.
+#
+# Unlike waydroid-wifid (docs/35) this one does NOT need SELinuxContext=. That
+# unit needed it because systemd runs a bin_t binary as unconfined_service_t and
+# container_runtime_t is denied `binder transfer` to that domain. This daemon
+# speaks D-Bus and TCP, never binder, so the whole trap is out of scope.
+Description=Bluetooth (BlueZ) management for Waydroid's Android
+Documentation=https://github.com/jmelanso/bigtab01-waydroid/blob/main/docs/50-bluetooth.md
+Wants=bluetooth.service waydroid-container.service
+After=bluetooth.service waydroid-container.service dbus.service
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/waydroid-btd
+Restart=on-failure
+RestartSec=5
+
+# It binds the waydroid0 bridge address, which does not exist until
+# waydroid-container.service has run. The daemon retries the bind rather than
+# exiting, so ordering above is a preference and not a requirement -- starting
+# early costs a few "cannot bind ... retrying" lines and nothing else.
+StateDirectory=waydroid-btd
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

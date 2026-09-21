@@ -1,0 +1,1273 @@
+#!/usr/bin/python3
+"""waydroid-btd -- drive the host's BlueZ from inside Waydroid's Android.
+
+See docs/50-bluetooth.md for the investigation; the Android half is bt-app/.
+
+WHY A HOST DAEMON, AND NOT ANDROID'S OWN BLUETOOTH
+
+Wi-Fi (docs/28) worked the way it did because the whole Android framework was
+already present and dormant in the image and only wanted a vendor HAL. Bluetooth
+is not that. Measured on this image:
+
+    pm list packages | grep -i bluetooth    ->  nothing
+    ls /apex | grep -i bluetooth            ->  nothing
+    service list | grep -i bluetooth        ->  bluetooth_manager
+
+A `bluetooth_manager` binder name published by system_server, and nothing behind
+it -- no com.android.bluetooth, no APEX, no Fluoride. There is no framework here
+to serve, so a HAL would be the smaller half of a much larger job, and the UI
+would still have to be written.
+
+Handing hci0 to the container was rejected for the reason docs/28 rejected it
+for Wi-Fi and docs/34 then confirmed by buying a second radio: hci0 is this
+machine's only Bluetooth controller and the keyboard the owner types on is
+paired to it. Giving it away costs the host its input device to save almost none
+of the work.
+
+What is actually needed is narrower than either. Under cage (docs/25) there is
+no host UI at all, so there is no way to pair a headset or a keyboard without
+ssh-ing in. This daemon exposes BlueZ, and the Android app becomes that UI.
+
+WHY TCP AND NOT BINDER
+
+Every other host daemon here (sensors/, wifi/) speaks libgbinder, because its
+client is the Android *framework*, which can only be reached that way. This
+daemon's client is an ordinary app, and an ordinary app cannot reach an
+arbitrary binder name: ServiceManager.getService() is non-SDK on Android 13, the
+name would need an overlay service_contexts entry, untrusted_app would need a
+`find` allow rule, and docs/35's dontaudit'ed binder-transfer trap is waiting
+underneath all of it. A socket costs none of that.
+
+The container reaches the host at the waydroid0 bridge address (192.168.240.1
+here), and firewalld has waydroid0 in the `trusted` zone, so nothing had to be
+opened. The wire is newline-delimited JSON: commands up, events down, one
+long-lived connection, so a scan list and a pairing passkey arrive live rather
+than being polled for. TLS is optional (--tls) and pinned by certificate
+fingerprint rather than by CA, since there is no name to verify on a bridge.
+
+DELIBERATELY NOT USED
+
+  * bluetoothctl, scraped. It is a readline UI, its output is not a contract,
+    and -- fatally -- it registers its own agent, so a pairing prompt would be
+    answered by whichever of us BlueZ made default rather than by the app.
+  * busctl --json. Reads fine, but a D-Bus *client* is only half of this: an
+    agent has to EXPORT org.bluez.Agent1, and busctl cannot serve an object.
+  * a systemd --user unit -- but NOT for the polkit reason docs/46 records for
+    udisks2, which was checked and does not apply. BlueZ 5.87 uses no polkit at
+    all (there is no org.bluez action, only org.blueman's), and this host's
+    /usr/share/dbus-1/system.d/bluetooth.conf allows `context="default"` to send
+    to org.bluez, so an unprivileged caller really could power the adapter and
+    pair. Root is required for exactly one thing: the connection profile below
+    goes into the app's private directory, which is owned by the Android app's
+    uid and mode 0700. Everything else here would run unprivileged.
+
+python3-dbus and python3-gobject are both already installed on this Atomic host
+(bluez pulls them in), so this needs no layered package and no reboot. That is
+the only reason it is Python rather than C++ like its two siblings.
+"""
+
+import argparse
+import glob
+import hashlib
+import json
+import os
+import queue
+import re
+import secrets
+import signal
+import socket
+import ssl
+import subprocess
+import sys
+import threading
+import time
+
+import dbus
+import dbus.mainloop.glib
+import dbus.service
+from gi.repository import GLib
+
+try:
+    # PyGObject 3.56 moved the unix signal helpers out of GLib and deprecated
+    # the old names loudly enough to put a warning in the journal on every
+    # start. Fedora 44 has the new module; keep working on hosts that do not.
+    from gi.repository import GLibUnix
+
+    unix_signal_add = GLibUnix.signal_add
+except ImportError:                                    # pragma: no cover
+    unix_signal_add = GLib.unix_signal_add
+
+BLUEZ = "org.bluez"
+PROPS_IFACE = "org.freedesktop.DBus.Properties"
+OM_IFACE = "org.freedesktop.DBus.ObjectManager"
+ADAPTER_IFACE = "org.bluez.Adapter1"
+DEVICE_IFACE = "org.bluez.Device1"
+BATTERY_IFACE = "org.bluez.Battery1"
+AGENT_IFACE = "org.bluez.Agent1"
+AGENT_MANAGER_IFACE = "org.bluez.AgentManager1"
+AGENT_PATH = "/lan/syshlt/btd/agent"
+
+PROTOCOL_VERSION = 1
+DEFAULT_PORT = 7712
+DEFAULT_PACKAGE = "lan.syshlt.bluetooth"
+DEFAULT_STATE_DIR = "/var/lib/waydroid-btd"
+PROFILE_NAME = "btd.json"
+
+# How long an unauthenticated connection may sit there, and how long BlueZ is
+# made to wait for a human to answer a pairing prompt. BlueZ's own pairing
+# timeout is longer than this, so we lose the race deliberately: a request that
+# times out here is refused cleanly, rather than left for BlueZ to abandon.
+AUTH_TIMEOUT = 10
+AGENT_TIMEOUT = 60
+MAX_CLIENTS = 8
+
+# Pair() and Connect() can take a minute against a device that is asleep, and
+# dbus-python's default reply timeout is 25 s.
+PAIR_TIMEOUT = 180
+CONNECT_TIMEOUT = 60
+
+# Property projections. Anything not listed here is not sent, which keeps the
+# wire stable when BlueZ adds properties -- 5.87 has several that only exist on
+# some transports (AdvertisingFlags, WakeAllowed, Sets).
+ADAPTER_PROPS = {
+    "Address": "addr",
+    "Name": "name",
+    "Alias": "alias",
+    "Powered": "powered",
+    "Discoverable": "discoverable",
+    "DiscoverableTimeout": "discoverable_timeout",
+    "Pairable": "pairable",
+    "PairableTimeout": "pairable_timeout",
+    "Discovering": "discovering",
+    "UUIDs": "uuids",
+}
+
+DEVICE_PROPS = {
+    "Address": "addr",
+    "AddressType": "addr_type",
+    "Name": "name",
+    "Alias": "alias",
+    "Icon": "icon",
+    "Class": "class",
+    "Appearance": "appearance",
+    "Paired": "paired",
+    "Bonded": "bonded",
+    "Trusted": "trusted",
+    "Blocked": "blocked",
+    "Connected": "connected",
+    "LegacyPairing": "legacy_pairing",
+    "ServicesResolved": "services_resolved",
+    "RSSI": "rssi",
+    "TxPower": "tx_power",
+    "UUIDs": "uuids",
+}
+
+
+def log(message):
+    sys.stderr.write("waydroid-btd: %s\n" % message)
+    sys.stderr.flush()
+
+
+def run(args):
+    return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, check=False)
+
+
+def unwrap(value):
+    """dbus types -> plain JSON-able Python.
+
+    dbus.Boolean subclasses int and dbus.String subclasses str, so the order of
+    these tests is load-bearing: check Boolean before any integer test or every
+    boolean on the wire becomes 0/1.
+    """
+    if isinstance(value, dbus.Boolean):
+        return bool(value)
+    if isinstance(value, (dbus.ByteArray, bytes, bytearray)):
+        return list(bytes(value))
+    if isinstance(value, dict):
+        return dict((str(k), unwrap(v)) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return [unwrap(v) for v in value]
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
+    return value
+
+
+class Rejected(dbus.DBusException):
+    _dbus_error_name = "org.bluez.Error.Rejected"
+
+
+class Canceled(dbus.DBusException):
+    _dbus_error_name = "org.bluez.Error.Canceled"
+
+
+class Bluez(object):
+    """A live mirror of BlueZ's object tree, plus the verbs the app can use.
+
+    Everything here runs on the GLib main loop thread. That is not incidental:
+    Pair() cannot be called synchronously, because the agent prompt it raises
+    comes back over the same D-Bus connection, so a blocking call would deadlock
+    against its own callback. Every device verb is therefore issued with
+    reply_handler/error_handler and answers the client later.
+    """
+
+    def __init__(self, bus, adapter_name, emit):
+        self.bus = bus
+        self.emit = emit                  # emit(event_dict) -> broadcast
+        self.wanted_adapter = adapter_name
+        self.adapter_path = None
+        self.objects = {}                 # path -> {interface: {prop: value}}
+
+        self.bus.add_signal_receiver(
+            self._interfaces_added, dbus_interface=OM_IFACE,
+            signal_name="InterfacesAdded")
+        self.bus.add_signal_receiver(
+            self._interfaces_removed, dbus_interface=OM_IFACE,
+            signal_name="InterfacesRemoved")
+        self.bus.add_signal_receiver(
+            self._properties_changed, dbus_interface=PROPS_IFACE,
+            signal_name="PropertiesChanged", path_keyword="path")
+        # bluetoothd restarting is normal (it is socket-activated and can be
+        # restarted under us); rebuild rather than serving a stale tree.
+        self.bus.add_signal_receiver(
+            self._name_owner_changed, dbus_interface="org.freedesktop.DBus",
+            signal_name="NameOwnerChanged", arg0=BLUEZ)
+
+        self.refresh()
+
+    # ---- object tree -----------------------------------------------------
+
+    def refresh(self):
+        self.objects = {}
+        self.adapter_path = None
+        try:
+            om = dbus.Interface(self.bus.get_object(BLUEZ, "/"), OM_IFACE)
+            managed = om.GetManagedObjects()
+        except dbus.DBusException as exc:
+            log("bluez not on the bus yet: %s" % exc.get_dbus_name())
+            return
+        for path, ifaces in managed.items():
+            self.objects[str(path)] = dict(
+                (str(name), dict(props)) for name, props in ifaces.items())
+        self._pick_adapter()
+
+    def _pick_adapter(self):
+        candidates = sorted(p for p, i in self.objects.items()
+                            if ADAPTER_IFACE in i)
+        if self.wanted_adapter:
+            want = "/" + self.wanted_adapter.strip("/")
+            for path in candidates:
+                if path.endswith(want):
+                    self.adapter_path = path
+                    return
+            log("adapter %s not present; %d other(s) found"
+                % (self.wanted_adapter, len(candidates)))
+            self.adapter_path = None
+            return
+        self.adapter_path = candidates[0] if candidates else None
+
+    def _name_owner_changed(self, name, old, new):
+        log("bluez %s" % ("appeared" if new else "went away"))
+        self.refresh()
+        self.emit({"ev": "reset", "adapter": self.adapter_json(),
+                   "devices": self.devices_json()})
+
+    def _interfaces_added(self, path, ifaces):
+        path = str(path)
+        entry = self.objects.setdefault(path, {})
+        for name, props in ifaces.items():
+            entry[str(name)] = dict(props)
+        if ADAPTER_IFACE in entry and self.adapter_path is None:
+            self._pick_adapter()
+            self.emit({"ev": "adapter", "adapter": self.adapter_json()})
+        self._emit_device(path)
+
+    def _interfaces_removed(self, path, ifaces):
+        path = str(path)
+        entry = self.objects.get(path)
+        if entry is None:
+            return
+        for name in ifaces:
+            entry.pop(str(name), None)
+        if not entry:
+            del self.objects[path]
+        if path == self.adapter_path and ADAPTER_IFACE not in entry:
+            self.adapter_path = None
+            self._pick_adapter()
+            self.emit({"ev": "adapter", "adapter": self.adapter_json()})
+        elif DEVICE_IFACE not in entry:
+            self.emit({"ev": "device-removed", "path": path})
+        else:
+            self._emit_device(path)
+
+    def _properties_changed(self, iface, changed, invalidated, path=None):
+        iface = str(iface)
+        path = str(path)
+        if iface not in (ADAPTER_IFACE, DEVICE_IFACE, BATTERY_IFACE):
+            return
+        entry = self.objects.setdefault(path, {}).setdefault(iface, {})
+        for key, value in changed.items():
+            entry[str(key)] = value
+        for key in invalidated:
+            entry.pop(str(key), None)
+        if path == self.adapter_path and iface == ADAPTER_IFACE:
+            self.emit({"ev": "adapter", "adapter": self.adapter_json()})
+        else:
+            self._emit_device(path)
+
+    def _emit_device(self, path):
+        device = self.device_json(path)
+        if device is not None:
+            self.emit({"ev": "device", "device": device})
+
+    # ---- projections -----------------------------------------------------
+
+    def adapter_json(self):
+        if not self.adapter_path:
+            return None
+        props = self.objects.get(self.adapter_path, {}).get(ADAPTER_IFACE, {})
+        out = {"path": self.adapter_path}
+        for key, name in ADAPTER_PROPS.items():
+            if key in props:
+                out[name] = unwrap(props[key])
+        return out
+
+    def device_json(self, path):
+        entry = self.objects.get(path, {})
+        props = entry.get(DEVICE_IFACE)
+        if props is None:
+            return None
+        # Devices belonging to another adapter are not ours to show.
+        if self.adapter_path and str(props.get("Adapter", "")) not in \
+                ("", self.adapter_path):
+            return None
+        out = {"path": path}
+        for key, name in DEVICE_PROPS.items():
+            if key in props:
+                out[name] = unwrap(props[key])
+        battery = entry.get(BATTERY_IFACE)
+        if battery and "Percentage" in battery:
+            out["battery"] = int(battery["Percentage"])
+        return out
+
+    def devices_json(self):
+        devices = []
+        for path in sorted(self.objects):
+            device = self.device_json(path)
+            if device is not None:
+                devices.append(device)
+        return devices
+
+    def snapshot(self):
+        return {"adapter": self.adapter_json(), "devices": self.devices_json()}
+
+    # ---- verbs -----------------------------------------------------------
+
+    def _iface(self, path, name):
+        return dbus.Interface(self.bus.get_object(BLUEZ, path), name)
+
+    def _props(self, path):
+        return dbus.Interface(self.bus.get_object(BLUEZ, path), PROPS_IFACE)
+
+    def require_adapter(self):
+        if not self.adapter_path:
+            raise RuntimeError("no Bluetooth adapter")
+        return self.adapter_path
+
+    def find_device(self, addr):
+        """Resolve an address to an object path.
+
+        The app speaks addresses, never paths: a path is derived from the
+        address anyway (/org/bluez/hci0/dev_AA_BB_...), and an address survives
+        bluetoothd restarting where a cached path would not.
+        """
+        target = str(addr).upper()
+        for path, entry in self.objects.items():
+            props = entry.get(DEVICE_IFACE)
+            if props and str(props.get("Address", "")).upper() == target:
+                return path
+        raise RuntimeError("no such device: %s" % addr)
+
+    def set_adapter_prop(self, name, value):
+        self._props(self.require_adapter()).Set(ADAPTER_IFACE, name, value)
+
+    def set_device_prop(self, addr, name, value):
+        self._props(self.find_device(addr)).Set(DEVICE_IFACE, name, value)
+
+    def start_discovery(self, transport):
+        path = self.require_adapter()
+        adapter = self._iface(path, ADAPTER_IFACE)
+        if transport:
+            adapter.SetDiscoveryFilter({
+                "Transport": dbus.String(transport),
+                "DuplicateData": dbus.Boolean(False),
+            })
+        try:
+            adapter.StartDiscovery()
+        except dbus.DBusException as exc:
+            # Already discovering is the state the caller asked for, not a
+            # failure worth putting in front of them.
+            if exc.get_dbus_name() != "org.bluez.Error.InProgress":
+                raise
+
+    def stop_discovery(self):
+        path = self.require_adapter()
+        try:
+            self._iface(path, ADAPTER_IFACE).StopDiscovery()
+        except dbus.DBusException as exc:
+            # Not started, or started by somebody else's D-Bus name: neither is
+            # an error worth failing the command over.
+            if exc.get_dbus_name() not in (
+                    "org.bluez.Error.Failed", "org.bluez.Error.NotReady"):
+                raise
+
+    def remove_device(self, addr):
+        path = self.find_device(addr)
+        self._iface(self.require_adapter(), ADAPTER_IFACE).RemoveDevice(path)
+
+    def device_async(self, addr, method, args, on_ok, on_err, timeout):
+        device = self._iface(self.find_device(addr), DEVICE_IFACE)
+        getattr(device, method)(*args, reply_handler=on_ok,
+                                error_handler=on_err, timeout=timeout)
+
+    def cancel_pairing(self, addr):
+        self._iface(self.find_device(addr), DEVICE_IFACE).CancelPairing()
+
+
+class Agent(dbus.service.Object):
+    """org.bluez.Agent1, forwarded to whichever app client is connected.
+
+    Capability KeyboardDisplay, which is what makes BlueZ choose the numeric
+    comparison ("do both screens show 481920?") flow for modern devices and fall
+    back to passkey entry for old ones. The alternative, NoInputNoOutput, pairs
+    silently -- and would mean the app never gets to show anything, which is the
+    whole point of it existing.
+
+    Every method that BlueZ waits on is declared with async_callbacks, so the
+    D-Bus reply is deferred until a human taps something. Returning synchronously
+    would mean answering the prompt before it was displayed.
+    """
+
+    def __init__(self, bus, path, server):
+        dbus.service.Object.__init__(self, bus, path)
+        self.server = server
+
+    @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+    def Release(self):
+        log("agent released by bluez")
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="s",
+                         async_callbacks=("ok", "err"))
+    def RequestPinCode(self, device, ok, err):
+        self.server.agent_ask("pin", device, ok, err)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="u",
+                         async_callbacks=("ok", "err"))
+    def RequestPasskey(self, device, ok, err):
+        self.server.agent_ask("passkey", device, ok, err)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="ou", out_signature="",
+                         async_callbacks=("ok", "err"))
+    def RequestConfirmation(self, device, passkey, ok, err):
+        self.server.agent_ask("confirm", device, ok, err,
+                              passkey=int(passkey))
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="",
+                         async_callbacks=("ok", "err"))
+    def RequestAuthorization(self, device, ok, err):
+        self.server.agent_ask("authorize", device, ok, err)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="",
+                         async_callbacks=("ok", "err"))
+    def AuthorizeService(self, device, uuid, ok, err):
+        self.server.agent_ask("authorize-service", device, ok, err,
+                              uuid=str(uuid))
+
+    # The two Display* methods are one-way: BlueZ is telling the user what to
+    # type on the OTHER device, and expects no answer. They must return at once.
+    @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+    def DisplayPinCode(self, device, pincode):
+        self.server.agent_show("display-pin", device, pin=str(pincode))
+
+    @dbus.service.method(AGENT_IFACE, in_signature="ouq", out_signature="")
+    def DisplayPasskey(self, device, passkey, entered):
+        self.server.agent_show("display-passkey", device,
+                               passkey=int(passkey), entered=int(entered))
+
+    @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+    def Cancel(self):
+        self.server.agent_cancel_all()
+
+
+def dbus_error_text(exc):
+    if isinstance(exc, dbus.DBusException):
+        name = exc.get_dbus_name() or "org.freedesktop.DBus.Error.Failed"
+        message = (exc.get_dbus_message() or "").strip()
+        return "%s: %s" % (name, message) if message else name
+    return "%s: %s" % (type(exc).__name__, exc)
+
+
+class Client(object):
+    """One app connection: a reader thread, a writer thread, and a mailbox.
+
+    Reads are dispatched onto the GLib main loop with idle_add, so every command
+    handler and every D-Bus call runs single-threaded on the main loop and needs
+    no locking. Writes go through a bounded queue rather than sendall() from the
+    main loop, because a client that has stopped reading must not be able to
+    stall BlueZ event delivery for everybody else -- it gets dropped instead.
+    """
+
+    def __init__(self, server, conn, peer):
+        self.server = server
+        self.conn = conn
+        self.peer = "%s:%d" % peer[:2]
+        self.authed = not server.require_auth
+        self.alive = True
+        self.outbox = queue.Queue(maxsize=512)
+        self._close_lock = threading.Lock()
+
+    def start(self):
+        threading.Thread(target=self._writer, name="tx", daemon=True).start()
+        threading.Thread(target=self._reader, name="rx", daemon=True).start()
+        if self.server.require_auth:
+            GLib.timeout_add_seconds(AUTH_TIMEOUT, self._auth_deadline)
+
+    def _auth_deadline(self):
+        if self.alive and not self.authed:
+            log("%s never authenticated; closing" % self.peer)
+            self.close()
+        return False
+
+    def send(self, obj):
+        if not self.alive:
+            return
+        try:
+            self.outbox.put_nowait(json.dumps(obj, separators=(",", ":")))
+        except queue.Full:
+            log("%s is not draining; dropping it" % self.peer)
+            self.close()
+
+    def reply(self, msg, **fields):
+        out = {"ok": True}
+        out.update(fields)
+        if msg.get("id") is not None:
+            out["id"] = msg["id"]
+        self.send(out)
+
+    def fail(self, msg, error):
+        out = {"ok": False, "error": str(error)}
+        if msg.get("id") is not None:
+            out["id"] = msg["id"]
+        self.send(out)
+
+    def _writer(self):
+        while True:
+            line = self.outbox.get()
+            if line is None:
+                break
+            try:
+                self.conn.sendall(line.encode("utf-8") + b"\n")
+            except OSError:
+                break
+        self.close()
+
+    def _reader(self):
+        try:
+            stream = self.conn.makefile("rb")
+        except OSError:
+            self.close()
+            return
+        while self.alive:
+            try:
+                raw = stream.readline(65536)
+            except OSError:
+                break
+            if not raw:
+                break
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                msg = json.loads(raw.decode("utf-8", "replace"))
+            except ValueError:
+                self.send({"ok": False, "error": "malformed JSON"})
+                continue
+            if not isinstance(msg, dict):
+                self.send({"ok": False, "error": "expected a JSON object"})
+                continue
+            GLib.idle_add(self.server.handle, self, msg)
+        self.close()
+
+    def close(self):
+        with self._close_lock:
+            if not self.alive:
+                return
+            self.alive = False
+        try:
+            self.outbox.put_nowait(None)
+        except queue.Full:
+            pass
+        try:
+            self.conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.conn.close()
+        except OSError:
+            pass
+        self.server.drop(self)
+
+
+class Server(object):
+
+    def __init__(self, bus, args, token, tls_context, profile_pin):
+        self.args = args
+        self.token = token
+        self.tls_context = tls_context
+        self.profile_pin = profile_pin
+        self.require_auth = token is not None
+        self.host = args.listen
+        self.port = args.port
+
+        self.clients = []
+        self.clients_lock = threading.Lock()
+        self.agent_pending = {}
+        self.next_agent_id = 1
+        self.running = True
+        self.sock = None
+        self._bind_warned = False
+
+        self.bluez = Bluez(bus, args.adapter, self.broadcast)
+        self.agent = Agent(bus, AGENT_PATH, self)
+        self._register_agent(bus)
+
+        self.commands = {
+            "auth": self.cmd_auth,
+            "ping": self.cmd_ping,
+            "state": self.cmd_state,
+            "power": self.cmd_power,
+            "pairable": self.cmd_pairable,
+            "discoverable": self.cmd_discoverable,
+            "alias": self.cmd_alias,
+            "scan": self.cmd_scan,
+            "pair": self.cmd_pair,
+            "cancel-pair": self.cmd_cancel_pair,
+            "connect": self.cmd_connect,
+            "disconnect": self.cmd_disconnect,
+            "trust": self.cmd_trust,
+            "block": self.cmd_block,
+            "rename": self.cmd_rename,
+            "remove": self.cmd_remove,
+            "agent-reply": self.cmd_agent_reply,
+        }
+
+    # ---- agent registration ---------------------------------------------
+
+    def _register_agent(self, bus):
+        self.agent_manager = None
+        try:
+            manager = dbus.Interface(bus.get_object(BLUEZ, "/org/bluez"),
+                                     AGENT_MANAGER_IFACE)
+            manager.RegisterAgent(AGENT_PATH, "KeyboardDisplay")
+        except dbus.DBusException as exc:
+            log("RegisterAgent failed: %s" % dbus_error_text(exc))
+            return
+        self.agent_manager = manager
+        try:
+            # Without this a running bluetoothctl keeps the default agent and
+            # answers our prompts on a terminal nobody is looking at.
+            manager.RequestDefaultAgent(AGENT_PATH)
+        except dbus.DBusException as exc:
+            log("RequestDefaultAgent failed (another agent holds it): %s"
+                % dbus_error_text(exc))
+        log("agent registered at %s (KeyboardDisplay)" % AGENT_PATH)
+
+    # ---- client bookkeeping ---------------------------------------------
+
+    def snapshot_clients(self):
+        with self.clients_lock:
+            return list(self.clients)
+
+    def add(self, client):
+        with self.clients_lock:
+            self.clients.append(client)
+
+    def drop(self, client):
+        with self.clients_lock:
+            if client in self.clients:
+                self.clients.remove(client)
+            remaining = [c for c in self.clients if c.authed]
+        if not remaining:
+            GLib.idle_add(self._last_client_left)
+
+    def _last_client_left(self):
+        # Any pending agent request is refused cleanly rather than left for
+        # BlueZ to time out on its own, which leaves the device half-paired and
+        # needing a RemoveDevice to clear.
+        self.agent_cancel_all()
+        # And discovery stops. Nobody is looking at the results, and classic
+        # inquiry is not free -- it degrades the link to devices that are
+        # already connected, the owner's keyboard among them. Doing this here
+        # rather than in the app covers the cases the app cannot: a crash, a
+        # force-stop, a dropped link.
+        try:
+            if (self.bluez.adapter_json() or {}).get("discovering"):
+                self.bluez.stop_discovery()
+                log("last client left; stopped discovery")
+        except (dbus.DBusException, RuntimeError) as exc:
+            log("could not stop discovery: %s" % dbus_error_text(exc))
+        return False
+
+    def broadcast(self, event):
+        for client in self.snapshot_clients():
+            if client.authed:
+                client.send(event)
+
+    # ---- dispatch --------------------------------------------------------
+
+    def handle(self, client, msg):
+        command = msg.get("cmd")
+        if not isinstance(command, str):
+            client.fail(msg, "missing cmd")
+            return False
+        handler = self.commands.get(command)
+        if handler is None:
+            client.fail(msg, "unknown cmd: %s" % command)
+            return False
+        if not client.authed and command != "auth":
+            client.fail(msg, "not authenticated")
+            return False
+        try:
+            handler(client, msg)
+        except dbus.DBusException as exc:
+            client.fail(msg, dbus_error_text(exc))
+        except Exception as exc:                       # noqa: BLE001
+            client.fail(msg, "%s: %s" % (type(exc).__name__, exc))
+        return False
+
+    # ---- commands --------------------------------------------------------
+
+    def cmd_auth(self, client, msg):
+        supplied = msg.get("token")
+        if not self.require_auth:
+            client.authed = True
+        elif isinstance(supplied, str) and \
+                secrets.compare_digest(supplied, self.token):
+            client.authed = True
+        else:
+            client.fail(msg, "bad token")
+            log("%s presented a bad token" % client.peer)
+            client.close()
+            return
+        client.reply(msg, version=PROTOCOL_VERSION)
+        state = self.bluez.snapshot()
+        client.send({"ev": "ready", "version": PROTOCOL_VERSION,
+                     "adapter": state["adapter"], "devices": state["devices"]})
+
+    def cmd_ping(self, client, msg):
+        client.reply(msg, time=int(time.time()))
+
+    def cmd_state(self, client, msg):
+        state = self.bluez.snapshot()
+        client.reply(msg, adapter=state["adapter"], devices=state["devices"])
+
+    def cmd_power(self, client, msg):
+        self.bluez.set_adapter_prop("Powered", dbus.Boolean(bool(msg.get("on"))))
+        client.reply(msg)
+
+    def cmd_pairable(self, client, msg):
+        self.bluez.set_adapter_prop("Pairable", dbus.Boolean(bool(msg.get("on"))))
+        client.reply(msg)
+
+    def cmd_discoverable(self, client, msg):
+        timeout = msg.get("timeout")
+        if timeout is not None:
+            self.bluez.set_adapter_prop("DiscoverableTimeout",
+                                        dbus.UInt32(int(timeout)))
+        self.bluez.set_adapter_prop("Discoverable",
+                                    dbus.Boolean(bool(msg.get("on"))))
+        client.reply(msg)
+
+    def cmd_alias(self, client, msg):
+        self.bluez.set_adapter_prop("Alias", dbus.String(str(msg.get("name", ""))))
+        client.reply(msg)
+
+    def cmd_scan(self, client, msg):
+        if msg.get("on"):
+            self.bluez.start_discovery(msg.get("transport") or "auto")
+        else:
+            self.bluez.stop_discovery()
+        client.reply(msg)
+
+    def _async_device(self, client, msg, method, args, timeout):
+        addr = msg.get("addr")
+        self.bluez.device_async(
+            addr, method, args,
+            lambda: client.reply(msg),
+            lambda exc: client.fail(msg, dbus_error_text(exc)),
+            timeout)
+
+    def cmd_pair(self, client, msg):
+        self._async_device(client, msg, "Pair", (), PAIR_TIMEOUT)
+
+    def cmd_cancel_pair(self, client, msg):
+        self.bluez.cancel_pairing(msg.get("addr"))
+        client.reply(msg)
+
+    def cmd_connect(self, client, msg):
+        uuid = msg.get("uuid")
+        if uuid:
+            self._async_device(client, msg, "ConnectProfile",
+                               (dbus.String(str(uuid)),), CONNECT_TIMEOUT)
+        else:
+            self._async_device(client, msg, "Connect", (), CONNECT_TIMEOUT)
+
+    def cmd_disconnect(self, client, msg):
+        uuid = msg.get("uuid")
+        if uuid:
+            self._async_device(client, msg, "DisconnectProfile",
+                               (dbus.String(str(uuid)),), CONNECT_TIMEOUT)
+        else:
+            self._async_device(client, msg, "Disconnect", (), CONNECT_TIMEOUT)
+
+    def cmd_trust(self, client, msg):
+        self.bluez.set_device_prop(msg.get("addr"), "Trusted",
+                                   dbus.Boolean(bool(msg.get("on"))))
+        client.reply(msg)
+
+    def cmd_block(self, client, msg):
+        self.bluez.set_device_prop(msg.get("addr"), "Blocked",
+                                   dbus.Boolean(bool(msg.get("on"))))
+        client.reply(msg)
+
+    def cmd_rename(self, client, msg):
+        self.bluez.set_device_prop(msg.get("addr"), "Alias",
+                                   dbus.String(str(msg.get("alias", ""))))
+        client.reply(msg)
+
+    def cmd_remove(self, client, msg):
+        self.bluez.remove_device(msg.get("addr"))
+        client.reply(msg)
+
+    def cmd_agent_reply(self, client, msg):
+        req = msg.get("req")
+        entry = self.agent_pending.pop(req, None)
+        if entry is None:
+            client.fail(msg, "no pending request %r" % (req,))
+            return
+        if entry["timer"]:
+            GLib.source_remove(entry["timer"])
+        if not msg.get("accept"):
+            log("agent request %s (%s) refused by %s"
+                % (req, entry["kind"], client.peer))
+            entry["err"](Rejected())
+            client.reply(msg)
+            return
+        kind = entry["kind"]
+        log("agent request %s (%s) accepted by %s" % (req, kind, client.peer))
+        try:
+            if kind == "pin":
+                entry["ok"](dbus.String(str(msg.get("value", ""))))
+            elif kind == "passkey":
+                entry["ok"](dbus.UInt32(int(msg.get("value", 0))))
+            else:
+                entry["ok"]()
+        except (TypeError, ValueError) as exc:
+            entry["err"](Rejected())
+            client.fail(msg, "bad value for %s: %s" % (kind, exc))
+            return
+        client.reply(msg)
+
+    # ---- agent plumbing --------------------------------------------------
+
+    def _device_stub(self, path):
+        device = self.bluez.device_json(str(path)) or {}
+        # Absent keys, never null ones: org.json's optString() hands back the
+        # literal string "null" for a JSON null, which would defeat the app's
+        # alias-then-name-then-address fallback.
+        stub = {"path": str(path)}
+        for key in ("addr", "name", "alias", "icon"):
+            if device.get(key) is not None:
+                stub[key] = device[key]
+        return stub
+
+    def agent_ask(self, kind, device_path, ok, err, **extra):
+        if not [c for c in self.snapshot_clients() if c.authed]:
+            log("agent %s for %s with no app connected -- rejecting"
+                % (kind, device_path))
+            err(Rejected())
+            return
+        req = self.next_agent_id
+        self.next_agent_id += 1
+        log("agent request %d: %s for %s" % (req, kind, device_path))
+        self.agent_pending[req] = {
+            "kind": kind, "ok": ok, "err": err, "path": str(device_path),
+            "timer": GLib.timeout_add_seconds(
+                AGENT_TIMEOUT, self._agent_timeout, req),
+        }
+        event = {"ev": "agent", "req": req, "kind": kind,
+                 "timeout": AGENT_TIMEOUT}
+        event.update(self._device_stub(device_path))
+        event.update(extra)
+        self.broadcast(event)
+
+    def agent_show(self, kind, device_path, **extra):
+        log("agent display: %s for %s" % (kind, device_path))
+        event = {"ev": "agent-show", "kind": kind}
+        event.update(self._device_stub(device_path))
+        event.update(extra)
+        self.broadcast(event)
+
+    def _agent_timeout(self, req):
+        entry = self.agent_pending.pop(req, None)
+        if entry is not None:
+            log("agent request %d (%s) timed out" % (req, entry["kind"]))
+            entry["err"](Canceled())
+            self.broadcast({"ev": "agent-cancel", "req": req,
+                            "reason": "timeout"})
+        return False
+
+    def agent_cancel_all(self):
+        for req, entry in list(self.agent_pending.items()):
+            self.agent_pending.pop(req, None)
+            if entry["timer"]:
+                GLib.source_remove(entry["timer"])
+            entry["err"](Canceled())
+            self.broadcast({"ev": "agent-cancel", "req": req,
+                            "reason": "cancelled"})
+        return False
+
+    # ---- listening -------------------------------------------------------
+
+    def _listen(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.host, self.port))
+        sock.listen(16)
+        sock.settimeout(1.0)
+        return sock
+
+    def serve_forever(self):
+        threading.Thread(target=self._accept_loop, name="accept",
+                         daemon=True).start()
+
+    def _accept_loop(self):
+        while self.running:
+            if self.sock is None:
+                try:
+                    self.sock = self._listen()
+                except OSError as exc:
+                    # waydroid0 is created by waydroid-container.service, so at
+                    # boot this daemon can easily be up before the address it
+                    # wants exists. Wait for it rather than failing the unit.
+                    if not self._bind_warned:
+                        log("cannot bind %s:%d yet (%s) -- retrying"
+                            % (self.host, self.port, exc.strerror or exc))
+                        self._bind_warned = True
+                    time.sleep(3)
+                    continue
+                self._bind_warned = False
+                log("listening on %s:%d (%s, %s)"
+                    % (self.host, self.port,
+                       "TLS" if self.tls_context else "plaintext",
+                       "token" if self.require_auth else "NO AUTH"))
+            try:
+                conn, peer = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                if self.running:
+                    log("accept failed: %s" % exc)
+                    try:
+                        self.sock.close()
+                    except OSError:
+                        pass
+                    self.sock = None
+                    time.sleep(1)
+                continue
+            self._accepted(conn, peer)
+
+    def _accepted(self, conn, peer):
+        conn.settimeout(None)
+        if self.tls_context is not None:
+            try:
+                conn = self.tls_context.wrap_socket(conn, server_side=True)
+            except (ssl.SSLError, OSError) as exc:
+                log("TLS handshake from %s failed: %s" % (peer[0], exc))
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                return
+        if len(self.snapshot_clients()) >= MAX_CLIENTS:
+            log("refusing %s: %d clients already" % (peer[0], MAX_CLIENTS))
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
+        client = Client(self, conn, peer)
+        self.add(client)
+        log("client %s connected" % client.peer)
+        client.start()
+
+    def shutdown(self):
+        self.running = False
+        self.agent_cancel_all()
+        # Hand the agent back explicitly. BlueZ drops it when our bus name goes
+        # away anyway, but unregistering first means a bluetoothctl left open on
+        # the host becomes the default agent again immediately rather than after
+        # bluetoothd notices.
+        if self.agent_manager is not None:
+            try:
+                self.agent_manager.UnregisterAgent(AGENT_PATH)
+            except dbus.DBusException:
+                pass
+        for client in self.snapshot_clients():
+            client.close()
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+
+
+# ---- credential and profile delivery ------------------------------------
+#
+# The app is handed everything it needs to connect -- address, port, token and,
+# with --tls, the certificate fingerprint to pin -- as one JSON file dropped in
+# its own app-private directory. The container mounts that directory straight
+# off the host filesystem and SELinux is Disabled *inside* the container
+# (measured: `getenforce` says so), so a root-written file there is readable by
+# the app with no labelling to get right.
+#
+# A broadcast, as artifacts/media uses, was the alternative and is worse here:
+# it only lands if the app is running when it is sent, where a file is still
+# there after a reboot, an app restart or a daemon restart.
+
+
+def ensure_token(path):
+    try:
+        with open(path) as handle:
+            token = handle.read().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    token = secrets.token_hex(32)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(token + "\n")
+    log("generated a new token in %s" % path)
+    return token
+
+
+def ensure_tls_material(state_dir, cert, key, host):
+    if cert and key:
+        return cert, key
+    cert = os.path.join(state_dir, "cert.pem")
+    key = os.path.join(state_dir, "key.pem")
+    if os.path.exists(cert) and os.path.exists(key):
+        return cert, key
+    os.makedirs(state_dir, exist_ok=True)
+    # Self-signed on purpose. There is no CA here and no name to verify on a
+    # bridge address, so the app pins this certificate's SHA-256 instead --
+    # which is strictly stronger than trusting a CA that would sign anything.
+    proc = run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", key, "-out", cert, "-days", "3650",
+                "-subj", "/CN=waydroid-btd",
+                "-addext", "subjectAltName=IP:%s" % host])
+    if proc.returncode != 0:
+        raise SystemExit("openssl failed: %s" % (proc.stderr or "").strip())
+    os.chmod(key, 0o600)
+    log("generated a self-signed certificate in %s" % state_dir)
+    return cert, key
+
+
+def cert_fingerprint(cert_path):
+    with open(cert_path) as handle:
+        der = ssl.PEM_cert_to_DER_cert(handle.read())
+    return hashlib.sha256(der).hexdigest()
+
+
+def find_data_dir(explicit):
+    """Where Waydroid keeps /data. Same resolution as waydroid-mediad."""
+    if explicit:
+        return explicit
+    proc = run(["waydroid", "status"])
+    match = re.search(r"Session user:\s*(\S+?)\(", proc.stdout or "")
+    if match:
+        path = os.path.expanduser("~%s/.local/share/waydroid/data"
+                                  % match.group(1))
+        if os.path.isdir(path):
+            return path
+    for path in sorted(glob.glob("/home/*/.local/share/waydroid/data")):
+        return path
+    return None
+
+
+class ProfilePublisher(object):
+
+    def __init__(self, data_dir, package, payload):
+        self.data_dir = data_dir
+        self.package = package
+        self.payload = payload
+        self.reported = False
+
+    def path(self):
+        return os.path.join(self.data_dir, "data", self.package, "files",
+                            PROFILE_NAME)
+
+    def publish(self):
+        base = os.path.join(self.data_dir, "data", self.package)
+        if not os.path.isdir(base):
+            if not self.reported:
+                log("%s is not installed yet; will keep offering the profile"
+                    % self.package)
+                self.reported = True
+            return False
+        stat = os.stat(base)
+        files = os.path.join(base, "files")
+        if not os.path.isdir(files):
+            # Android creates this lazily on the first getFilesDir(). Creating
+            # it here is safe only because we hand it straight back to the app
+            # -- docs/46 paid for the version of this bug where a root-owned
+            # directory left the app unable to write its own files.
+            os.mkdir(files, 0o771)
+            os.chown(files, stat.st_uid, stat.st_gid)
+        target = self.path()
+        wanted = json.dumps(self.payload, sort_keys=True)
+        try:
+            with open(target) as handle:
+                if handle.read().strip() == wanted:
+                    return True
+        except OSError:
+            pass
+        tmp = target + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(wanted)
+        os.chown(tmp, stat.st_uid, stat.st_gid)
+        os.replace(tmp, target)
+        log("published connection profile to %s (uid %d)"
+            % (target, stat.st_uid))
+        self.reported = False
+        return True
+
+    def tick(self):
+        try:
+            self.publish()
+        except OSError as exc:
+            log("could not publish the profile: %s" % exc)
+        return True
+
+
+def waydroid_bridge_address(iface):
+    proc = run(["ip", "-4", "-o", "addr", "show", iface])
+    match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)/", proc.stdout or "")
+    return match.group(1) if match else None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--listen", metavar="ADDR",
+                        help="address to bind (default: the bridge's address)")
+    parser.add_argument("--bridge", default="waydroid0",
+                        help="interface to take the default address from")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--adapter", metavar="HCI",
+                        help="adapter to use (default: the first one)")
+    parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR)
+    parser.add_argument("--data-dir", help="Waydroid data dir (autodetected)")
+    parser.add_argument("--package", default=DEFAULT_PACKAGE)
+    parser.add_argument("--no-auth", action="store_true",
+                        help="accept unauthenticated clients (testing only)")
+    parser.add_argument("--no-profile", action="store_true",
+                        help="do not write the app's connection profile")
+    parser.add_argument("--tls", action="store_true",
+                        help="wrap the listener in TLS; generates and pins a "
+                             "self-signed certificate unless one is given")
+    parser.add_argument("--tls-cert", metavar="PEM")
+    parser.add_argument("--tls-key", metavar="PEM")
+    args = parser.parse_args()
+
+    if not args.listen:
+        args.listen = waydroid_bridge_address(args.bridge)
+        if not args.listen:
+            log("%s has no address yet; assuming 192.168.240.1"
+                % args.bridge)
+            args.listen = "192.168.240.1"
+
+    token = None
+    if not args.no_auth:
+        token = ensure_token(os.path.join(args.state_dir, "token"))
+
+    tls_context = None
+    pin = None
+    if args.tls:
+        cert, key = ensure_tls_material(args.state_dir, args.tls_cert,
+                                        args.tls_key, args.listen)
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        tls_context.load_cert_chain(cert, key)
+        pin = cert_fingerprint(cert)
+        log("TLS enabled; pin sha256:%s" % pin)
+    elif args.tls_cert or args.tls_key:
+        raise SystemExit("--tls-cert/--tls-key mean nothing without --tls")
+
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    try:
+        bus = dbus.SystemBus()
+    except dbus.DBusException as exc:
+        raise SystemExit("no system bus: %s" % dbus_error_text(exc))
+
+    server = Server(bus, args, token, tls_context, pin)
+    adapter = server.bluez.adapter_json()
+    if adapter:
+        log("adapter %s (%s) powered=%s"
+            % (adapter.get("path"), adapter.get("addr"),
+               adapter.get("powered")))
+    else:
+        log("no adapter yet -- will pick one up when bluetoothd offers it")
+
+    if not args.no_profile:
+        data_dir = find_data_dir(args.data_dir)
+        if not data_dir:
+            log("no Waydroid data directory found; the app will have to be "
+                "pointed at this daemon by hand")
+        else:
+            publisher = ProfilePublisher(data_dir, args.package, {
+                "version": PROTOCOL_VERSION,
+                "host": args.listen,
+                "port": args.port,
+                "tls": bool(args.tls),
+                "pin": pin,
+                "token": token or "",
+            })
+            publisher.tick()
+            GLib.timeout_add_seconds(30, publisher.tick)
+
+    server.serve_forever()
+
+    loop = GLib.MainLoop()
+
+    def stop(*_unused):
+        log("shutting down")
+        server.shutdown()
+        loop.quit()
+        return False
+
+    unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, stop)
+    unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, stop)
+    loop.run()
+
+
+if __name__ == "__main__":
+    main()
