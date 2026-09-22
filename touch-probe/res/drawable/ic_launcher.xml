@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Five contact dots over a dark ground: the thing being counted. Vector
+     drawable so there are no density buckets to generate. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp"
+    android:viewportWidth="48" android:viewportHeight="48">
+    <path android:fillColor="#0D1117"
+        android:pathData="M0,0h48v48h-48z" />
+    <path android:fillColor="#4FC3F7"
+        android:pathData="M10,14 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+    <path android:fillColor="#FFB74D"
+        android:pathData="M22,10 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+    <path android:fillColor="#AED581"
+        android:pathData="M34,14 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+    <path android:fillColor="#F06292"
+        android:pathData="M16,28 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+    <path android:fillColor="#BA68C8"
+        android:pathData="M30,30 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+    <path android:strokeColor="#30363D" android:strokeWidth="2"
+        android:fillColor="#00000000"
+        android:pathData="M4,40 h40" />
+</vector>

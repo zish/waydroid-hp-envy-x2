@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Touch Probe - draws every active pointer, so "how many independent contacts
+  does Android actually receive here?" is answerable by looking at the screen.
+
+  Written because the panel reports ABS_MT_SLOT max=9 (ten contacts) and
+  Waydroid's bridge reports Slot max=9 to match, but Android declares only
+  android.hardware.touchscreen and android.hardware.faketouch — none of the
+  three touchscreen.multitouch* features. Before adding the feature XML, the
+  claim "ten contacts arrive as ten pointers" has to be measured, not inferred.
+
+  It doubles as the stylus probe: it reports TOOL_TYPE per pointer, the stylus
+  button bits, and hover events, so a pen shows up as TOOL_TYPE_STYLUS with
+  pressure rather than as another finger. See docs/45 and AGENTS.md goal 4.
+
+  Same house style as sensor-app, quat-monitor and drm-probe: depends on NOTHING
+  but the platform. No AndroidX, no Compose, no coroutines, no Gradle.
+
+  No permissions. Touch delivery needs none, and asking for storage would only
+  add a grant prompt — the report goes to the app's own external files dir.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="lan.syshlt.touchprobe"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:launchMode="singleTop"
+            android:screenOrientation="fullSensor"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
