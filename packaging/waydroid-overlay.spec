@@ -161,7 +161,11 @@ reasons unrelated to the CDM.
 # reconciler is shell.
 
 %install
+# STAGEDIR pinned to the old %{_datadir} layout this spec's %files describes.
+# The generated per-modification specs use %{_prefix}/lib instead; the
+# reconciler searches both. See docs/47-package-split.md.
 DESTDIR=%{buildroot} PREFIX=%{_prefix} UNITDIR=%{_unitdir} \
+    STAGEDIR=%{overlay_dir} \
     sh artifacts/overlay-manager/install.sh
 
 DESTDIR=%{buildroot} PREFIX=%{_prefix} \

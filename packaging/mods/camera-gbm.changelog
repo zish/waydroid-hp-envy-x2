@@ -1,0 +1,3 @@
+* Wed Sep 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- Split out of waydroid-overlay as its own source package (docs/47).
+- Manifest now records the stock hash of both files this component replaces.

@@ -38,13 +38,19 @@
 #
 # LAYOUT
 #
-#   /usr/share/waydroid-overlay/<component>/{system,vendor}/...   payload
-#   /usr/share/waydroid-overlay/manifests/<component>.manifest    mode sha path
+#   /usr/lib/waydroid-overlay/<component>/{system,vendor}/...     payload
+#   /usr/lib/waydroid-overlay/manifests/<component>.manifest      mode sha path
 #   /var/lib/waydroid-overlay/deployed.list                       what we placed
 #
-# /usr/local/share/waydroid-overlay is read too and wins over /usr/share, so a
+# /usr/lib and not /usr/share because most components carry Android ELF, and
+# /usr/share is for architecture-independent data -- rpmlint says so and it is
+# right. /usr/share/waydroid-overlay is still searched, after it, so anything
+# staged by the older layout keeps working.
+#
+# The /usr/local variants are read too and win over the /usr ones, so a
 # hand-staged component can override a packaged one on an immutable host without
-# layering anything. Both are searched by default; --stage-dir replaces the list.
+# layering anything. All four are searched by default; --stage-dir replaces the
+# list. Later directories win, so the order above is least- to most-specific.
 #
 # Usage:
 #   waydroid-overlay-sync              reconcile the overlay
@@ -52,13 +58,17 @@
 #   waydroid-overlay-sync --apply      reconcile, then restart the container
 #   waydroid-overlay-sync --quiet      only speak when something changed or broke
 #
-# Env: STAGE_DIRS, OVERLAY_DIR, STATE_DIR
+# Env: STAGE_DIRS, OVERLAY_DIR, STATE_DIR, RW_DIR
 set -eu
 
-STAGE_DIRS=${STAGE_DIRS:-"/usr/share/waydroid-overlay /usr/local/share/waydroid-overlay"}
+STAGE_DIRS=${STAGE_DIRS:-"/usr/lib/waydroid-overlay /usr/share/waydroid-overlay \
+	/usr/local/lib/waydroid-overlay /usr/local/share/waydroid-overlay"}
 OVERLAY_DIR=${OVERLAY_DIR:-/var/lib/waydroid/overlay}
 STATE_DIR=${STATE_DIR:-/var/lib/waydroid-overlay}
 WAYDROID_CFG=${WAYDROID_CFG:-/var/lib/waydroid/waydroid.cfg}
+# The overlayfs upperdir, which outranks everything we place. Not ours, not
+# written by us -- read only to notice when it is hiding our work.
+RW_DIR=${RW_DIR:-$(dirname "$OVERLAY_DIR")/overlay_rw}
 
 VERIFY=0
 APPLY=0
@@ -196,6 +206,42 @@ while read -r dir comp mode sha rel; do
 	changed=1
 	echo "$dst" >>"$tmp/relabel"
 done <"$tmp/want"
+
+# ------------------------------------------------------- is any of it masked?
+#
+# There is a layer ABOVE ours and it is not ours: Waydroid mounts
+# overlay_rw/{system,vendor} as the overlayfs upperdir, so anything there wins
+# over everything this tool places -- silently, with no log line anywhere, and
+# with this tool otherwise reporting the overlay as perfectly correct, because
+# it is. It is just not the layer Android reads.
+#
+# You get files there by writing to /system or /vendor from inside Android,
+# which is exactly what every "remount,rw and edit build.prop" guide tells
+# people to do. So this is a normal thing for a user to have done and a
+# miserable thing to debug without being told. docs/user/overlay.md.
+#
+# The path mapping is not symmetric, because the two mounts are not:
+#   overlay/vendor/X  is Android /vendor/X  -> overlay_rw/vendor/X
+#   overlay/X         is Android /X         -> overlay_rw/system/X
+
+if [ -d "$RW_DIR" ]; then
+	while read -r dir comp mode sha rel; do
+		case "$rel" in
+		vendor/*) rw="$RW_DIR/vendor/${rel#vendor/}" ;;
+		*)        rw="$RW_DIR/system/$rel" ;;
+		esac
+		[ -e "$rw" ] || continue
+		if [ -c "$rw" ] && [ "$(stat -c '%t:%T' "$rw" 2>/dev/null)" = "0:0" ]; then
+			warn "whiteout:  $rel  ($comp)"
+			warn "  $rw hides this path from Android entirely."
+		else
+			warn "shadowed:  $rel  ($comp)"
+			warn "  $rw outranks it -- Android is reading that file, not ours."
+		fi
+		warn "  Remove it and restart waydroid-container.service to hand the path back."
+		drift=1
+	done <"$tmp/want"
+fi
 
 # --------------------------------------------------------------------- remove
 #

@@ -1,0 +1,42 @@
+# GENERATED FILE -- do not edit.
+#
+# Rendered by packaging/gen-spec.sh from packaging/mods/@MOD@.mod and
+# packaging/mods/@MOD@.changelog. Change those, re-run the generator, and the
+# packaging fix lands in every modification at once. Editing this file by hand
+# is how twenty-five specs drift apart. See docs/47-package-split.md.
+@GLOBALS@
+Name:           waydroid-ext-@MOD@
+Version:        @VERSION@
+Release:        @RELEASE@%{?dist}
+Summary:        @SUMMARY@
+
+License:        @LICENSE@
+URL:            https://github.com/zish/bigtab01-waydroid
+Source0:        %{name}-%{version}.tar.gz
+@ARCHLINE@
+@BUILDREQUIRES@
+@REQUIRES@
+@RECOMMENDS@
+@CONFLICTS@
+
+%description
+@DESCRIPTION@
+
+%prep
+%autosetup -n %{name}-%{version}
+
+%build
+@BUILD@
+
+%install
+@INSTALL@
+
+@CHECK@
+@SCRIPTLETS@
+%files
+%license LICENSE
+@DOCFILES@
+@FILES@
+
+%changelog
+@CHANGELOG@

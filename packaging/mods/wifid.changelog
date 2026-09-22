@@ -1,0 +1,4 @@
+* Wed Sep 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- Split out of waydroid-wifid.spec as its own source package (docs/47).
+- waydroid-wifi-sync and its timer move to waydroid-ext-wifi-sync, so a
+  credential-reconciler fix no longer reissues the daemon.

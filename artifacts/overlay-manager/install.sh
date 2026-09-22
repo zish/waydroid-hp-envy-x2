@@ -20,6 +20,10 @@ PREFIX=${PREFIX:-/usr/local}
 # and init_t may not start a unit file labelled lib_t. docs/27 has the measurement.
 UNITDIR=${UNITDIR:-/etc/systemd/system}
 DESTDIR=${DESTDIR:-}
+# Where components stage their payload. /usr/lib and not /usr/share because most
+# of them carry Android ELF; the reconciler still searches the old /usr/share
+# location after this one, so nothing staged the old way stops working.
+STAGEDIR=${STAGEDIR:-$PREFIX/lib/waydroid-overlay}
 src=$(dirname "$0")
 
 install -D -m 0755 "$src/waydroid-overlay-sync" \
@@ -38,7 +42,7 @@ ln -sf ../waydroid-overlay-sync.service \
 
 # The directory the components stage into. Owned here so that the manager alone
 # is a complete, working install.
-mkdir -p "$DESTDIR$PREFIX/share/waydroid-overlay/manifests"
+mkdir -p "$DESTDIR$STAGEDIR/manifests"
 
 if [ -n "$DESTDIR" ]; then exit 0; fi
 
@@ -52,7 +56,7 @@ cat <<EOM
 installed:
   $PREFIX/bin/waydroid-overlay-sync
   $UNITDIR/waydroid-overlay-sync.service   (wanted by multi-user.target)
-  $PREFIX/share/waydroid-overlay/          (stage components here)
+  $STAGEDIR/          (stage components here)
 
 Stage the components, then reconcile:
   sh artifacts/overlay/install.sh camera battery wifi widevine

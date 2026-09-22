@@ -1,0 +1,84 @@
+# rpmlint filters for this repository's packages.
+#
+#     rpmlint -r packaging/waydroid-ext.rpmlintrc build/rpm/RPMS/*/*.rpm
+#
+# packaging/build-mod.sh --lint passes it automatically.
+#
+# Note it is an rpmlintrc (-r), NOT a config file (-c). rpmlint 2.7 loads
+# Filters = [...] out of a TOML config and then does not apply them -- they show
+# up in --print-config and filter nothing. addFilter() in an rpmlintrc works.
+#
+# Every filter here is a check that is correct in general and inapplicable to
+# these packages, with the reason. Nothing is filtered for being noisy.
+#
+# DELIBERATELY NOT FILTERED, because they are real and unfixed:
+#
+#   no-signature          the packages are unsigned. They must be signed before
+#                         any of them is published. docs/47-package-split.md.
+#   invalid-url Source0   Source0 is a bare filename because there is no release
+#                         download URL yet. It becomes a real URL at first release.
+#   no-%check-section     true of the group and host packages. Overlay components
+#                         do have one -- it verifies the staged payload against
+#                         the manifest -- and the others should grow one.
+
+# ---------------------------------------------------------------- foreign ELF
+#
+# The overlay payload is x86_64 and x86 shared objects built for Android 13 and
+# loaded by processes inside the container, never by anything on the host.
+# rpmlint reads them as host libraries and applies host-library rules, which
+# produces four complaints about the same fact.
+#
+# 0644 is Android's convention for /vendor/lib64, it is the mode the working
+# overlay on the reference machine has, and it is recorded in the component
+# manifest -- a deliberate value, not a slip.
+addFilter("shared-library-not-executable.*waydroid-overlay")
+# These files must be named exactly what Android's linker looks for, which is
+# unversioned. A versioned soname would simply not be found.
+addFilter("invalid-soname.*waydroid-overlay")
+addFilter("non-versioned-file-in-library-package.*waydroid-overlay")
+# Built by the Android NDK, which does not emit the section rpmlint wants. Not
+# ours to add, and adding it would change bytes verified against a running system.
+addFilter("missing-hash-section.*waydroid-overlay")
+# Unstripped on purpose: the specs set %__brp_strip to %nil because these are
+# the exact bytes compared by sha256 against the reference machine and recorded
+# in the component manifest. Stripping them would make the package's payload
+# disagree with its own manifest, which the %check would then fail.
+addFilter("unstripped-binary-or-object.*waydroid-overlay")
+
+# ------------------------------------------------------------------- the path
+#
+# %{_prefix}/lib, not %{_libdir}: this is package data that the reconciler reads,
+# not a linkable library, so it must not land in /usr/lib64 on a multilib host.
+# systemd, udev and dracut all stage into %{_prefix}/lib for the same reason.
+addFilter("hardcoded-library-path.*waydroid-overlay")
+
+# ---------------------------------------------------------- obsolete rpm tags
+#
+# Group: and BuildRoot: have been obsolete since rpm 4.6; Fedora's guidelines
+# forbid Group: outright. Packager: is set by the build system, not the spec.
+addFilter("no-group-tag")
+addFilter("no-buildroot-tag")
+addFilter("no-packager-tag")
+
+# --------------------------------------------------------- build-host artefact
+#
+# rpmlint on a Debian build host has no SPDX identifier list, so every correct
+# SPDX expression is reported invalid; on a Fedora builder these do not fire.
+# Filtered by identifier rather than wholesale, so a genuinely wrong licence
+# string still shows up.
+addFilter("invalid-license (GPL-3.0-or-later|Apache-2.0|MIT)$")
+
+# rpmlint infers a locale subpackage from the "-gbm" suffix of the package name.
+# There is no locale content here at all.
+addFilter("no-dependency-on locales-gbm")
+
+# ------------------------------------------------------------------- spelling
+#
+# A blanket filter, and the only one here. These descriptions are mostly Android
+# and Linux identifiers -- minigbm, wificond, gbinder, dexopt, VINTF, udev,
+# autosuspend, Waydroid -- none of which any dictionary has, and rpmlint's
+# suggestions are actively wrong: it offers "minicam" for "minigbm". Keeping the
+# check would mean adding a word per modification forever and reading past the
+# noise anyway, which is how a real typo gets missed. Descriptions are reviewed
+# by a human instead.
+addFilter("spelling-error")

@@ -6,6 +6,39 @@ header so there is one place to correct when it changes.
 Design, dependency rationale and the migration steps are in
 [docs/36-packaging.md](../docs/36-packaging.md).
 
+**The four-source-package layout below is superseded in design, not yet in code.**
+[docs/47-package-split.md](../docs/47-package-split.md) replaces it with one source package
+per modification, generated from `packaging/mods/*.mod`, so a fix to one mod does not reissue
+every other one. It also answers the overlay-backup question (no backups: the overlay really
+is an overlayfs lowerdir over a read-only image), names the seven overlay files that *replace*
+a stock file and are therefore the surface an image upgrade can break, and carries the
+Debian/Ubuntu and other-distro roadmap. Read it before touching anything here.
+
+## Generated per-modification packages — these have been built
+
+`rpm` 4.20.1 and `rpmlint` 2.7.0 were installed on the Debian 13 dev box on 2026-09-17, so
+"never been through rpmbuild" is no longer true of everything here. Built with
+`packaging/build-mod.sh --lint`:
+
+| Modification | Spec renders | `rpmbuild -bs` | `rpmbuild -ba` | rpmlint clean |
+|---|---|---|---|---|
+| `camera-gbm` | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
+| `camera` (group) | yes | yes | **yes** | same, plus `no-%check-section` — a metapackage has nothing to check |
+| `wifid` | yes | **yes** | no | same |
+
+`wifid` cannot do a full `-ba` here for two separate reasons, and only the first is about this
+box: `libgbinder-devel` is a Fedora package, and `artifacts/wifi/install.sh` installs the daemon
+*and* `waydroid-wifi-sync` unconditionally, so it cannot yet serve either modification alone —
+an `-ba` build would fail on unpackaged files. That installer needs the component-argument
+treatment `artifacts/overlay/install.sh` already has, with `all` as the default so the
+superseded `waydroid-wifid.spec` keeps working. Recorded in `packaging/mods/wifid.mod`.
+
+`no-signature` and `invalid-url Source0` are deliberately not filtered: both are real and both
+are release-time work. Everything else rpmlint said is filtered with a written reason in
+[waydroid-ext.rpmlintrc](waydroid-ext.rpmlintrc).
+
+## The superseded four-spec layout
+
 | Spec | Payload staged and checked against `%files` | Parsed by `rpmspec` | Built by `rpmbuild` | Installed on bigtab01 |
 |---|---|---|---|---|
 | `waydroid-bigtab01.spec` | yes (2026-09-07) | no | no | no |
@@ -87,9 +120,16 @@ APKs were considered and rejected for all of it: an APK cannot set system proper
 `WRITE_DEVICE_CONFIG`, which would mean shipping a privileged system app into the overlay to do
 what a host-side one-shot already does.
 
-There is no rpm toolchain on the dev box (`rpmbuild`, `rpmspec` and `rpm` are all absent),
-and layering one onto bigtab01 costs a reboot. `sudo apt-get install -y rpm` provides
-`rpmbuild` and `rpmspec` here; `packaging/build-rpms.sh` drives them.
+The dev box now has `rpm` 4.20.1 and `rpmlint` 2.7.0 (Debian 13). Layering a toolchain onto
+bigtab01 would still cost a reboot, so builds stay here. `packaging/build-mod.sh` drives the
+generated per-modification packages; `packaging/build-rpms.sh` still drives the four legacy
+specs.
+
+Two things the Debian host does not provide, both handled rather than ignored:
+`systemd-rpm-macros` is a Fedora package, so `build-mod.sh` defines `%{_unitdir}` and
+`%{_userunitdir}` itself when they are missing and stands aside when they are not; and Debian's
+rpmlint has no SPDX identifier list, so correct licence strings are reported invalid and are
+filtered by identifier.
 
 The two daemon specs need Fedora's `libgbinder-devel` and `libglibutil-devel` for a real
 source build. `packaging/build-rpms.sh --prebuilt` packages the binaries `wifi/build.sh`
