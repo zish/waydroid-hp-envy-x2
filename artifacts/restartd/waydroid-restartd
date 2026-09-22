@@ -1,0 +1,327 @@
+#!/usr/bin/python3
+"""waydroid-restartd -- make Android's init service restarts actually happen.
+
+See docs/48-battery-frozen-and-netd-stale.md.
+
+The problem in one paragraph. Android's init stops a service by calling
+libprocessgroup's KillProcessGroup(), which signals every pid listed in that
+service's cgroup.procs. Waydroid mounts the container's /sys/fs/cgroup read-only
+(`lxc.mount.auto = cgroup:ro sys:ro proc`), so libprocessgroup never created any
+per-process cgroup, the signal reaches nobody, and init parks the service in
+STOPPING waiting for a SIGCHLD that will never arrive. Measured on bigtab01
+2026-09-18: netd, audioserver, cameraserver and media had all been STOPPING for
+ten hours, since the last zygote restart fired their `onrestart restart` lines.
+
+Nothing ever recovers from that by itself, and the consequences are not cosmetic.
+The one that was reported as a bug is Wi-Fi: a surviving netd keeps its old
+per-network state, so when the new system_server hands out netIds from 100 again,
+`networkAddInterface` fails EBUSY against the interface the dead netId still owns
+and Android ends up associated with no routes and no DNS -- "connected, no
+internet". The proper fix is to make process-group kill work, which is the cgroup
+work in docs/43 (goal 7). This is the mitigation until then: notice STOPPING
+services whose process is still alive, and signal them so init can reap them.
+
+## Why the timing is the whole design
+
+Killing a stuck service is not the hard part. Not starting a restart storm is.
+
+init.rc has mutual onrestart edges: zygote's rc carries `onrestart restart netd`,
+and netd's rc carries `onrestart restart zygote`. On a working device that does
+not loop, and the reason is a race this daemon has to reproduce. Service::Reap()
+runs the dead service's onrestart commands and sets SVC_RESTARTING, and
+Service::Restart() is a no-op while that flag is set:
+
+    void Service::Restart() {
+        if (flags_ & SVC_RUNNING)          StopOrReset(SVC_RESTART);
+        else if (!(flags_ & SVC_RESTARTING)) Start();
+    }
+
+So `restart netd` -> netd reaped -> `restart zygote` -> zygote reaped ->
+`restart netd` lands while netd is still inside its restart delay, does nothing,
+and the chain ends. The cycle is broken by being FAST.
+
+Which means a fixed slow poll here is not merely sluggish, it is dangerous: kill
+netd, wait 25 s, kill the zygote that netd's onrestart wedged, and by then netd is
+RUNNING again, so zygote's onrestart wedges netd, and the two ping-pong forever.
+
+Hence two speeds. Steady state polls slowly, because this is a laptop and the
+answer is almost always "nothing is stuck". The moment we kill anything we enter a
+cascade window and poll hard, signalling whatever appears in STOPPING with no
+grace at all -- which is what init itself would have done.
+
+And because that reasoning rests on init internals rather than on something
+measured here, there is a circuit breaker underneath it: more than MAX_KILLS in
+BREAKER_WINDOW and the daemon stops acting for BREAKER_COOLDOWN and says so. A
+few extra restarts is a bad afternoon; an unbounded loop is a brick.
+
+## Notes
+
+  * The first kill of a service is SIGTERM, not SIGKILL. init already believes it
+    sent SIGTERM, so this is the signal the service was supposed to get; anything
+    still there on the next poll gets SIGKILL.
+  * Service pids come from `init.svc_debug_pid.<name>`, which exists because this
+    image is userdebug. There is no non-debug equivalent, and guessing a pid from
+    an executable name would be worse than doing nothing.
+  * Signals are delivered with lxc-attach rather than translated to host pids
+    through /proc/*/status NSpid, so the pid from the property is used in the
+    namespace it came from and cannot possibly name a host process.
+  * Stdlib only -- the host is an immutable Atomic image where every dependency
+    costs a layered install and a reboot.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+
+LXC_PATH = "/var/lib/waydroid/lxc"
+LXC_NAME = "waydroid"
+LXC_INFO = "/usr/bin/lxc-info"
+LXC_ATTACH = "/usr/bin/lxc-attach"
+
+# Android's own state names. Only STOPPING is actionable: STOPPED is a service
+# that really did stop (the overlay .rc that execs /system/bin/true to close the
+# wificond name race leaves wificond exactly there, and it is correct).
+STOPPING = "stopping"
+
+SVC_PREFIX = "init.svc."
+PID_PREFIX = "init.svc_debug_pid."
+
+
+def env_float(name, default):
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+def env_int(name, default):
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+class Config:
+    def __init__(self, args):
+        # Slow enough that an idle machine is not paying for this, fast enough
+        # that a wedged service is cleared within a couple of polls.
+        self.idle_interval = env_float("WAYDROID_RESTARTD_IDLE_INTERVAL", 10.0)
+        # Fast enough to win the SVC_RESTARTING race described above.
+        self.fast_interval = env_float("WAYDROID_RESTARTD_FAST_INTERVAL", 0.2)
+        # Consecutive observations before the FIRST kill of a quiet period. Guards
+        # against a service that is legitimately taking its time to exit; there is
+        # no such guard inside a cascade window, deliberately.
+        self.confirm_polls = max(1, env_int("WAYDROID_RESTARTD_CONFIRM_POLLS", 2))
+        self.cascade_window = env_float("WAYDROID_RESTARTD_CASCADE_WINDOW", 10.0)
+        self.max_kills = env_int("WAYDROID_RESTARTD_MAX_KILLS", 8)
+        self.breaker_window = env_float("WAYDROID_RESTARTD_BREAKER_WINDOW", 300.0)
+        self.breaker_cooldown = env_float("WAYDROID_RESTARTD_BREAKER_COOLDOWN", 3600.0)
+        # Space-separated service names this daemon must never signal. Empty by
+        # default on purpose: excluding zygote looks prudent and is not. netd's
+        # restart is only half a repair -- the new netd is clean while the old
+        # system_server still holds netIds it has never heard of -- and zygote's
+        # restart is the other half. That is why netd.rc asks for it.
+        self.exclude = set(os.environ.get("WAYDROID_RESTARTD_EXCLUDE", "").split())
+        self.dry_run = args.dry_run
+        self.verbose = args.verbose
+
+
+def log(msg):
+    sys.stderr.write("waydroid-restartd: %s\n" % msg)
+    sys.stderr.flush()
+
+
+def container_state():
+    """RUNNING/FROZEN/STOPPED/..., or STOPPED for anything unrecognised.
+
+    Same treatment as artifacts/shutdown/waydroid-shutdown-android: lxc-info
+    exits 1 and prints "<name> doesn't exist" when there is no container.
+    """
+    try:
+        out = subprocess.run(
+            [LXC_INFO, "-P", LXC_PATH, "-n", LXC_NAME, "-sH"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).stdout.decode("utf-8", "replace").strip()
+    except (OSError, subprocess.SubprocessError):
+        return "STOPPED"
+    return out or "STOPPED"
+
+
+def attach(argv, timeout=10):
+    """Run argv inside the container. Returns stdout, or None on any failure."""
+    try:
+        proc = subprocess.run(
+            [LXC_ATTACH, "-P", LXC_PATH, "-n", LXC_NAME, "--clear-env", "--"] + argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.decode("utf-8", "replace")
+
+
+def read_props():
+    """{name: value} from the container's whole property space, or None.
+
+    One getprop covers every init.svc.* and init.svc_debug_pid.* in a single
+    process spawn, which is what makes the fast poll affordable.
+    """
+    out = attach(["/system/bin/getprop"])
+    if out is None:
+        return None
+    props = {}
+    for line in out.splitlines():
+        # getprop prints "[name]: [value]".
+        if not line.startswith("[") or "]: [" not in line:
+            continue
+        name, _, rest = line[1:].partition("]: [")
+        props[name] = rest.rstrip("]")
+    return props or None
+
+
+def signal_in_container(pid, sig):
+    """Signal a CONTAINER pid, from inside the container's pid namespace."""
+    # mksh's kill builtin, so this needs no extra binary and no pid translation.
+    return attach(["/system/bin/sh", "-c", "kill -%d %d" % (sig, pid)]) is not None
+
+
+def stuck_services(props, cfg):
+    """[(name, pid)] for services init is waiting to reap."""
+    out = []
+    for key, value in props.items():
+        if not key.startswith(SVC_PREFIX) or value != STOPPING:
+            continue
+        name = key[len(SVC_PREFIX):]
+        if name in cfg.exclude:
+            continue
+        raw = props.get(PID_PREFIX + name)
+        if not raw:
+            # No debug pid property: nothing safe to signal. Reported once per
+            # service by the caller rather than every poll.
+            out.append((name, None))
+            continue
+        try:
+            out.append((name, int(raw)))
+        except ValueError:
+            out.append((name, None))
+    return sorted(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--dry-run", action="store_true",
+                    help="report what would be signalled, signal nothing")
+    ap.add_argument("--verbose", action="store_true",
+                    help="log every poll, not just actions")
+    ap.add_argument("--once", action="store_true",
+                    help="one poll, then exit (for bin/ tests)")
+    args = ap.parse_args()
+    cfg = Config(args)
+
+    seen = {}            # service -> consecutive polls observed STOPPING
+    signalled = set()    # services already sent SIGTERM this episode
+    kills = []           # timestamps, for the circuit breaker
+    cascade_until = 0.0
+    breaker_until = 0.0
+    warned_no_pid = set()
+
+    log("watching for init services stuck in STOPPING "
+        "(idle %.1fs, cascade %.1fs at %.2fs, breaker %d/%.0fs)%s"
+        % (cfg.idle_interval, cfg.cascade_window, cfg.fast_interval,
+           cfg.max_kills, cfg.breaker_window, " [dry-run]" if cfg.dry_run else ""))
+
+    while True:
+        now = time.monotonic()
+        cascading = now < cascade_until
+        interval = cfg.fast_interval if cascading else cfg.idle_interval
+
+        if now < breaker_until:
+            interval = cfg.idle_interval
+        elif container_state() != "RUNNING":
+            seen.clear()
+            signalled.clear()
+        else:
+            props = read_props()
+            if props is None:
+                if cfg.verbose:
+                    log("could not read properties; container may be starting")
+            elif props.get("sys.shutdown.requested"):
+                # Everything is STOPPING during a shutdown, and all of it is meant to be.
+                if cfg.verbose:
+                    log("shutdown in progress; standing down")
+                seen.clear()
+                signalled.clear()
+            else:
+                stuck = stuck_services(props, cfg)
+                names = {n for n, _ in stuck}
+                for name in list(seen):
+                    if name not in names:
+                        seen.pop(name, None)
+                        signalled.discard(name)
+
+                if cfg.verbose:
+                    log("stopping: %s" % (", ".join(
+                        "%s(%s)" % (n, p) for n, p in stuck) or "none"))
+
+                for name, pid in stuck:
+                    if pid is None:
+                        if name not in warned_no_pid:
+                            warned_no_pid.add(name)
+                            log("%s is STOPPING but has no %s%s property; "
+                                "leaving it alone" % (name, PID_PREFIX, name))
+                        continue
+
+                    seen[name] = seen.get(name, 0) + 1
+                    # No grace inside a cascade window: this is the onrestart
+                    # chain unwinding and it has to keep up with init.
+                    if not cascading and seen[name] < cfg.confirm_polls:
+                        continue
+
+                    kills = [t for t in kills if now - t < cfg.breaker_window]
+                    if len(kills) >= cfg.max_kills:
+                        breaker_until = now + cfg.breaker_cooldown
+                        log("CIRCUIT BREAKER: %d kills in %.0fs -- this looks like a "
+                            "restart loop, not a repair. Standing down for %.0fs. "
+                            "Still stuck: %s"
+                            % (len(kills), cfg.breaker_window, cfg.breaker_cooldown,
+                               ", ".join(sorted(names))))
+                        seen.clear()
+                        signalled.clear()
+                        break
+
+                    escalate = name in signalled
+                    sig = 9 if escalate else 15
+                    if cfg.dry_run:
+                        log("would send SIG%s to %s (pid %d)"
+                            % ("KILL" if escalate else "TERM", name, pid))
+                        continue
+
+                    ok = signal_in_container(pid, sig)
+                    log("sent SIG%s to %s (pid %d)%s"
+                        % ("KILL" if escalate else "TERM", name, pid,
+                           "" if ok else " -- signal failed"))
+                    if not ok:
+                        continue
+                    signalled.add(name)
+                    kills.append(now)
+                    cascade_until = now + cfg.cascade_window
+                    cascading = True
+                    interval = cfg.fast_interval
+
+        if args.once:
+            return 0
+        time.sleep(interval)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

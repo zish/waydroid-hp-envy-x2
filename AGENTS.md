@@ -133,6 +133,22 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [docs/10-battery-fixed.md](docs/10-battery-fixed.md); verify with `bin/battery-test.sh`.
    Temperature is still unreported — that needs an NDK rebuild of the HAL (battery temp) or a new
    thermal HAL (system temps); both are scoped in docs/10.
+   **A second half turned up on 2026-09-18, reported as "Android says 101%".** The number was never
+   miscalculated: it was a real host reading, **latched and never replaced**. ACPI computes
+   `capacity = capacity_now * 100 / full_charge` with **no clamp to 100**, so >100 happens at charge
+   termination — and healthd had no way to ever read again. Waydroid disables the periodic battery
+   poll **twice, independently**: the service's `.rc` carries no `capabilities` line, so
+   `timerfd_create(CLOCK_BOOTTIME_ALARM)` fails `EPERM` against `CapEff: 0`; and the *other* board
+   hook, `healthd_board_init`, writes one 64-bit `-1` over both `periodic_chores_interval_*`, which
+   disarms the timer. Fixing either alone changes nothing. Uevents, contrary to
+   [docs/46](docs/46-removable-media.md)'s aside, **do** reach the container — untagged uevents are
+   broadcast to every netns — which is why the value is right while it moves and freezes the moment
+   the pack goes quiet, and why `bin/battery-test.sh` passed throughout. Two more bytes in the same
+   binary as docs/10's three, deployed the same way; five now differ from shipped. **Verify the
+   mechanism, not the symptom**: `cat /proc/<health-pid>/fdinfo/<timerfd>` from *inside* the
+   container must show `clockid: 7` and `it_interval: (60, 0)`. `ls /proc/<pid>/fd` proves the timer
+   exists; only `fdinfo` says whether it is armed, and the first fix looked fine until that was read.
+   See [docs/48-battery-frozen-and-netd-stale.md](docs/48-battery-frozen-and-netd-stale.md).
    Separately, and not about Android: do not trust a battery percentage on this machine. The
    pack's gauge is uncalibrated and reads high — it hard-cut at roughly 18% on 2026-09-09, with no
    shutdown and no suspend — and `dunst` fails on every session start, so the host has **no**
@@ -199,8 +215,23 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    the first spends the budget. `waydroid-wifi-nudge` re-enables it, respecting `wifi_on`.
    The radio is now pinned by **factory MAC**, not by `wlp0s20u1`, which is a USB-topology name.
    See [docs/35-wifi-stage5.md](docs/35-wifi-stage5.md).
+   **A "connected to vidiot, no internet" fault on 2026-09-18 was not in the Wi-Fi stack at all.**
+   Android's `LinkProperties` were perfect — address, gateway, DNS, default route — and **every
+   per-network routing table in the kernel was empty**, because `netd` **survived its own restart**
+   and still owned `wlan0` under a netId from a previous `system_server`, so `networkAddInterface`
+   failed `EBUSY` and the route adds `ENOENT`. `dumpsys netd`'s binder call log is the only place
+   those errors are recorded; `ConnectivityService` logged nothing and logcat had rolled. The cause
+   is goal 7's cgroup problem: init stops a service via libprocessgroup's `cgroup.procs`, the
+   container's `/sys/fs/cgroup` is read-only so those cgroups never existed, the kill reached nobody,
+   and init parked netd in `STOPPING` for 38 hours. **`init.svc.<name>` is the tell**, and **no
+   Android service in this container can be restarted** — six were wedged. Mitigated by
+   `artifacts/restartd/`; the real fix is goal 7. See
+   [docs/48-battery-frozen-and-netd-stale.md](docs/48-battery-frozen-and-netd-stale.md).
    **Still open**: the T3U wedge has no automatic trigger (and `nmcli connection up` remains the
    mandatory discriminator before reprobing — it saved a wasted reprobe this session);
+   the host's link dropped twice for ~10 minutes on 2026-09-18 while Android sat in its
+   failed-validation retry loop on the same radio, uninvestigated and a caution about
+   [docs/38](docs/38-wifi-primary-radio.md)'s single-radio arrangement;
    `NmBackend::forget()` is implemented but nothing calls it, so forgetting a network in Android
    leaves its PSK in NetworkManager; and signal/state fidelity in Android's UI is unreviewed.
 5. **Audio — direct ALSA as a selectable backend, and eventually a DAW-grade HAL.**
@@ -312,6 +343,15 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    `/sys/fs/cgroup/lxc.payload.waydroid/cgroup.freeze` (81 processes, **1534 tasks**), untested,
    with the `CLOCK_MONOTONIC` jump on thaw as the expected failure mode. Measure whether idle apps
    cost anything before building any of it. See [docs/43-app-freezer.md](docs/43-app-freezer.md).
+   **This cgroup problem is already costing something, and it is not the freezer.** Because
+   `libprocessgroup` never created the per-process cgroups, `KillProcessGroup()` signals nobody, so
+   **no Android service in this container can ever be restarted** — not by `restart`, not by
+   `ctl.restart`, not by init's own crash recovery. init parks the service in `STOPPING` and waits
+   for a `SIGCHLD` that never comes. That is what broke Wi-Fi for 38 hours on 2026-09-18 (goal 4),
+   and it silently wedges `audioserver`, `cameraserver`, `media`, `idmap2d` and `mediadrm` too, which
+   is worth remembering the next time one of those misbehaves after a framework restart. Mitigated,
+   not fixed, by `artifacts/restartd/`; this goal is the real fix. See
+   [docs/48-battery-frozen-and-netd-stale.md](docs/48-battery-frozen-and-netd-stale.md).
 
 8. **Bluetooth — managing the host's BlueZ from an Android app.** **Added 2026-09-21 at the
    owner's request; built, working and proven the same day — the owner paired a Galaxy S24 Ultra
@@ -523,6 +563,11 @@ and the reasoning behind each change.
   `artifacts/media/` is `waydroid-mediad`, the root daemon for goal 6 — it mounts removable
   volumes straight into the Waydroid data directory, which is the FUSE lower dir, so they surface
   at `/sdcard/Removable/<label>` with no LXC change and no container restart.
+  `artifacts/restartd/` is `waydroid-restartd`, which signals Android services init has parked in
+  `STOPPING` and cannot kill, because the container's read-only `/sys/fs/cgroup` means
+  libprocessgroup's cgroup-based kill reaches nobody. Read its header before touching the
+  intervals: the fast cascade poll is what stops the mutual `netd` ⇄ `zygote` `onrestart`
+  pair from ping-ponging, and there is a circuit breaker under it for when that reasoning is wrong.
   `artifacts/bluetooth/` is `waydroid-btd`, the BlueZ daemon for goal 8 — a D-Bus client *and*
   server, because a pairing prompt is BlueZ calling out to an `org.bluez.Agent1` we export, which
   is what rules out every read-only approach.

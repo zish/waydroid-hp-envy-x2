@@ -1,0 +1,32 @@
+[Unit]
+# Make Android's init service restarts actually happen.
+# See docs/48-battery-frozen-and-netd-stale.md.
+#
+# Android's init stops a service through libprocessgroup, which signals the pids
+# in that service's cgroup.procs. Waydroid mounts the container's /sys/fs/cgroup
+# read-only, so those cgroups were never created, the signal reaches nobody, and
+# init parks the service in STOPPING for ever. The visible cost was Wi-Fi: a netd
+# that outlived its restart keeps the old netIds, and the next system_server
+# cannot take wlan0 back (EBUSY), so Android associates with no routes and no DNS.
+#
+# Not Requires=waydroid-container.service: the daemon is a watcher and is happy
+# to idle while there is no container, which keeps it out of the container's own
+# start and stop ordering.
+Description=Unstick Android init services Waydroid's container cannot kill
+Documentation=https://github.com/jmelanso/bigtab01-waydroid/blob/main/docs/48-battery-frozen-and-netd-stale.md
+Wants=waydroid-container.service
+After=waydroid-container.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/waydroid-restartd.conf
+ExecStart=@BINDIR@/waydroid-restartd
+
+# It signals processes inside the container by way of lxc-attach, so it needs to
+# be root and needs the container's own domain rules to apply, exactly as
+# `waydroid shell` does.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
