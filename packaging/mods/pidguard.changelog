@@ -1,0 +1,6 @@
+* Tue Sep 22 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Caps the container's PID namespace at pid_max=65536 so the
+  counter wraps below the 32-bit bionic limit instead of walking past it
+  (docs/51).
+- Ships waydroid-pid-reset for a container already past the cliff, which
+  recovers it without the container restart that would drop a kiosk session.

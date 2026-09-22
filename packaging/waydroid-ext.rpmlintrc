@@ -71,6 +71,23 @@ addFilter("invalid-license (GPL-3.0-or-later|Apache-2.0|MIT)$")
 # rpmlint infers a locale subpackage from the "-gbm" suffix of the package name.
 # There is no locale content here at all.
 addFilter("no-dependency-on locales-gbm")
+# The same inference from "-btd". Same answer: no locale content anywhere.
+addFilter("no-dependency-on locales-btd")
+
+# ------------------------------------------------------- tools named like libs
+#
+# libselinux-utils is where selinuxenabled lives. rpmlint reads any lib* name as
+# a shared library that the automatic dependency generator should have found,
+# but this is a dependency on a COMMAND used by a scriptlet, which nothing can
+# infer from the payload. Scoped to the one package that needs it.
+addFilter("waydroid-ext-backlight.*explicit-lib-dependency libselinux-utils")
+
+# ------------------------------------------------- udev rules and nothing else
+#
+# waydroid-ext-backlight ships one udev rule and one CIL file, so its only entry
+# under %{_prefix}/lib is that rule. The check exists to catch a library package
+# that forgot its libraries; a udev rule is exactly where udev requires it.
+addFilter("waydroid-ext-backlight.*only-non-binary-in-usr-lib")
 
 # ------------------------------------------------------------------- spelling
 #

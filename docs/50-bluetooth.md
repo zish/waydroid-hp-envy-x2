@@ -477,6 +477,8 @@ correctly. Worth remembering before debugging a daemon that is behaving perfectl
 - **Input does not need to follow**, and is worth understanding rather than fixing: a Bluetooth
   keyboard or mouse paired on the host arrives as a host evdev device and reaches Android the
   way the built-in keyboard already does.
-- **No RPM.** `install.sh` is `DESTDIR`-clean, like [artifacts/media/](../artifacts/media), but
-  nothing in [packaging/](../packaging) builds it yet.
+- **Packaged as `waydroid-ext-btd`** on 2026-09-22 — `packaging/mods/btd.mod`, a full
+  `rpmbuild -ba` with no new rpmlint findings. Only the *host* half: the app is deliberately a
+  separate modification, since an APK has its own build and release cadence and should not
+  reissue the daemon every time it changes. That app modification does not exist yet.
 - **No BLE GATT.** The daemon exposes devices, not services. Nothing needs it yet.

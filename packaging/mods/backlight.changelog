@@ -1,0 +1,6 @@
+* Tue Sep 22 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Ships the CIL module and the udev rule that together let
+  waydroid_t write the panel backlight, so Android's brightness slider reaches
+  the real display (docs/42).
+- The udev rule installs to /usr/lib/udev/rules.d rather than the installer's
+  /etc default, leaving /etc free for an admin override.

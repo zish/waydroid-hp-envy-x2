@@ -25,6 +25,33 @@ Debian/Ubuntu and other-distro roadmap. Read it before touching anything here.
 | `camera-gbm` | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
 | `camera` (group) | yes | yes | **yes** | same, plus `no-%check-section` — a metapackage has nothing to check |
 | `wifid` | yes | **yes** | no | same |
+| `pidguard` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
+| `restartd` | yes | yes | **yes** | same |
+| `btd` | yes | yes | **yes** | same |
+| `backlight` | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
+
+The four host packages added on 2026-09-22 all build fully, because none of them compiles
+anything: two are `bash`, two are stdlib or system-library Python, and `backlight` is a CIL
+module plus a udev rule. They cover the four `artifacts/` directories that had a
+`DESTDIR`-clean `install.sh` and no packaging at all — the gap found by comparing
+`artifacts/*/install.sh` against what `packaging/` references.
+
+Three things were corrected while packaging them, each of which applies beyond its own
+modification:
+
+- `build-mod.sh` now defines `_udevrulesdir` alongside `_unitdir` when `systemd-rpm-macros`
+  is absent, so a udev rule can use the real macro instead of `%{_prefix}/lib/udev/rules.d`,
+  which rpmlint correctly reports as a hardcoded library path.
+- All four declare `BuildRequires: systemd-rpm-macros`, which `wifid` already did and which
+  every package referencing `%{_unitdir}` needs.
+- `backlight` installs its udev rule to `%{_udevrulesdir}` rather than the installer's `/etc`
+  default. A packaged rule belongs there, udev reads both, and it leaves `/etc` free for an
+  admin override instead of shipping a `%config` nobody is expected to edit.
+
+`backlight` is also the first modification with real scriptlets: `semodule -i` on install
+(no `$1` guard, because a changed CIL must land on upgrade too) and `semodule -r` only on
+uninstall. Both are wrapped in `selinuxenabled` so they are inert rather than wrong on a host
+built without SELinux, and every line ends `|| :` because no scriptlet may fail a transaction.
 
 `wifid` cannot do a full `-ba` here for two separate reasons, and only the first is about this
 box: `libgbinder-devel` is a Fedora package, and `artifacts/wifi/install.sh` installs the daemon

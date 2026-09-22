@@ -464,7 +464,8 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    **Still open**: only the numeric-comparison flow has met real hardware (passkey-entry and PIN
    are synthetic only), and `remove`/`connect` have never run against a real bond; the controller does not survive
    s2idle ([docs/27](docs/27-android-power-button.md)) and there is no automatic recovery; whether
-   A2DP audio follows through PipeWire is untested; no RPM; no BLE GATT. See
+   A2DP audio follows through PipeWire is untested; the daemon is packaged as
+   `waydroid-ext-btd` but the app is not; no BLE GATT. See
    [docs/50-bluetooth.md](docs/50-bluetooth.md).
 
 **Screen brightness — DONE, and not on the list above.** Added at the owner's request on

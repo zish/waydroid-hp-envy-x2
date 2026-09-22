@@ -1,0 +1,6 @@
+* Tue Sep 22 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Signals Android services that init parked in STOPPING and
+  cannot kill, because the container's read-only /sys/fs/cgroup means
+  libprocessgroup's cgroup-based kill reaches nobody (docs/48).
+- Mitigation, not a fix: a writable cgroup hierarchy in the container is the
+  real repair and would also unblock Android's per-app freezer.

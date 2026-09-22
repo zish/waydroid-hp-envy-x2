@@ -1,0 +1,6 @@
+* Tue Sep 22 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Host-side BlueZ management for Waydroid's Android, exporting
+  an org.bluez.Agent1 so pairing prompts can be answered from inside the
+  container (docs/50).
+- The Android half is deliberately a separate modification: an APK with its
+  own build and release cadence, which should not reissue this daemon.

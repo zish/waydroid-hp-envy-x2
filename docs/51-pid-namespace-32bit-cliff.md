@@ -341,8 +341,11 @@ it is a confounder worth naming before someone spends a day on it.
 - **There is still no notification path** for any warning the guard might want to raise; see
   [docs/41](41-battery-cutoff.md), `dunst` fails on every session start. The guard logs to the
   journal and nothing reads the journal.
-- **No RPM.** `artifacts/pidguard/install.sh` is `DESTDIR`-clean and ready for one, but
-  `packaging/` does not know about it yet.
+- **Packaged as `waydroid-ext-pidguard`** on 2026-09-22 — `packaging/mods/pidguard.mod`, a full
+  `rpmbuild -ba`. The Linux 6.14 requirement is deliberately *not* a `Requires:` on the kernel:
+  an rpm-ostree host composes against whatever kernel its image carries, so that would make the
+  package uninstallable rather than inert, and the guard already fails safe at runtime by
+  restoring the host's `pid_max` and refusing to continue.
 - **What restarted the audio HAL at 10:22** was never determined. The `DisplayModeDirector` crash
   in the crash buffer at 10:22:21 is the earliest event in the episode, but whether it is cause or
   consequence is unresolved. With the cap in place the question is now academic.

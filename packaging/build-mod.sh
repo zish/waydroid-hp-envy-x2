@@ -60,8 +60,9 @@ mkdir -p "$TOP"/SOURCES "$TOP"/SPECS "$TOP"/BUILD "$TOP"/BUILDROOT "$TOP"/RPMS "
 set -- --define "_topdir $TOP"
 if ! rpm --eval '%{_unitdir}' | grep -q '^/'; then
 	set -- "$@" --define "_unitdir /usr/lib/systemd/system" \
-	            --define "_userunitdir /usr/lib/systemd/user"
-	echo "note: systemd-rpm-macros absent, defining _unitdir/_userunitdir locally"
+	            --define "_userunitdir /usr/lib/systemd/user" \
+	            --define "_udevrulesdir /usr/lib/udev/rules.d"
+	echo "note: systemd-rpm-macros absent, defining unit/udev dirs locally"
 fi
 
 for mod in $mods; do
