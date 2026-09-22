@@ -30,7 +30,7 @@ proposed a half turn while the machine sat in normal viewing pose.
 ### Why the launcher looked fine and everything else did not
 
 `mLastOrientation=5` is `SCREEN_ORIENTATION_NOSENSOR`. That is the per-app compat override added
-in `dadff71` to stop `org.fossify.home` pinning the display to portrait. It also, incidentally,
+in `f1c2940` to stop `org.fossify.home` pinning the display to portrait. It also, incidentally,
 makes the launcher the one app on the system that *cannot* follow the sensor — so it stayed at
 ROTATION_0 and looked correct while every unpinned app inverted. The launcher looking right was
 a symptom of a different fix, not evidence that rotation worked.
