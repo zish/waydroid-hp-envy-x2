@@ -1,0 +1,16 @@
+[Unit]
+Description=Cap the Waydroid container's PID namespace below the 32-bit bionic cliff
+Documentation=https://github.com/waydroid/waydroid/issues/2071
+# Nothing to guard if Waydroid was never set up. The script itself exits 0
+# quietly when the container is not running, so no other condition is needed --
+# the timer fires on a schedule, not on the container's lifecycle, because a
+# fresh namespace starts at 1 and takes over a day to approach the cliff.
+ConditionPathExists=/var/lib/waydroid/lxc
+
+[Service]
+Type=oneshot
+ExecStart=@BINDIR@/waydroid-pidguard
+# Deliberately unhardened. This has to setns() into another PID namespace and
+# mount a procfs there, so ProtectProc=, PrivateMounts=, RestrictNamespaces=
+# and NoNewPrivileges= would each break it. It runs for a few milliseconds
+# every five minutes and touches exactly two sysctls.

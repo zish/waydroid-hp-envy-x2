@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodically cap the Waydroid container's PID namespace
+Documentation=https://github.com/waydroid/waydroid/issues/2071
+
+[Timer]
+# The cap survives for the life of a PID namespace, so this only has to catch a
+# container restart. Five minutes against a >20h climb to the cliff is orders of
+# magnitude of margin; the interval is about promptness in the log, not safety.
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=waydroid-pidguard.service
+
+[Install]
+WantedBy=timers.target

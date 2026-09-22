@@ -1,0 +1,171 @@
+#!/bin/bash
+# waydroid-pidguard -- keep the Waydroid container's PID namespace below the
+# 32-bit bionic cliff.
+#
+# WHY THIS EXISTS
+# ---------------
+# 32-bit bionic packs the owner thread id of a pthread_mutex_t into 16 bits, so
+# it calls __libc_fatal() the moment it sees a tid above 65535:
+#
+#   F libc: Limited by the size of pthread_mutex_t, 32 bit bionic libc only
+#           accepts pid <= 65535, but current pid is 149569
+#
+# A Waydroid container is a long-lived PID namespace whose counter only ever
+# climbs. Past ~a day of uptime every NEWLY started 32-bit process dies at
+# birth -- and this image has five of them, including the audio HAL, the camera
+# provider and app_process32 (zygote32, i.e. every 32-bit app). With the audio
+# HAL dead, system_server blocks in AudioService's constructor on a binder call
+# into audioserver that never returns, Watchdog kills it after 60s, init
+# respawns it with another high PID, and the device boot-loops on the boot
+# animation forever. See docs/51-pid-namespace-32bit-cliff.md.
+#
+# WHAT IT DOES
+# ------------
+# Linux 6.14 made kernel.pid_max per-PID-namespace (Brauner). So rather than
+# capping pid_max host-wide -- which is what waydroid#2071 recommends, and which
+# constrains the host for the container's benefit -- we cap ONLY the container's
+# namespace. Its allocator then wraps at 65536 and reuses free low PIDs forever,
+# and the cliff becomes unreachable rather than merely distant.
+#
+# This runs from a timer and RECONCILES rather than reacting to an event, the
+# same shape as waydroid-overlay-sync and waydroid-mediad: a container restart
+# creates a fresh namespace with no cap, and the next tick puts it back. There
+# is no event to hook and no hurry -- a fresh namespace starts at 1 and takes
+# more than a day to climb anywhere near the cliff.
+#
+# WHY A PRIVATE PROCFS
+# --------------------
+# The sysctl lives in the container's PID namespace, but Waydroid's LXC config
+# mounts the container's /proc as proc:mixed, so /proc/sys is read-only from
+# inside -- Watchdog's own EROFS on /proc/sysrq-trigger proves it. So we enter
+# the PID namespace, unshare a mount namespace, and mount a fresh procfs there:
+# procfs takes its pid namespace from whoever mounts it, and this one is ours
+# and writable. Nothing in the container's own view changes.
+#
+# SAFETY
+# ------
+# If the kernel predates 6.14, pid_max is GLOBAL and the write would silently
+# reconfigure the host. So the host value is read before and after every write;
+# a change means not-namespaced, and we restore it and refuse to continue.
+#
+# Usage:
+#   waydroid-pidguard                 reconcile (what the timer runs)
+#   waydroid-pidguard --status        report only, change nothing
+#   waydroid-pidguard --dry-run       say what would change
+#   waydroid-pidguard --verbose       log even when nothing needed doing
+#
+# Exit: 0 ok / 2 warning (uncapped and climbing) / 1 error.
+set -u
+
+TARGET_PID_MAX=${WAYDROID_PIDGUARD_PID_MAX:-65536}   # exclusive: highest pid becomes 65535
+WARN_AT=${WAYDROID_PIDGUARD_WARN_AT:-55000}          # only reachable if the cap is absent
+LXC_PATH=${WAYDROID_LXC_PATH:-/var/lib/waydroid/lxc}
+MNT=/run/waydroid-pidguard
+
+[ -r /etc/waydroid-pidguard.conf ] && . /etc/waydroid-pidguard.conf
+
+MODE=reconcile
+VERBOSE=0
+for a in "$@"; do
+    case "$a" in
+        --status)  MODE=status ;;
+        --dry-run) MODE=dryrun ;;
+        --verbose|-v) VERBOSE=1 ;;
+        --help|-h) sed -n '/^# Usage:/,/^# Exit:/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown option: $a" >&2; exit 1 ;;
+    esac
+done
+
+log()  { printf '%s\n' "$*"; }
+vlog() { [ "$VERBOSE" = 1 ] && printf '%s\n' "$*"; return 0; }
+err()  { printf '%s\n' "$*" >&2; }
+
+# The container's init is the child of lxc-start. Verified by comparing PID
+# namespaces rather than trusted -- if it shares ours it is not the container.
+container_init() {
+    local lxc init
+    lxc=$(pgrep -f "lxc-start -P $LXC_PATH" | head -1) || return 1
+    [ -n "$lxc" ] || return 1
+    init=$(awk '{print $1}' "/proc/$lxc/task/$lxc/children" 2>/dev/null)
+    [ -n "$init" ] || return 1
+    [ -e "/proc/$init/ns/pid" ] || return 1
+    [ "$(readlink "/proc/$init/ns/pid")" != "$(readlink /proc/self/ns/pid)" ] || return 1
+    printf '%s\n' "$init"
+}
+
+# Run a shell snippet inside the container's PID namespace with a private,
+# writable procfs at $MNT. $MNT is only visible in that throwaway mount ns.
+in_pidns() {
+    local init=$1 snippet=$2
+    mkdir -p "$MNT" 2>/dev/null
+    nsenter -t "$init" -p -- unshare -m --propagation private -- sh -c "
+        mount -t proc proc '$MNT' 2>/dev/null || exit 97
+        rc=0; { $snippet ; } || rc=\$?
+        umount '$MNT' 2>/dev/null
+        exit \$rc"
+}
+
+ns_read()  { in_pidns "$1" "cat '$MNT/sys/kernel/$2'"; }
+ns_write() { in_pidns "$1" "printf '%s\n' '$3' > '$MNT/sys/kernel/$2'"; }
+
+INIT=$(container_init) || {
+    vlog "waydroid container is not running -- nothing to guard"
+    exit 0
+}
+
+NS_PID_MAX=$(ns_read "$INIT" pid_max) || { err "cannot read container pid_max (rc=$?)"; exit 1; }
+NS_LAST=$(ns_read "$INIT" ns_last_pid) || { err "cannot read container ns_last_pid"; exit 1; }
+HOST_PID_MAX=$(cat /proc/sys/kernel/pid_max)
+
+if [ "$MODE" = status ]; then
+    log "container init pid : $INIT"
+    log "container pidns    : $(readlink "/proc/$INIT/ns/pid")"
+    log "ns pid_max         : $NS_PID_MAX  (target $TARGET_PID_MAX)"
+    log "ns ns_last_pid     : $NS_LAST"
+    log "host pid_max       : $HOST_PID_MAX  (must stay untouched)"
+    if [ "$NS_PID_MAX" -le 65536 ]; then
+        log "verdict            : CAPPED -- the 32-bit cliff is unreachable"
+        exit 0
+    elif [ "$NS_LAST" -ge "$WARN_AT" ]; then
+        log "verdict            : UNCAPPED and at $NS_LAST -- 32-bit services will"
+        log "                     wedge on their next restart. See waydroid-pid-reset."
+        exit 2
+    else
+        log "verdict            : uncapped, $((65535 - NS_LAST)) pids of headroom"
+        exit 2
+    fi
+fi
+
+if [ "$NS_PID_MAX" -le 65536 ]; then
+    vlog "container pid_max already $NS_PID_MAX (ns_last_pid $NS_LAST) -- nothing to do"
+    exit 0
+fi
+
+if [ "$MODE" = dryrun ]; then
+    log "would set container pid_max $NS_PID_MAX -> $TARGET_PID_MAX (ns_last_pid now $NS_LAST)"
+    exit 0
+fi
+
+# The write. Guarded, because on a pre-6.14 kernel this sysctl is global and
+# would quietly reconfigure the host instead of the container.
+if ! ns_write "$INIT" pid_max "$TARGET_PID_MAX" >/dev/null; then
+    err "failed to write container pid_max -- kernel may predate 6.14 (per-ns pid_max)"
+    exit 1
+fi
+
+HOST_AFTER=$(cat /proc/sys/kernel/pid_max)
+if [ "$HOST_AFTER" != "$HOST_PID_MAX" ]; then
+    printf '%s\n' "$HOST_PID_MAX" > /proc/sys/kernel/pid_max
+    err "ABORT: pid_max is NOT per-namespace on this kernel -- the host's value"
+    err "changed ($HOST_PID_MAX -> $HOST_AFTER) and has been restored."
+    err "Do not enable this timer; use the host-wide cap from waydroid#2071 instead."
+    exit 1
+fi
+
+NOW=$(ns_read "$INIT" pid_max)
+if [ "$NOW" = "$TARGET_PID_MAX" ]; then
+    log "capped container pid_max $NS_PID_MAX -> $NOW (ns_last_pid $NS_LAST); host pid_max $HOST_AFTER unchanged"
+    exit 0
+fi
+err "pid_max write did not take: still $NOW"
+exit 1

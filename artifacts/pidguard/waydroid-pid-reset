@@ -1,0 +1,150 @@
+#!/bin/bash
+# waydroid-pid-reset -- recover a Waydroid container that has already walked its
+# PID namespace past the 32-bit bionic cliff, WITHOUT restarting the container.
+#
+# WHY THIS EXISTS
+# ---------------
+# The supported fix for a container past 65535 is to restart it, which gives it
+# a fresh PID namespace. On a kiosk host that costs the session: restarting
+# waydroid-container.service drops the cage session back to the SDDM greeter,
+# so it needs a human at the machine. This tool is the alternative, and it is
+# the only remedy that works over ssh.
+#
+# The PID allocator is CYCLIC (idr_alloc_cyclic over [pid_min, pid_max)). It
+# resumes from ns_last_pid, so writing a low value there makes it hand out the
+# free low PIDs again -- and with only ~1500 tasks alive, nearly all of them are
+# free. Measured on bigtab01: ns_last_pid 13316 -> 301 and the next three
+# processes got 302, 303, 304.
+#
+# Resetting the counter does NOT revive what is already wedged. A 32-bit process
+# that hit the cliff does not exit -- __libc_fatal aborts into debuggerd and
+# hangs there, one thread, asleep in futex_do_wait -- and init cannot clear it
+# either, because libprocessgroup's cgroup kill reaches nobody in this container
+# (docs/48, goal 7). So --kill-stuck signals them from the host, where the
+# signal actually lands; init is their parent, gets the SIGCHLD it has been
+# waiting for, and respawns them into the low PIDs the reset just freed.
+#
+# PREFER THE CAP. waydroid-pidguard sets a per-namespace pid_max so the cliff is
+# unreachable in the first place. This tool is for a container that predates it.
+#
+# Usage:
+#   waydroid-pid-reset                  reset the counter only
+#   waydroid-pid-reset --kill-stuck     also signal wedged 32-bit processes
+#   waydroid-pid-reset --dry-run        report, change nothing
+#   waydroid-pid-reset --to N           reset to N instead of 300
+#
+# See docs/51-pid-namespace-32bit-cliff.md.
+set -u
+
+RESET_TO=300
+LXC_PATH=${WAYDROID_LXC_PATH:-/var/lib/waydroid/lxc}
+MNT=/run/waydroid-pidguard
+CLIFF=65535
+KILL_STUCK=0
+DRY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --kill-stuck) KILL_STUCK=1 ;;
+        --dry-run)    DRY=1 ;;
+        --to)         RESET_TO=${2:?--to needs a value}; shift ;;
+        --help|-h)    sed -n '/^# Usage:/,/^# See docs/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown option: $1" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+err() { printf '%s\n' "$*" >&2; }
+
+container_init() {
+    local lxc init
+    lxc=$(pgrep -f "lxc-start -P $LXC_PATH" | head -1) || return 1
+    [ -n "$lxc" ] || return 1
+    init=$(awk '{print $1}' "/proc/$lxc/task/$lxc/children" 2>/dev/null)
+    [ -n "$init" ] || return 1
+    [ "$(readlink "/proc/$init/ns/pid" 2>/dev/null)" != "$(readlink /proc/self/ns/pid)" ] || return 1
+    printf '%s\n' "$init"
+}
+
+in_pidns() {
+    local init=$1 snippet=$2
+    mkdir -p "$MNT" 2>/dev/null
+    nsenter -t "$init" -p -- unshare -m --propagation private -- sh -c "
+        mount -t proc proc '$MNT' 2>/dev/null || exit 97
+        rc=0; { $snippet ; } || rc=\$?
+        umount '$MNT' 2>/dev/null
+        exit \$rc"
+}
+
+INIT=$(container_init) || { err "waydroid container is not running"; exit 1; }
+NS=$(readlink "/proc/$INIT/ns/pid")
+BEFORE=$(in_pidns "$INIT" "cat '$MNT/sys/kernel/ns_last_pid'") || { err "cannot read ns_last_pid"; exit 1; }
+PIDMAX=$(in_pidns "$INIT" "cat '$MNT/sys/kernel/pid_max'")
+
+echo "### container"
+echo "  init pid      : $INIT"
+echo "  pidns         : $NS"
+echo "  ns_last_pid   : $BEFORE"
+echo "  ns pid_max    : $PIDMAX"
+if [ "$PIDMAX" -le 65536 ] 2>/dev/null; then
+    echo "  note          : namespace is already capped by waydroid-pidguard;"
+    echo "                  the counter cannot reach the cliff, so a reset is"
+    echo "                  only useful for PIDs stranded above it."
+fi
+
+# --- find what is wedged -------------------------------------------------
+# A 32-bit process holding a container PID above 65535 is, by definition, one
+# that either already aborted or will the moment it touches a mutex. ELF class
+# byte at offset 4: 1 = ELFCLASS32.
+echo "### wedged 32-bit processes (container pid > $CLIFF)"
+STUCK=""
+for d in /proc/[0-9]*; do
+    hpid=${d#/proc/}
+    [ "$(readlink "$d/ns/pid" 2>/dev/null)" = "$NS" ] || continue
+    nspid=$(awk '/^NSpid:/{print $NF}' "$d/status" 2>/dev/null)
+    [ -n "$nspid" ] || continue
+    [ "$nspid" -gt "$CLIFF" ] 2>/dev/null || continue
+    cls=$(od -An -tu1 -j4 -N1 "$d/exe" 2>/dev/null | tr -d ' ')
+    [ "$cls" = "1" ] || continue
+    name=$(awk '/^Name:/{print $2}' "$d/status" 2>/dev/null)
+    thr=$(awk '/^Threads:/{print $2}' "$d/status" 2>/dev/null)
+    wch=$(cat "$d/wchan" 2>/dev/null)
+    echo "  hostpid=$hpid nspid=$nspid threads=$thr name=$name wchan=$wch"
+    STUCK="$STUCK $hpid"
+done
+[ -n "$STUCK" ] || echo "  (none)"
+
+if [ "$DRY" = 1 ]; then
+    echo "### dry run -- would set ns_last_pid $BEFORE -> $RESET_TO"
+    [ "$KILL_STUCK" = 1 ] && [ -n "$STUCK" ] && echo "### dry run -- would SIGKILL:$STUCK"
+    exit 0
+fi
+
+# --- reset ---------------------------------------------------------------
+# Order matters: free the low PIDs first, so anything init respawns after the
+# kill lands below the cliff rather than straight back above it.
+in_pidns "$INIT" "printf '%s\n' '$RESET_TO' > '$MNT/sys/kernel/ns_last_pid'" || {
+    err "failed to write ns_last_pid"; exit 1; }
+AFTER=$(in_pidns "$INIT" "cat '$MNT/sys/kernel/ns_last_pid'")
+echo "### ns_last_pid $BEFORE -> $AFTER"
+
+if [ "$KILL_STUCK" = 1 ] && [ -n "$STUCK" ]; then
+    echo "### signalling wedged processes from the host"
+    echo "    (init's own cgroup kill reaches nobody here -- see docs/48)"
+    for hpid in $STUCK; do
+        nm=$(awk '/^Name:/{print $2}' "/proc/$hpid/status" 2>/dev/null)
+        if kill -9 "$hpid" 2>/dev/null; then
+            echo "  SIGKILL $hpid ($nm)"
+        else
+            echo "  SIGKILL $hpid ($nm) FAILED"
+        fi
+    done
+    echo "### init should now respawn these below the cliff."
+    echo "    Confirm with: waydroid-pid-reset --dry-run   (expect 'none')"
+elif [ "$KILL_STUCK" = 1 ]; then
+    echo "### nothing wedged to signal"
+else
+    [ -n "$STUCK" ] && echo "### counter reset, but the processes above are still wedged."
+    [ -n "$STUCK" ] && echo "    Re-run with --kill-stuck to clear them."
+fi
+exit 0
