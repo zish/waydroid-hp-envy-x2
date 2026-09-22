@@ -321,6 +321,38 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    needs a firm reseat (a partial insertion produces no kernel event at all, which looks exactly
    like a software fault), and the card reports `FAT-fs … Volume was not properly unmounted` on
    every mount, so it wants an `fsck.vfat`.
+   **The whole design assumes nothing else on the host mounts anything, which is true under cage
+   and false under GNOME or KDE.** Both desktops are udisks2 clients — neither mounts anything
+   itself — and GNOME automounts by default while Plasma 6 deliberately does not, so `candidates()`,
+   which skips any device somebody else got to first, loses the race on one desktop and wins it on
+   the other: on GNOME **nothing would reach Android at all**. Measured 2026-09-19: a desktop-style
+   mount (`uid=1000`, 0755) is **readable but not writable** through MediaProvider's FUSE, and
+   udisks2's owner-only iso9660 defaults (`mode=0400,dmode=0500`) are **invisible even to root
+   inside the container** — the FUSE daemon is uid 10141 holding `media_rw`, and it is *its* access
+   to the lower file that fails, not the caller's, which is why container-root does not bypass it.
+   The way out is to stop mounting and start following: one `--rbind` of the desktop's media root
+   into the data dir **joins `/run`'s peer group**, so the desktop's mounts and unmounts cross into
+   the container by themselves, with no LXC change, no propagation flags and no restart — verified
+   on 2026-09-20 against **real udisks2** (a loopback vfat volume, since the isohybrid stick's
+   partitions cannot be opened while its whole disk is mounted), including udisks2's own unmount
+   propagating cleanly out of the container even though it lists our mirror path in `MountPoints`.
+   **The mirror alone is not enough, and a tmpfs stand-in hid why**: udisks2 creates
+   `/run/media/<user>` as `drwxr-x---+` with `other::---`, so MediaProvider is stopped at the door
+   — one `setfacl -m g:1023:x` on that directory fixes it, costs nothing and persists nowhere.
+   **POSIX ACLs also retire the idmapped-mount idea**: `setfacl -R -m g:1023:rwX -m d:g:1023:rwX`
+   gives Android read *and* write on ext4/btrfs/xfs and survives a remount, where idmapping fails
+   `EOVERFLOW` (MediaProvider writes as uid 10141) and iso9660 refuses it outright. **FAT has no
+   lever but mount options** — `chmod`, `chown`, setgid and `setfacl` all fail on it, and udisks2
+   rejects a caller-supplied `gid=1023` (`OptionNotPermitted`) — but a server-side
+   `/etc/udisks2/mount_options.conf` carrying `vfat_defaults=…,gid=1023,dmask=0007,fmask=0007`
+   **works**, giving Android read, write *and* delete on a desktop-mounted FAT volume, at the cost
+   of a host-wide policy change and a `udisks2` restart; without it Android gets those volumes
+   read-only, which also works. Adding the host user to a group does not help either: MediaProvider's gids come from
+   Android, never from the host's `/etc/group`. Two caveats neither fixable from our side: an open
+   file inside Android makes the propagated unmount **silently skip**, so the desktop's "safely
+   remove" lies; and a second bind of a volume keeps its superblock alive, which is why the mirror
+   is one directory and not one bind per device. See
+   [docs/49-desktop-session-media.md](docs/49-desktop-session-media.md).
    **Still open**:
    unmount-while-browsing falls back to a lazy unmount; USB optical is mostly covered (iso9660/UDF
    are handled, since the attached stick is an isohybrid image) but drive-vs-media events are a
