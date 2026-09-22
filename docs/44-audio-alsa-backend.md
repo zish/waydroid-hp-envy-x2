@@ -2,7 +2,8 @@
 
 **Status: scoped, nothing built.** Added to the goal list on 2026-09-11 at the owner's request.
 Everything marked *measured* below was run against bigtab01 or read out of upstream source on
-2026-09-11. Everything else is explicitly flagged as hypothesis.
+2026-09-11, or added by a second pass on 2026-09-12. Everything else is explicitly flagged as
+hypothesis.
 
 The question that started this was narrower — *is anyone building a native PipeWire interface for
 Waydroid?* The answer is no, and chasing why not led to a better target: Waydroid's audio HAL is
@@ -36,8 +37,17 @@ Two details make the rest of this cheap:
 - That file's `@hooks` block loads `/etc/alsa/conf.d`, `/etc/asound.conf` and `~/.asoundrc`
   **after** its own definitions. Inside Android `/etc` is a symlink to `/system/etc`.
 
-So `pcm.!pulse` can be redefined from an overlay file with no HAL rebuild at all. Unverified on
-this host — see the open questions at the end.
+So `pcm.!pulse` can be redefined from an overlay file with no HAL rebuild at all. **Confirmed in
+this image on 2026-09-12**, by reading `/var/lib/waydroid/rootfs` — which needs no sudo and no
+`waydroid shell`, and is the better probe:
+
+- `pcm.pulse { type pulse ... }` is at line **662** of `/vendor/usr/share/alsa/alsa.conf`, exactly
+  where upstream puts it;
+- the `@hooks` block at lines 11-15 loads `/etc/alsa/conf.d`, `/etc/asound.conf` and `~/.asoundrc`,
+  and alsa-lib runs those hooks after parsing the file, so a later definition wins;
+- `/etc` is a symlink to `/system/etc`;
+- and **`/system/etc/asound.conf` does not exist**, so the override is a new overlay file with
+  nothing to merge against.
 
 ## Nobody is building a native PipeWire client, and probably nobody will
 
@@ -205,16 +215,131 @@ The build path is already proven here: `audio.primary.waydroid.so` is a vendor `
 `libgbm_mesa_wrapper.so`, which [docs/08](08-camera-fixed.md) rebuilt **with the NDK alone, no AOSP
 tree**, and deployed through the vendor overlay for both ABIs.
 
-Two supporting pieces, both hypothesis until checked:
+Three supporting pieces, all **measured on 2026-09-12** from the mounted rootfs:
 
-- `audio_policy_configuration.xml` in the image declares which rates and channel masks Android will
-  offer apps at all. It is **not** in Waydroid's device or vendor tree, so it is presumably the
-  generic AOSP one; it lives under `/vendor/etc` and is therefore overlay-able.
-- Android's own USB-audio and MIDI framework paths (`UsbAlsaManager`, `UsbAlsaDevice`,
-  `UsbMidiDevice`) read ALSA nodes directly, but are driven by UsbManager hotplug, which Waydroid
-  does not wire up. The feature gates are XML files in `/system/etc/permissions` — the same
-  one-overlay-file lever that woke the whole Wi-Fi framework up in
-  [Stage 0](32-wifi-stage3.md).
+**The policy XML is the tightest gate in the stack, tighter than the HAL.**
+`/vendor/etc/audio_policy_configuration.xml` is the generic AOSP file (4829 bytes; there is no
+`/system/etc` copy), and its primary module offers apps exactly one output profile:
+
+```xml
+<mixPort name="primary output" role="source" flags="AUDIO_OUTPUT_FLAG_PRIMARY">
+    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+</mixPort>
+```
+
+Input is `AUDIO_CHANNEL_IN_MONO` across the usual rate ladder. So a perfectly rewritten HAL still
+offers apps nothing beyond 48 kHz 16-bit stereo until this file changes too, and there is no
+`AUDIO_OUTPUT_FLAG_DIRECT` mixPort — on Android 13 that is the only way to reach the card at a rate
+the mixer is not already running at. It is under `/vendor/etc`, so it is overlay-able.
+
+**AOSP's USB audio HAL is already in the image, and it is the multichannel path.** In both ABIs'
+`hw/` directories, `audio.usb.default.so` ships alongside `audio.primary.waydroid.so`, and
+`usb_audio_policy_configuration.xml` is already `xi:include`d by the file above. Its
+`usb_device output` and `usb_device input` mixPorts carry **no static profile at all** — AOSP's
+dynamic-profile mechanism, filled in from the real device at attach time, so rates, formats and
+channel counts come from the hardware instead of from XML.
+
+What gates it is a feature flag, not code. `/system/etc/permissions/` contains
+`android.hardware.wifi.xml` — our own Stage 0 file — and **no `android.hardware.usb.host.xml`, no
+`android.hardware.midi.xml`**. AOSP's `UsbAlsaManager`/`UsbAlsaDevice`/`UsbMidiDevice` read
+`/dev/snd/pcmC%dD%d` and `/dev/snd/midiC%dD%d` directly, but are driven by UsbManager hotplug,
+which Waydroid does not wire up. So the ingredients are: the feature XML (one overlay file), the
+`/dev/snd` mount, node permissions, and something to deliver an attach event — the same
+one-overlay-file lever that woke the whole Wi-Fi framework up in
+[Stage 0](32-wifi-stage3.md). **This is a genuinely different route to multichannel from rewriting
+`audio_hw.c`, and it should be costed before that rewrite is started.**
+
+**The guest's alsa-lib install is complete enough to matter, with one gap.**
+`/vendor/usr/share/alsa/` holds `alsa.conf`, `cards/` and `pcm/` — the full plugin config set
+(`dmix.conf`, `dsnoop.conf`, `iec958.conf`, `surround*.conf`, …) — so `hw:`, `plughw:` and format
+conversion all resolve inside the container with nothing added. `libasound.so` and the three pulse
+plugins (`libasound_module_{pcm,ctl,conf}_pulse.so`) are present in **both** ABIs under
+`/vendor/lib{,64}/hw/`. There is **no `ucm2/`**: irrelevant for HDA, fatal for a modern SOF codec
+that needs UCM to unmute and route. The mitigation is that mixer state is kernel-global — set the
+card up host-side with `alsactl`/UCM before handing it over and the container inherits it.
+
+## The latency budget, and why native PipeWire is the wrong axis
+
+Asked directly on 2026-09-12: *would a native PipeWire client in the guest beat today's
+ALSA-over-PulseAudio path?* Theoretically yes; in practice it is the second-smallest term in the
+budget, and it forecloses the one thing the DAW goal actually needs.
+
+A framing correction first, because it matters: nothing here "emulates ALSA". The HAL is a real
+alsa-lib client. It is the *pulse* end that is the shim — alsa-lib's ioplug converting to the
+PulseAudio wire protocol.
+
+The budget, host numbers measured 2026-09-12 (`pw-metadata -n settings`, PipeWire 1.6.8):
+
+| term | cost |
+|---|---|
+| HAL buffer — `PLAYBACK_PERIOD_SIZE 1024` x `PLAYBACK_PERIOD_COUNT 4` @ 48 kHz | **85 ms** |
+| alsa-lib pulse ioplug -> libpulse -> unix socket | one extra copy, one extra IPC hop, PA-protocol buffer negotiation |
+| `pipewire-pulse` -> graph — `clock.quantum` **1024** @ `clock.rate` 48000 | **21.3 ms** |
+| ALSA sink node -> `hw:1,0` | card period x count |
+
+A native PipeWire client deletes the second row outright, and lets the guest ask for
+`node.latency = 256/48000` directly instead of expressing the wish as PA `tlength`/`fragsize` for
+`pipewire-pulse` to reinterpret under its own `pulse.min.*` clamps. **The host graph is not the
+obstacle**: `clock.min-quantum` is 32 — 0.67 ms — against `max-quantum` 2048. The 1024 sitting
+there is a default nobody has had a reason to lower.
+
+But the HAL's own 85 ms dwarfs everything downstream. Rewriting the period constants alone, over
+today's unchanged pulse transport, captures most of the available win.
+
+**The decisive argument is structural: AAudio's low-latency path cannot work over any socket
+transport.** `create_mmap_buffer` hands an app a shared ring buffer that the *hardware* DMAs out
+of. Neither the PulseAudio protocol nor PipeWire's native one can produce that, and proxying it
+with a thread reintroduces exactly the copy the exercise was meant to remove. MMAP requires `hw:`
+opened directly. Hence the ordering:
+
+| | |
+|---|---|
+| 1. today | 85 ms plus two hops |
+| 2. rewrite the HAL's buffering, keep pulse | biggest win per unit of work; keeps host mixing, per-app volume, Bluetooth and hotplug |
+| 3. native PipeWire client | a few ms better than 2, and inherits the coupling problem above — vendoring libpipewire and SPA for bionic against whatever the host happens to run, where the PA protocol is stable precisely because it is frozen |
+| 4. direct ALSA `hw:`, exclusive | the only route to AAudio EXCLUSIVE; floor is the card's own period x count |
+
+PipeWire-native answers a question about the *desktop* experience, and `pipewire-pulse` already
+answers that one for a handful of milliseconds. For the DAW goal, 3 is a detour and 4 is the
+destination.
+
+## Bluetooth: bluealsa answers the question, and it is still the wrong trade
+
+Also asked on 2026-09-12: *can BlueZ A2DP go over ALSA instead of PipeWire?* Yes. BlueZ 5 removed
+its own audio handling; it exposes A2DP as `org.bluez.MediaEndpoint1`/`MediaTransport1` over D-Bus
+and hands the endpoint an fd. Something has to register as that endpoint and do the SBC/AAC/aptX
+encoding, and [bluez-alsa](https://github.com/arkq/bluez-alsa) is exactly that daemon — it exposes
+`bluealsa:DEV=XX:XX:XX:XX:XX:XX` PCMs through an alsa-lib plugin, with a ctl plugin for volume.
+Not installed here (`rpm -q bluez-alsa`), which on an Atomic host means a layered package and a
+reboot.
+
+Four reasons it is a worse path than what runs today, worst first:
+
+1. **Only one process can be BlueZ's media endpoint**, and WirePlumber's bluez5 monitor holds it.
+   Measured: `hci0` present and unblocked, `bluetooth.service` active, PipeWire 1.6.8 serving the
+   PA socket. Adopting bluealsa means disabling PipeWire's Bluetooth module, and the *host* losing
+   Bluetooth audio through its normal stack. That is the dedicate-the-device trade from
+   [the second radio](34-wifi-second-radio.md) again — except what gets given up here is the
+   host's own, not a spare.
+2. **A bluealsa PCM is a userspace alsa-lib plugin, not a `/dev/snd` node**, so mounting `/dev/snd`
+   into the container reaches none of it. Using it from Android needs
+   `libasound_module_pcm_bluealsa.so` built for bionic in both ABIs, plus the daemon's D-Bus
+   connection and per-stream sockets reachable across the container's namespaces. The slot and the
+   precedent exist — the pulse plugins already live at
+   `/vendor/lib{,64}/hw/libasound_module_*_pulse.so` — but this is another three-shim stack, not
+   fewer.
+3. **A2DP costs 100-200+ ms regardless**: encoder, link buffering, sink jitter buffer. Choosing
+   ALSA over PipeWire changes none of it, and none of it is relevant to the DAW goal.
+4. **The image has no Bluetooth audio HAL at all.** Measured: `a2dp_audio_policy_configuration.xml`
+   is `xi:include`d by the policy config, but there is no `audio.a2dp.default.so` and no
+   `android.hardware.bluetooth.audio` service anywhere in `/vendor/lib64`. Android has no native
+   Bluetooth audio path here; Bluetooth "works" today only in the sense that the primary output
+   lands on a sink `pipewire-pulse` happens to route to a headset.
+
+The scenario bluealsa would serve is "I chose `--audio-backend alsa` for a dedicated interface and
+still want Bluetooth" — and the per-session backend switch above already serves it better: keep
+pulse for general use, take direct ALSA only for the interface being tracked to.
 
 ## Verified vs hypothesis
 
@@ -225,17 +350,34 @@ while `/dev/snd/*` is not; the HAL opens the alsa-lib name `"pulse"`; `alsa.conf
 inline and loads `/etc/asound.conf` afterwards; `make_prop()` already probes the host and runs on
 every container start; the HAL's rate, channel and period constants.
 
-**Hypothesis, not yet checked:** that this image actually ships
-`/vendor/usr/share/alsa/alsa.conf` from that fork branch; that `/system/etc/asound.conf` is read
-inside the container; what `audio_policy_configuration.xml` declares; whether SELinux permits
-`sound_device_t` from the container's domain; and whether audio works on this machine at all today
-— it has never been tested, because no goal needed it.
+**Added 2026-09-12**, all read from `/var/lib/waydroid/rootfs` or the host, none of it needing
+sudo: this image does ship that fork's `alsa.conf`, with `pcm.pulse` at line 662, the full
+`pcm/*.conf` plugin set and `cards/`, but no `ucm2/`; `/etc` is a symlink to `/system/etc` and
+`/system/etc/asound.conf` does not exist; `audio_policy_configuration.xml` is the generic AOSP one,
+offering apps only 48 kHz / 16-bit / stereo out and mono in, with no `DIRECT` mixPort;
+`audio.usb.default.so` ships in both ABIs and its policy include uses dynamic profiles;
+`android.hardware.usb.host.xml` and `android.hardware.midi.xml` are absent from
+`/system/etc/permissions`; there is no Bluetooth audio HAL in the image; the host graph runs
+`clock.quantum` 1024 at 48 kHz with `min-quantum` 32; the host has `hci0` with `bluetooth.service`
+active and PipeWire 1.6.8 serving the PA socket; `bluez-alsa` is not installed.
 
-**First commands to run** (inside the container, so they need sudo):
+**Still hypothesis:** whether SELinux permits `sound_device_t` from the container's domain; whether
+a `/system/etc/asound.conf` override is honoured at runtime (the config layout is confirmed, the
+behaviour is untested); whether the container can obtain the `SCHED_FIFO`/`RLIMIT_RTPRIO` an
+Android low-latency thread wants, given the `RLIMIT_NICE` precedent in
+[docs/40](40-binder-nice.md); and whether audio works on this machine at all today — it has never
+been tested, because no goal needed it.
+
+**First commands to run.** The rootfs reads above answered every image question without sudo; what
+is left needs the container running, or the host:
 
 ```bash
-sudo waydroid shell -- sh -c "ls -l /vendor/usr/share/alsa/ /system/etc/asound.conf"
-sudo waydroid shell -- sh -c "grep -n 'pcm.pulse' -A3 /vendor/usr/share/alsa/alsa.conf"
-sudo waydroid shell -- sh -c "find /vendor/etc /system/etc -name 'audio_policy_configuration*.xml'"
+# does the container's domain get the sound nodes at all? ask the kernel, do not wait for an
+# audit record — docs/40 and docs/42 both record dontaudit'ed denials that ausearch never shows
+python3 -c "import selinux; print(selinux.selinux_check_access(
+    'system_u:system_r:waydroid_t:s0',
+    'system_u:object_r:sound_device_t:s0', 'chr_file', 'open', None))"
+
+# what AudioFlinger thinks it has, and whether anything works today
 sudo waydroid shell -- sh -c "dumpsys media.audio_flinger | head -40"
 ```
