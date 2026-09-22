@@ -504,6 +504,68 @@ a full-range run needs a human touching the machine throughout; and Android's di
 drives the *physical* panel, so the whole display dims 10 s after the last touch of Android even
 when someone is using the host.
 
+**The container ages out — the 32-bit PID cliff. DONE, and not on the list above.** Found
+2026-09-21, reported as "Waydroid seems to have restarted itself and is now stuck on the animated
+boot logo." Nothing had restarted — the container and the cage session were two days old and had
+never stopped, and what was restarting over and over was the Android framework *inside* a container
+that never went anywhere. **32-bit bionic aborts any process whose tid exceeds 65535** (the 32-bit
+`pthread_mutex_t` has 16 bits for the owner), and a Waydroid container is a long-lived PID namespace
+whose counter only climbs, so past roughly a day of uptime **every newly started 32-bit process dies
+at birth**. The image has five: the audio HAL, the camera provider — so **goal 1 quietly depends on
+this** — `cas`, `omx`, and `app_process32`, which is zygote32 and therefore every 32-bit app. The
+boot loop is downstream: with the audio HAL dead `audioserver` registers nothing, `system_server`
+blocks in `AudioService`'s constructor on a binder call that never returns, Watchdog kills it after
+60 s, init forks a new one with another high PID, forever. **The same root cause presents as "no
+audio", "camera broken", "some apps won't launch" or "stuck on the boot logo"** depending on what
+gets restarted first, so suspect it before investigating any of those on its own merits.
+**Uptime past the threshold is not proof of health** — already-running processes keep their low PIDs
+— it is a loaded gun; `cat /proc/sys/kernel/ns_last_pid` inside the container is the one-line check,
+and the burn rate is 14.1 pids/min idle against ~56 under real use, so **1–3 days**. Two decoys:
+`logcat -b crash` holds a full `FATAL EXCEPTION` that is one crash from the start of the episode and
+*not* the repeating kill, because Watchdog calls `Process.killProcess()` rather than throwing; and
+the aborting process **hangs rather than disappears**, since the abort lands in debuggerd, so it
+looks misconfigured instead of unable to execute. Recovery is a container restart — the only thing
+that gives a fresh namespace, and it drops the kiosk to the greeter. The **fix** makes the cliff
+unreachable rather than distant: Linux 6.14 made `pid_max` per-PID-namespace and this host runs
+7.1.x, so the container is capped at 65536 while the host stays at 4194304, and **the allocator
+wraps** — measured, not assumed, with the counter primed to 65529 and PIDs running 65530…65535 then
+300, 301, 302. `artifacts/pidguard/` is timer-driven and reconciling, because a container restart
+makes a fresh uncapped namespace and there is no clean event to hook, and it carries a safety
+interlock, since on a pre-6.14 kernel the same write would silently reconfigure the host.
+**This compounds with goal 7 but is independent of it** — `waydroid-restartd` ran throughout and
+could not have helped, because the respawn gets another high PID and dies the same way. Already
+upstream as [waydroid#2071](https://github.com/waydroid/waydroid/issues/2071), open, recommending a
+*host-wide* cap; the per-namespace one is strictly better and is what that thread asked for and
+nobody built. See [docs/51-pid-namespace-32bit-cliff.md](docs/51-pid-namespace-32bit-cliff.md);
+check with `bin/pid-cliff-check.sh`.
+
+**A black screen is not a crash — the launcher was locking it.** 2026-09-21, reported as "the screen
+went black and is still that way", with the caps-lock LED still toggling on the Bluetooth keyboard
+and SSH working. Nothing had crashed. `dumpsys power` settles it in one field —
+`mLastSleepReason=device_admin`, against a 30-minute idle timeout and a screen that had been dark
+for six — and `dumpsys device_policy` names the only registered admin, Fossify Launcher's
+`LockDeviceAdminReceiver`. That receiver exists for one feature, double-tap-to-lock, and a drag out
+of a folder landed on the empty desktop as a double-tap. **Because `ILight` owns the real panel
+here, "screen off" is literally `intel_backlight/brightness = 0`** — the panel stays powered and
+displays black, which at a glance is indistinguishable from a compositor crash, a backlight
+regression, or the PID cliff's boot loop with the animation off-screen. **The recovery already
+existed: press the power button.** `waydroid-android-lock.service` from
+[docs/27](docs/27-android-power-button.md) is ordered `Before=sleep.target` and its post leg injects
+a wakeup unconditionally on every resume, so any suspend/resume cycle recovers a sleeping Android
+whatever put it there; over SSH, `waydroid shell -- input keyevent KEYCODE_WAKEUP` does it directly.
+**Keyboards cannot** — docs/27 measured `KEY_POWER` being dropped by the guest hwcomposer before
+Android sees it — and **the caps-lock LED proves the host, not the guest**, being driven entirely
+host-side. Double-tap-to-wake was scoped and is nearly free, but **only host-side**: InputReader
+disables `wayland_touch` when the display group powers off, so there is no touch left inside Android
+to detect, and it was judged marginal since one press of the power button already does it. The owner
+disabled the gesture in Fossify's settings, which leaves the admin registered but idle; the
+30-minute idle timeout still puts Android to sleep, so the recovery stays worth knowing. Also
+records an AVC [docs/42](docs/42-backlight-selinux.md) did not: `systemd-backlight` runs as `init_t`
+and is denied write on the backlight's private type, so it fails and retries on every brightness
+change — harmless, left alone (mask the unit rather than widen the policy), and a useful side
+channel for when the backlight last moved once logcat has rolled. See
+[docs/52-launcher-lock-and-wake.md](docs/52-launcher-lock-and-wake.md).
+
 Work the list in order. Don't start a later item until the one before it is either done or
 explicitly parked.
 
@@ -537,7 +599,11 @@ and the reasoning behind each change.
   `removable-probe.sh`, which answers every open question in
   [docs/46](docs/46-removable-media.md) read-only in one run, and `media-test.sh`, which walks the
   removable-media chain from host mount to posted notification and names the link that is broken
-  rather than just failing
+  rather than just failing, and `pid-cliff-check.sh`, which reports how close the container's PID
+  namespace is to the 32-bit bionic cliff and is a **weather report, not a health check** — crossing
+  65535 breaks nothing until something restarts a 32-bit process — and `stylus-watch.py`, which
+  listens to a digitizer's evdev stream and settles in seconds whether the panel's controller
+  recognises a given pen at all, that being a firmware question no driver or kernel option changes
 - `sensors/` — source for `waydroid-sensord`, the host-side sensors daemon (goal 2). Build with
   `sensors/build.sh`; see the header comment for why it is a host daemon and not a guest HAL.
   It also serves `android.hardware.light@2.0::ILight` from `Lights.cpp` and `Backlight.cpp`, so
@@ -586,6 +652,15 @@ and the reasoning behind each change.
   `sensor-app/`; `drm-probe/build.sh --install` deploys, runs and prints the report. See
   [docs/21-netflix-widevine.md](docs/21-netflix-widevine.md) for the Widevine fix and
   [docs/22-netflix-container-detection.md](docs/22-netflix-container-detection.md) for why Netflix still refuses to run
+- `touch-probe/` — "Touch Probe", a dependency-free Kotlin app that draws every active pointer and
+  counts concurrent contacts, so "how many independent touches does Android actually receive here?"
+  is measured before the `touchscreen.multitouch*` feature XML is written — the SYNA7500 reports
+  `ABS_MT_SLOT` max=9 and Waydroid's hwcomposer bridge matches it, but Android declares none of the
+  three features. It doubles as the stylus probe: the HUD names `TOOL_TYPE`, the stylus button bits
+  and hover distance per pointer, and names the device each event arrived on (`wayland_touch`,
+  `wayland_pointer`, `wayland_tablet`), so a pen is distinguishable from another finger at a glance.
+  Same no-Gradle build as `sensor-app/`; `--install` deliberately does **not** pull the report,
+  because the number only means something after someone has had their fingers on the glass
 - `artifacts/` — configs pulled from or staged for the host, with originals kept alongside.
   Each subdirectory's `install.sh` honours `DESTDIR`/`PREFIX`/`UNITDIR`, so the same script
   is both the by-hand install and the RPM's `%install` step — one description of the layout.
@@ -604,7 +679,11 @@ and the reasoning behind each change.
   server, because a pairing prompt is BlueZ calling out to an `org.bluez.Agent1` we export, which
   is what rules out every read-only approach.
   `artifacts/backlight/` is the SELinux half of the brightness fix — a CIL module and the
-  udev rule that applies its type — kept in one directory because either half alone is inert
+  udev rule that applies its type — kept in one directory because either half alone is inert.
+  `artifacts/pidguard/` caps the container's PID namespace below the 32-bit bionic cliff, with
+  `waydroid-pid-reset` for a container already past it; read its README for why the guard
+  reconciles on a timer rather than hooking an event, and why it refuses to run on a pre-6.14
+  kernel where `pid_max` is still global
 - `packaging/` — RPM specs and `build-rpms.sh`. Four source packages: the noarch
   `waydroid-bigtab01`, the two compiled daemons, and `waydroid-overlay`, whose subpackages
   stage overlay payload into `/usr` and let `waydroid-overlay-sync` deploy it to `/var`
