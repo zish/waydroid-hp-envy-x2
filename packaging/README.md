@@ -14,6 +14,30 @@ is an overlayfs lowerdir over a read-only image), names the seven overlay files 
 a stock file and are therefore the surface an image upgrade can break, and carries the
 Debian/Ubuntu and other-distro roadmap. Read it before touching anything here.
 
+## Built is not the same as installable — audited 2026-09-22
+
+The table below says which modifications survive `rpmbuild`. It does not say whether the
+resulting package can be installed, and for two of them it cannot. Asked directly:
+
+```
+$ rpm -qp --requires build/rpm/RPMS/*/*.rpm
+```
+
+`waydroid-ext-camera-gbm`'s only dependency is **`waydroid-ext-overlay-sync`**, which has no
+`.mod` file and has never been built. `waydroid-ext-camera` additionally requires
+`waydroid-ext-camera-hal` and `waydroid-ext-uvc-autosuspend`, neither of which exists. So the
+two camera packages build cleanly and are uninstallable, and since every overlay component
+hard-requires `overlay-sync` by design, **the whole Android-side half of the project is
+unreachable by RPM until that one package is written**.
+
+Of the seven modifications here, four produce something installable today: `btd`, `pidguard`,
+`restartd`, and `backlight` — the last of which installs but does nothing, because it grants a
+permission to `waydroid-sensord`, which also has no `.mod`.
+
+Write `overlay-sync` first. It is the cheapest change with the largest effect on this table.
+
+Full audit in [docs/53-release-readiness.md](../docs/53-release-readiness.md).
+
 ## Generated per-modification packages — these have been built
 
 `rpm` 4.20.1 and `rpmlint` 2.7.0 were installed on the Debian 13 dev box on 2026-09-17, so
@@ -53,12 +77,20 @@ modification:
 uninstall. Both are wrapped in `selinuxenabled` so they are inert rather than wrong on a host
 built without SELinux, and every line ends `|| :` because no scriptlet may fail a transaction.
 
-`wifid` cannot do a full `-ba` here for two separate reasons, and only the first is about this
-box: `libgbinder-devel` is a Fedora package, and `artifacts/wifi/install.sh` installs the daemon
+`wifid` cannot do a full `-ba` here for **three** separate reasons, and only the first is about
+this box: `libgbinder-devel` is a Fedora package, and `artifacts/wifi/install.sh` installs the daemon
 *and* `waydroid-wifi-sync` unconditionally, so it cannot yet serve either modification alone —
 an `-ba` build would fail on unpackaged files. That installer needs the component-argument
 treatment `artifacts/overlay/install.sh` already has, with `all` as the default so the
 superseded `waydroid-wifid.spec` keeps working. Recorded in `packaging/mods/wifid.mod`.
+
+The third reason was found on 2026-09-22 and fails before either of the others:
+`wifid.mod` sets `BUILD='sh wifi/build.sh --rpm'`, and **`wifi/build.sh` has no `--rpm` mode**.
+It accepts `--deps`, `--check`, `--install` and `--unit`, and its parser ends with
+`*) echo "unknown argument: $1" >&2; exit 2`. Implementing it means a native build against
+Fedora's `libgbinder-devel`, as opposed to the `--deps` path that copies `.so` files off
+bigtab01 to guarantee an ABI match — which is the right answer for a dev box that cannot
+compile against those headers, and the wrong one inside `rpmbuild`.
 
 `no-signature` and `invalid-url Source0` are deliberately not filtered: both are real and both
 are release-time work. Everything else rpmlint said is filtered with a written reason in

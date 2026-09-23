@@ -604,7 +604,10 @@ and the reasoning behind each change.
   namespace is to the 32-bit bionic cliff and is a **weather report, not a health check** — crossing
   65535 breaks nothing until something restarts a 32-bit process — and `stylus-watch.py`, which
   listens to a digitizer's evdev stream and settles in seconds whether the panel's controller
-  recognises a given pen at all, that being a firmware question no driver or kernel option changes
+  recognises a given pen at all, that being a firmware question no driver or kernel option changes, and `check-signed-commits.sh`, which is the push-time signature gate — it reads `%G?`
+  rather than shelling out to `git verify-commit`, whose exit status cannot distinguish "bad
+  signature" from "no signature", and it is wired both to `.git/hooks/pre-push` and to
+  `lefthook.yml` so the check holds whether or not lefthook is installed
 - `sensors/` — source for `waydroid-sensord`, the host-side sensors daemon (goal 2). Build with
   `sensors/build.sh`; see the header comment for why it is a host daemon and not a guest HAL.
   It also serves `android.hardware.light@2.0::ILight` from `Lights.cpp` and `Backlight.cpp`, so
@@ -685,11 +688,19 @@ and the reasoning behind each change.
   `waydroid-pid-reset` for a container already past it; read its README for why the guard
   reconciles on a timer rather than hooking an event, and why it refuses to run on a pre-6.14
   kernel where `pid_max` is still global
-- `packaging/` — RPM specs and `build-rpms.sh`. Four source packages: the noarch
-  `waydroid-bigtab01`, the two compiled daemons, and `waydroid-overlay`, whose subpackages
-  stage overlay payload into `/usr` and let `waydroid-overlay-sync` deploy it to `/var`
-  before the container starts. `packaging/README.md` records what has actually been built;
-  the design is [docs/36-packaging.md](docs/36-packaging.md)
+- `packaging/` — RPM specs and build drivers. The current design is **one source package per
+  modification**, generated from `packaging/mods/*.mod` by `gen-spec.sh` and built by
+  `build-mod.sh` ([docs/47-package-split.md](docs/47-package-split.md)); the four hand-written
+  specs and `build-rpms.sh` are the superseded layout and still the only thing the legacy path
+  can build. `packaging/README.md` records what has actually been through `rpmbuild`.
+  **Read it before assuming anything is packaged**: audited 2026-09-22, there are 7 `.mod`
+  files against ~36 modifications, only 4 produce an *installable* package, and
+  `waydroid-ext-overlay-sync` — which every overlay component hard-requires — does not exist,
+  so the whole Android-side half of the project is unreachable by RPM. `waydroid-ext-camera-gbm`
+  builds cleanly and cannot be installed for exactly that reason. See
+  [docs/53-release-readiness.md](docs/53-release-readiness.md), which also covers the
+  documentation and path audits, what genuinely cannot be applied by RPM, and the lefthook and
+  GitHub Actions plan
 
 Record what was *ruled out* and why, not just what worked. Distinguish clearly between what has
 been verified on the host and what is still hypothesis.

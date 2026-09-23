@@ -175,6 +175,50 @@ panel is doing.
 
 ## The immediate next task
 
+### Build the RPMs — 2026-09-22, and this supersedes everything below in this section
+
+The next session's job is packaging, not hardware. The rest of this section is the accreted
+record of the Wi-Fi stages and is still accurate as history; it is no longer the next task.
+
+A release-readiness audit ran on 2026-09-22 and is in
+[docs/53-release-readiness.md](53-release-readiness.md). Read it before starting — it measured
+things the design documents get wrong, and two of its findings change where to begin:
+
+- **`waydroid-ext-overlay-sync` has no `.mod` and is the keystone.** Every overlay component
+  hard-requires it. `waydroid-ext-camera-gbm` *builds* and **cannot be installed**, because its
+  only dependency is a package that does not exist; `waydroid-ext-camera` requires two more that
+  do not exist either. Write this one first and two already-built packages become installable.
+- **`wifid`'s `%build` calls `wifi/build.sh --rpm`, a flag the script does not have.** Its
+  argument parser exits 2 on anything it does not recognise, so the generated spec fails before
+  reaching the two reasons `packaging/README.md` does record. Implementing `--rpm` — a native
+  build against Fedora's `libgbinder-devel` rather than the `--deps` path that copies `.so`
+  files off bigtab01 — and giving `artifacts/wifi/install.sh` the component argument
+  `artifacts/overlay/install.sh` already has are what unblock a full `-ba`.
+
+Of ~36 modifications named in [docs/47](47-package-split.md), **7 have a `.mod` and 4 produce an
+installable package**. The order that gets the most working soonest is: `overlay-sync`, then the
+remaining overlay components (`camera-hal`, `battery`, `wifi-framework`, `wifi-hostd`,
+`brightness-overlay`, `widevine`), then `sensord` — which `backlight` already needs and which
+also carries `ILight`, so brightness stays broken without it.
+
+Everything builds on the dev box; `rpm` 4.20.1 and `rpmlint` 2.7.0 are installed there. Drive it
+with `packaging/build-mod.sh --lint <name>`.
+
+### Also on the list, not yet started
+
+- **Move the APKs into their own GitHub repositories**, one per app, each with its own CI/CD.
+  Requested 2026-09-22. Six directories, a completely separate toolchain and distribution
+  channel from the host packaging, and a signing problem that has to be fixed *during* the move:
+  every APK build script generates a throwaway debug keystore if none exists. Detail and the
+  open question about the three diagnostic probes are in
+  [docs/53](53-release-readiness.md).
+- **Write `BUILDING.md`.** Neither compiled daemon can currently be built by anyone who cannot
+  ssh to bigtab01.
+- **Enforcement is already in place for signed commits** — `bin/check-signed-commits.sh`, wired
+  to `.git/hooks/pre-push` and to [lefthook.yml](../lefthook.yml). All 94 commits on master
+  already pass. Note `lefthook install` replaces the native shim with lefthook's dispatcher.
+
+
 **Goal 2's sensors are done** — the scoping that used to live here is superseded by
 [docs/14-sensors.md](14-sensors.md), which records what the hardware actually is (three
 transducers, two firmware-fused outputs), the scale factors derived from the HID report descriptor,
