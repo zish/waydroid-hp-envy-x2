@@ -1,0 +1,29 @@
+# Git hooks for this repository.
+#
+# lefthook is not a CI engine and is not trying to be one: it is the fast local
+# gate, and the same jobs are meant to be re-run in CI with
+# `lefthook run pre-push --all-files`, so a check cannot pass locally and mean
+# something different on a runner. The build, sign and publish pipeline belongs
+# in GitHub Actions. docs/53-release-readiness.md has the full division of
+# labour and the remaining checks to add.
+#
+# Install the hooks into this clone with:
+#     lefthook install
+#
+# Until lefthook is installed, .git/hooks/pre-push is a two-line shim calling
+# the same script, so the signature gate is enforced either way. Recreate it
+# with the command in bin/check-signed-commits.sh's header if it goes missing.
+# Note that `lefthook install` REPLACES that shim with lefthook's own
+# dispatcher, which then reaches the same script through this file -- so the
+# handover is seamless, but a broken lefthook.yml would silently drop the gate.
+
+pre-push:
+  commands:
+    signed-commits:
+      # --branch rather than --pre-push: lefthook does not forward git's
+      # pre-push stdin, and checking every commit reachable from HEAD is the
+      # stricter reading of "all commits in a branch are signed" anyway. The
+      # native shim uses --pre-push, which narrows to the commits actually
+      # being sent once a remote-tracking ref exists.
+      run: bin/check-signed-commits.sh --branch
+      fail_text: "unsigned commit in this branch -- see the list above"
