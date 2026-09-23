@@ -18,7 +18,7 @@
 # container_runtime_t is denied `binder transfer` to that domain. This daemon
 # speaks D-Bus and TCP, never binder, so the whole trap is out of scope.
 Description=Bluetooth (BlueZ) management for Waydroid's Android
-Documentation=https://github.com/jmelanso/bigtab01-waydroid/blob/main/docs/50-bluetooth.md
+Documentation=https://github.com/zish/waydroid-hp-envy-x2/blob/HEAD/docs/50-bluetooth.md
 Wants=bluetooth.service waydroid-container.service
 After=bluetooth.service waydroid-container.service dbus.service
 

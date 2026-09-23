@@ -13,7 +13,7 @@
 # to idle while there is no container, which keeps it out of the container's own
 # start and stop ordering.
 Description=Unstick Android init services Waydroid's container cannot kill
-Documentation=https://github.com/jmelanso/bigtab01-waydroid/blob/main/docs/48-battery-frozen-and-netd-stale.md
+Documentation=https://github.com/zish/waydroid-hp-envy-x2/blob/HEAD/docs/48-battery-frozen-and-netd-stale.md
 Wants=waydroid-container.service
 After=waydroid-container.service
 

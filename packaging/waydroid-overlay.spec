@@ -55,7 +55,7 @@ Release:        2%{?dist}
 Summary:        Deploy Waydroid overlay content, repeatably, from packaged payload
 
 License:        GPL-3.0-or-later
-URL:            https://github.com/zish/bigtab01-waydroid
+URL:            https://github.com/zish/waydroid-hp-envy-x2
 Source0:        waydroid-bigtab01-%{version}.tar.gz
 
 BuildArch:      noarch

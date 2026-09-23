@@ -68,7 +68,7 @@ Release:        1%{?dist}
 Summary:        Host-side Wi-Fi native services for Waydroid's Android container
 
 License:        GPL-3.0-or-later
-URL:            https://github.com/zish/bigtab01-waydroid
+URL:            https://github.com/zish/waydroid-hp-envy-x2
 Source0:        waydroid-bigtab01-%{version}.tar.gz
 
 %if %{without prebuilt}

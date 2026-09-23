@@ -38,7 +38,7 @@ Release:        1%{?dist}
 Summary:        Host-side Waydroid integration for the HP Envy x2 (bigtab01)
 
 License:        GPL-3.0-or-later
-URL:            https://github.com/zish/bigtab01-waydroid
+URL:            https://github.com/zish/waydroid-hp-envy-x2
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch

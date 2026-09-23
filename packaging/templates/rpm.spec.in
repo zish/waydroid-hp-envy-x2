@@ -11,7 +11,7 @@ Release:        @RELEASE@%{?dist}
 Summary:        @SUMMARY@
 
 License:        @LICENSE@
-URL:            https://github.com/zish/bigtab01-waydroid
+URL:            https://github.com/zish/waydroid-hp-envy-x2
 Source0:        %{name}-%{version}.tar.gz
 @ARCHLINE@
 @BUILDREQUIRES@
