@@ -20,7 +20,18 @@
 #   packaging/build-mod.sh camera-gbm            # tarball, spec, rpmbuild -ba
 #   packaging/build-mod.sh --srpm camera-gbm     # source package only
 #   packaging/build-mod.sh --lint camera-gbm     # ... and run rpmlint on the result
+#   packaging/build-mod.sh --prebuilt sensord    # daemons from build/ binaries
 #   packaging/build-mod.sh --all                 # every mod in packaging/mods
+#
+# WHY --prebuilt EXISTS
+#
+# The same reason packaging/build-rpms.sh has one, and it stages the binaries the
+# same way. The two C++ daemons compile against libgbinder-devel and
+# libglibutil-devel, which are Fedora packages, so a real source build needs a
+# Fedora machine or mock and this box is Debian. Their .mod files declare the
+# source build as the default -- it is what a distribution builder would run --
+# and carry a %bcond so the binary sensors/build.sh and wifi/build.sh already
+# produced can be packaged here instead. A mod with no PREBUILT= is unaffected.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -30,12 +41,14 @@ MODDIR="$here/mods"
 
 SRPM_ONLY=0
 LINT=0
+PREBUILT=0
 mods=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--srpm) SRPM_ONLY=1; shift ;;
 	--lint) LINT=1; shift ;;
+	--prebuilt) PREBUILT=1; shift ;;
 	--all)  for m in "$MODDIR"/*.mod; do mods="$mods $(basename "$m" .mod)"; done; shift ;;
 	-h|--help) sed -n '19,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 	-*) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -69,7 +82,7 @@ for mod in $mods; do
 	modfile="$MODDIR/$mod.mod"
 	[ -f "$modfile" ] || { echo "no such modification: $mod" >&2; exit 1; }
 
-	NAME=$mod VERSION=0.0.0 KIND=host FILES="" SOURCES="" DOCS=""
+	NAME=$mod VERSION=0.0.0 KIND=host FILES="" SOURCES="" DOCS="" PREBUILT_FILES=""
 	# shellcheck disable=SC1090
 	. "$modfile"
 
@@ -111,6 +124,26 @@ for mod in $mods; do
 			install -D -m "$(stat -c %a "$repo/$f")" "$repo/$f" "$stage/$f"
 		fi
 	done
+	# Prebuilt binaries go in under prebuilt/, which is where the %bcond arm of
+	# %build looks for them. Staged after the source list on purpose: they are
+	# build output, not sources, and they must not appear in the count below.
+	withflag=""
+	if [ "$PREBUILT" = 1 ] && [ -n "$PREBUILT_FILES" ]; then
+		mkdir -p "$stage/prebuilt"
+		for b in $PREBUILT_FILES; do
+			[ -x "$repo/$b" ] || {
+				echo "$mod: --prebuilt needs $b, which is not built here." >&2
+				echo "       Build it first, or drop --prebuilt for a source build." >&2
+				exit 1
+			}
+			cp -p "$repo/$b" "$stage/prebuilt/"
+			echo "   prebuilt: $b"
+		done
+		withflag="--with prebuilt"
+	elif [ "$PREBUILT" = 1 ]; then
+		echo "   note: $mod declares no PREBUILT=, building from source"
+	fi
+
 	tar -C "$TOP/stage" -czf "$TOP/SOURCES/$prefix.tar.gz" "$prefix"
 	echo "== $pkg: tarball $(du -h "$TOP/SOURCES/$prefix.tar.gz" | cut -f1), $(sort -u "$list" | grep -c .) source paths"
 
@@ -119,7 +152,8 @@ for mod in $mods; do
 	spec="$TOP/SPECS/$pkg.spec"
 
 	[ "$SRPM_ONLY" = 1 ] && mode=-bs || mode=-ba
-	rpmbuild "$mode" "$@" "$spec"
+	# shellcheck disable=SC2086
+	rpmbuild "$mode" $withflag "$@" "$spec"
 
 	if [ "$LINT" = 1 ] && command -v rpmlint >/dev/null 2>&1; then
 		echo "== $pkg: rpmlint"

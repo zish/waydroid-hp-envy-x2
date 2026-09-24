@@ -1,0 +1,9 @@
+* Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. The host-side sensors daemon, which until now was hand-copied
+  to /usr/local/bin and owned by nothing.
+- Unblocks waydroid-ext-backlight, which grants an SELinux permission to this
+  daemon by name and so installed inert while no package shipped it.
+- Carries a %%bcond for the prebuilt binary. The default is the real source
+  build; the dev box is Debian and cannot compile against Fedora's
+  libgbinder-devel, so an installable RPM is produced here with
+  `packaging/build-mod.sh --prebuilt sensord`.

@@ -190,6 +190,12 @@ render_one() {
 		printf '%s\n' "$SCRIPTLETS" | sed '/^[[:space:]]*$/d' >"$tmp/SCRIPTLETS"
 		;;
 	host|fetch)
+		# GLOBALS is written here and not only in the overlay arm above, because
+		# a host package needs it too: the two C++ daemons carry a
+		# `%bcond_with prebuilt`, and a %bcond has to appear before the first
+		# tag in the spec, which is exactly where @GLOBALS@ is spliced. Until
+		# this line existed a .mod could set GLOBALS and be silently ignored.
+		printf '%s\n' "$GLOBALS" | sed '/^[[:space:]]*$/d' >"$tmp/GLOBALS"
 		printf '%s\n' "$INSTALL" | sed '/^[[:space:]]*$/d' >"$tmp/INSTALL"
 		printf '%s\n' "$PAYLOAD_FILES" | sed '/^[[:space:]]*$/d' >"$tmp/FILES"
 		printf '%s\n' "$SCRIPTLETS" | sed '/^[[:space:]]*$/d' >"$tmp/SCRIPTLETS"
