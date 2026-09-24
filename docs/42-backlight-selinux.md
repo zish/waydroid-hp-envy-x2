@@ -1,8 +1,10 @@
 # 42 — The brightness slider stopped working: waydroid_t cannot write sysfs
 
 **Date:** 2026-09-10
-**Status:** Fixed and installed on the host. One step of the verification is still
-outstanding — see [What is verified, and what is not](#what-is-verified-and-what-is-not).
+**Status:** Fixed, packaged, and verified end to end against the packaged stack on
+2026-09-24. Nothing here is outstanding — see
+[What is verified, and what is not](#what-is-verified-and-what-is-not) for the 2026-09-10
+reboot and the end of this document for the 2026-09-24 re-verification.
 
 Follows [37-brightness.md](37-brightness.md), which built the feature and shipped it
 believing it worked. It did work, but only in a configuration that could not survive a
@@ -219,8 +221,9 @@ goes 0 → 7, and the machine really is on AC), but the policy stayed DIM throug
 polling: `mUserActivityTimeoutOverrideFromWindowManager=10000` wins.
 
 **So a full-range run genuinely requires a human touching the machine**, and the script should
-say so rather than implying it handles it. Until then the honest automated check is the
-`--verbose` mapping check, which is independent of display policy.
+say so rather than implying it handles it. The honest automated check is the mapping check, which
+is independent of display policy — see the closing section for why it took until 2026-09-24 to
+actually work.
 
 ### Android's dim policy now drives the whole machine's panel
 
@@ -307,3 +310,130 @@ access it had before this module narrowed the type.
 writes the file before narrowing it. The check is cheap — relabel, exercise the other writer,
 relabel back — and it is the only thing that would have caught this, because the audit trail
 that normally makes SELinux debuggable was not there.
+
+## Re-verified on the packaged stack — 2026-09-24
+
+The 2026-09-10 verification above was of a **hand-installed** fix: a CIL loaded by a hand
+`semodule -i`, against a binary hand-placed in `/usr/local/bin`. The first real migration
+replaced both halves with packages on 2026-09-24, and `packaging/README.md` records three
+faults that surfaced only because it did. So the whole chain was re-run, and this is the first
+pass where nothing in it was placed by hand.
+
+What was in force, checked rather than assumed:
+
+| | |
+|---|---|
+| daemon binary | `/usr/bin/waydroid-sensord`, owned by `waydroid-ext-sensord-1.0.0-1` |
+| how it was started | pid 1029 `waydroid container start` → pid 1708, i.e. `container_manager.py` |
+| daemon domain | `system_u:system_r:waydroid_t:s0` — the configuration that was broken |
+| policy source | `/usr/share/waydroid-backlight/waydroid_backlight.cil`, from `waydroid-ext-backlight-1.0.2-1` |
+| loaded by | `waydroid-backlight-policy.service` at boot, stamp hash matching the packaged CIL |
+| the shadow | gone — `/var/usrlocal/share/waydroid-backlight` no longer exists |
+| label | `system_u:object_r:waydroid_backlight_t:s0` on `…/intel_backlight/brightness` |
+
+The kernel answers `ALLOWED` for **both** grants, queried directly because no AVC would appear
+either way: `waydroid_t` → `waydroid_backlight_t:file write`, and the `init_t` grant that 1.0.2
+added back.
+
+**The regression is closed on the real boot path.** `systemd-backlight@backlight:intel_backlight`
+finished cleanly on the last two boots — 2026-09-23 23:57:29 and 2026-09-24 01:35:31 —
+ending the 978-failure run that began on 2026-09-10. The host's only remaining failed unit is
+`systemd-remount-fs`, which is ordinary read-only-root behaviour and not ours.
+
+**The sweep passes**, run with someone physically holding the display awake for its duration:
+
+```
+0.2 -> raw 191 (want ~187)  OK      0.8 -> raw 750 (want ~749)  OK
+0.5 -> raw 470 (want ~468)  OK      1.0 -> raw 937 (want ~937)  OK
+BRIGHTNESS TEST PASSED (4 ok, 0 skipped, 0 human-required)
+```
+
+Reading for reading identical to 2026-09-10 — 191, 470, 750, 937, deviating at most 4 raw
+units — from an entirely packaged stack.
+
+Two notes for whoever runs this next:
+
+- **The mapping check now runs in production. It never had before.** Written up separately
+  below, because getting it working found the reason it had been dead since the day it was
+  written.
+- **The host runs 1.0.2 while this repository is at 1.0.3.** The difference is loader
+  diagnostics only — 1.0.3 announces a shadowing `/usr/local` CIL — and the CIL itself is
+  byte-identical (`ac8cb72e…`) to the one verified here, so what passed is the policy 1.0.3
+  also ships.
+
+## The mapping check had never run, and finding out why took one line
+
+**2026-09-24, immediately after the re-verification above.**
+
+`bin/brightness-test.sh` has carried a mapping check since it was written: compare the last
+brightness the daemon *logged* against what the panel actually reads. It is the only measurement
+in the script that does not depend on Android's display policy, which makes it the one thing
+worth running when nobody is at the machine — and every previous run had printed
+
+```
+  no daemon log; start it with --verbose to enable this check
+```
+
+and moved on. The check had not run once on the real host.
+
+The reason is a single token. `Backlight.cpp` logged the line at `GDEBUG`, and the only thing
+that raises the level is `--verbose` on the command line — set once from `argv`, with nothing
+rereading it at runtime. `backlight.conf`'s live reload handles `gamma`, `min_percent` and
+`device`, not the log level. And `container_manager.py` spawns the daemon from a hardcoded argv:
+
+```python
+["waydroid-sensord", "/dev/" + args.HWBINDER_DRIVER]
+```
+
+So in production the level could never be raised, and the line could never be emitted. Not a bug
+in the check — the check was correct and unreachable, which is worse, because it printed a
+plausible instruction (`start it with --verbose`) that cannot be followed on the one host that
+matters.
+
+**The fix is `GDEBUG` → `GINFO`,** shipped as `waydroid-ext-sensord` 1.0.1. `GINFO` is already
+the level that reaches `/var/lib/waydroid/waydroid.log`, because `container_manager.py` captures
+this daemon's stderr into it — that is how `enable gyroscope` gets there — so the line lands in
+the production log with no flag, no unit, and no new configuration surface. The cost is one line per
+brightness change in a file that already receives an `lxc-info` poll every 2 seconds.
+
+`bin/brightness-test.sh` gained the other half: it reads `waydroid.log` first and falls through to
+`/tmp/sensord-*.log` only if the production log stays silent, which is what happens when a
+hand-started verbose daemon is the one serving. **It also now reads only the bytes appended after
+the script starts.** `waydroid.log` outlives both the daemon and the boot, so a `brightness N/255`
+from hours earlier would otherwise be compared against a panel that has moved since — a MISMATCH
+that is really a stale line. That hazard did not exist while the check only read `/tmp`.
+
+First run after deployment, with no `--verbose` anywhere:
+
+```
+### mapping check (daemon's last setLight vs the panel)
+  android sent 255/255 -> panel 937, mapping says 937  OK
+```
+
+### Two things worth keeping from the deployment
+
+**`rpm-ostree apply-live` refuses an upgrade by default.** It is additive-only, and an upgrade is
+a removal plus an addition, which it reports as
+
+```
+error: packages would be changed: 2, allow replacement to override
+```
+
+`--allow-replacement` is the flag. This is the first time this project has updated a package on
+the running system rather than at a boot, and it is worth knowing: it means a one-binary fix does
+not need a reboot, and therefore does not need someone at the console for the LUKS passphrase.
+The container restart still does need someone, because it drops the kiosk to the greeter.
+
+**A replaced binary is not a restarted daemon, and the file size will not tell you.** After
+`apply-live` the running daemon still held the old inode:
+
+| | |
+|---|---|
+| running process (`/proc/PID/exe`) | inode 9884, 868088 bytes |
+| on disk (`/usr/bin/waydroid-sensord`) | inode 2292760, 868088 bytes |
+
+**Identical sizes**, because `GDEBUG` → `GINFO` changes one immediate operand and nothing about
+the layout. Comparing sizes — or trusting that `ls -l` looks unchanged for a reason — would
+have said the deployment had not happened. Compare inodes, or hashes. The daemon picked up the new
+binary only after `systemctl restart waydroid-container.service`, which is the same
+deleted-inode behaviour the migration recorded for the hand-placed copies.

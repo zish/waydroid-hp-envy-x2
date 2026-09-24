@@ -309,7 +309,15 @@ Backlight::SetAndroidBrightness(int v)
     if (!WriteRaw(raw))
         return -1;
 
-    GDEBUG("brightness %d/255 -> raw %d/%d", v, raw, mMaxRaw);
+    /* INFO and not DEBUG, deliberately.  This is the only record of what
+     * Android actually asked for, and container_manager.py spawns us with a
+     * hardcoded argv that has no --verbose in it -- so at DEBUG the line is
+     * unreachable in production, and the one measurement in
+     * bin/brightness-test.sh that does NOT depend on Android's display policy
+     * could never run on the real host.  The cost is a line per brightness
+     * change in /var/lib/waydroid/waydroid.log, which is negligible beside the
+     * lxc-info poll container_manager.py already writes there every 2 s. */
+    GINFO("brightness %d/255 -> raw %d/%d", v, raw, mMaxRaw);
     mLastRaw = raw;
     return raw;
 }

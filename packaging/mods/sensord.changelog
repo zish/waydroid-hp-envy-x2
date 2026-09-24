@@ -1,3 +1,14 @@
+* Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
+- Log each brightness change at INFO rather than DEBUG, so the one measurement
+  in bin/brightness-test.sh that does not depend on Android's display policy
+  can run on the real host. container_manager.py spawns this daemon with a
+  hardcoded argv and no --verbose, so at DEBUG the line was unreachable in
+  production and the mapping check had never once run there.
+- No other behaviour changes. The line lands in /var/lib/waydroid/waydroid.log,
+  where container_manager.py already captures this daemon's stderr, and costs
+  one line per brightness change against the lxc-info poll written to the same
+  file every 2 s.
+
 * Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First package. The host-side sensors daemon, which until now was hand-copied
   to /usr/local/bin and owned by nothing.

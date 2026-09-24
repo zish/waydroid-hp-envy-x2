@@ -261,7 +261,10 @@ the day the module first landed — and had failed **978 times** since, leaving 
 permanently `degraded`. No AVC is logged for it even with `dontaudit` disabled, so the only
 symptom is a bare `EACCES` with nothing implicating SELinux. Confirmed by experiment
 (relabel to `sysfs_t` → succeeds; relabel back → fails) and fixed with one `allow init_t` line.
-Full account in [docs/42](../docs/42-backlight-selinux.md). 1.0.2 is staged on bigtab01.
+Full account in [docs/42](../docs/42-backlight-selinux.md). 1.0.2 is **installed** on
+bigtab01 and the unit has finished cleanly on both boots since, which is what closes the
+978-failure run; the full brightness sweep was re-run against the packaged stack on
+2026-09-24 and passed.
 
 The lesson generalises to every private type this project introduces: **a narrow type takes
 access away as well as granting it**, so ask what else writes the file before narrowing it.
@@ -289,6 +292,34 @@ PATH**: when a modification moves from hand-installed to packaged, the old copy 
 removed from *every* location the tool searches, not just from `/usr/local/bin` and
 `/etc/systemd/system`. `waydroid-overlay-sync` has the same precedence design and will want
 the same treatment before it is installed.
+
+#### The first live package update — `sensord` 1.0.1, same day
+
+Everything above landed at a boot. `waydroid-ext-sensord` 1.0.1 did not, and the way it went in
+is worth recording because it removes a reboot from the loop for any one-file fix.
+
+The change itself is one token — the daemon logged each brightness change at `GDEBUG`, which
+`container_manager.py` has no way to enable, so `bin/brightness-test.sh`'s policy-independent
+mapping check had never run on the real host. `GINFO` fixes it; [docs/42](../docs/42-backlight-selinux.md)
+has the full account.
+
+Three things learned putting it on the machine:
+
+- **An upgrade is not additive, and `apply-live` is additive by default.** It counts the removal
+  and the addition separately and refuses with `error: packages would be changed: 2, allow
+  replacement to override`. `--allow-replacement` is the flag. The transaction itself is the
+  ordinary `rpm-ostree uninstall <name> --install <file.rpm>` pair, which does both halves at
+  once and reports a clean `Upgraded: waydroid-ext-sensord 1.0.0-1 -> 1.0.1-1`.
+- **Live-applied is not live-running.** The daemon kept the old inode until the container was
+  restarted — exactly the deleted-inode behaviour recorded above for the hand-placed copies,
+  and for the same reason. Nothing re-execs a running process.
+- **The file size was identical across the change**, 868088 bytes both sides, because flipping
+  a log level changes one immediate operand and nothing about the layout. Only the inode and
+  the hash distinguished them. Any deployment check that compares sizes, or eyeballs `ls -l`,
+  would have reported this update as not having happened.
+
+The cost that remains is the container restart, which drops the kiosk to the SDDM greeter and
+needs someone at the machine — but not the console, and not the LUKS passphrase.
 
 ## What was deployed on bigtab01 before that — audited 2026-09-15
 

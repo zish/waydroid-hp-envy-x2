@@ -503,7 +503,19 @@ user-activity poke **does not work** (injected keyevents and taps leave
 `mLastUserActivityTime` frozen, and `svc power stayon` loses to WindowManager's 10 s override), so
 a full-range run needs a human touching the machine throughout; and Android's dim policy now
 drives the *physical* panel, so the whole display dims 10 s after the last touch of Android even
-when someone is using the host.
+when someone is using the host. **Re-verified 2026-09-24 on a fully packaged stack**, which
+is the first pass where no part of it was hand-placed: the packaged `/usr/bin/waydroid-sensord`
+spawned by `container_manager.py` as `waydroid_t`, against the packaged CIL loaded at boot by
+`waydroid-backlight-policy.service` with the `/usr/local` shadow removed, swept 0.2/0.5/0.8/1.0
+within the same four raw units. The same run closes the regression this module caused —
+`systemd-backlight` has finished cleanly on both boots since 1.0.2, ending a 978-failure run. It also
+found that `bin/brightness-test.sh`'s mapping check — the one measurement independent of Android's
+display policy, and so the only one that works unattended — **had never run on this host**: the
+daemon logged what Android asked for at `GDEBUG`, and `container_manager.py` spawns it from a
+hardcoded argv with no `--verbose`, so the line was unreachable in production and the check
+printed an instruction nobody could follow. `waydroid-ext-sensord` 1.0.1 logs it at `GINFO`, which
+is the level that already reaches `/var/lib/waydroid/waydroid.log`, and the check now passes
+there: `android sent 255/255 -> panel 937, mapping says 937  OK`.
 
 **The container ages out — the 32-bit PID cliff. DONE, and not on the list above.** Found
 2026-09-21, reported as "Waydroid seems to have restarted itself and is now stuck on the animated

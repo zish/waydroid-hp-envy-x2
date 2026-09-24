@@ -42,8 +42,20 @@
 # what the old keyevent slot was spent on.
 #
 # The mapping check near the end is the one measurement that does NOT depend on
-# display policy, so prefer it when nobody is at the machine. It needs the
-# daemon to have been started with --verbose.
+# display policy, so prefer it when nobody is at the machine. It reads the
+# daemon's own record of what Android asked for.
+#
+# In production that record is /var/lib/waydroid/waydroid.log, because
+# container_manager.py captures the daemon's stderr into it, and the line is
+# logged at INFO from waydroid-ext-sensord 1.0.1 onward precisely so this works
+# without --verbose -- which container_manager.py's hardcoded argv has no way to
+# pass. A hand-started daemon's /tmp/sensord-*.log is still read if the
+# production log yields nothing.
+#
+# ONLY THE PART OF EACH LOG APPENDED AFTER THIS SCRIPT STARTS IS CONSIDERED.
+# waydroid.log outlives both the daemon and the boot, so a "brightness N/255"
+# from hours ago would otherwise be compared against a panel that has moved
+# since, and would read as a MISMATCH that is really a stale line.
 #
 # docs/37-brightness.md, docs/42-backlight-selinux.md
 set -u
@@ -53,6 +65,35 @@ BL_DIR=$(ls -d /sys/class/backlight/*/ 2>/dev/null | head -1)
 MAX=$(cat "$BL_DIR/max_brightness")
 raw() { cat "$BL_DIR/actual_brightness"; }
 ash() { sudo -n waydroid shell -- sh -c "$1" 2>/dev/null; }
+
+# Logs that may carry the daemon's own record, in the order they are trusted.
+# waydroid.log first because that is where the production daemon lands; the
+# /tmp pair are hand-started daemons, which is the only other way this is run.
+LOGS=(/var/lib/waydroid/waydroid.log /tmp/sensord-v.log /tmp/sensord-lights.log)
+LOG_MARKS=()
+for L in "${LOGS[@]}"; do
+    if [ -r "$L" ]; then
+        LOG_MARKS+=("$(stat -c %s "$L" 2>/dev/null || echo 0)")
+    else
+        LOG_MARKS+=(0)
+    fi
+done
+
+# The last brightness the daemon logged SINCE THIS SCRIPT STARTED, or empty.
+# First log to yield anything wins: if a hand-started verbose daemon is the one
+# serving ILight, the production log gains no brightness lines and we fall
+# through to /tmp on its own.
+last_logged() {
+    local i=0 L M v
+    for L in "${LOGS[@]}"; do
+        M=${LOG_MARKS[$i]}; i=$((i + 1))
+        [ -r "$L" ] || continue
+        v=$(tail -c "+$((M + 1))" "$L" 2>/dev/null |
+            grep -a -oE "brightness [0-9]+/255" | tail -1 |
+            sed -E 's#brightness ([0-9]+)/255#\1#')
+        [ -n "$v" ] && { printf '%s\n' "$v"; return; }
+    done
+}
 
 echo "### host panel"
 echo "  device=$(basename "$BL_DIR")  max=$MAX  now=$(raw)"
@@ -138,38 +179,44 @@ done
 # display policy: whatever brightness Android last asked for, did the panel
 # land where our own mapping says it should?  This validates the piece we own.
 echo "### mapping check (daemon's last setLight vs the panel)"
-LOG=$(ls -t /tmp/sensord-v.log /tmp/sensord-lights.log 2>/dev/null | head -1)
-if [ -n "$LOG" ]; then
-    # Android animates brightness as a RAMP, so the log and the panel are both
-    # moving targets for a second or two after a change. Wait for the last
-    # logged value to stop changing before comparing, or this check races the
-    # animation and reports a mismatch that is really a timing artefact. A
-    # reading of raw 375 against a request of 0.35 was exactly this, and briefly
-    # looked like a non-linear brightness curve -- see docs/42.
-    LAST=""; PREV=""
-    for _ in 1 2 3 4 5 6 7 8; do
-        LAST=$(grep -a -oE "brightness [0-9]+/255" "$LOG" | tail -1 |
-               sed -E 's#brightness ([0-9]+)/255#\1#')
-        [ -n "$LAST" ] && [ "$LAST" = "$PREV" ] && break
-        PREV=$LAST
-        sleep 1
-    done
-    if [ -n "$LAST" ]; then
-        EXP=$(( LAST * MAX / 255 ))
-        GOT=$(raw)
-        D=$(( GOT > EXP ? GOT - EXP : EXP - GOT ))
-        printf "  android sent %s/255 -> panel %s, mapping says %s" "$LAST" "$GOT" "$EXP"
-        if [ "$D" -le 1 ]; then echo "  OK"; else echo "  MISMATCH"; FAIL=$((FAIL + 1)); fi
-    else
-        echo "  no setLight logged yet (daemon not started with --verbose?)"
-    fi
+# Android animates brightness as a RAMP, so the log and the panel are both
+# moving targets for a second or two after a change. Wait for the last logged
+# value to stop changing before comparing, or this check races the animation and
+# reports a mismatch that is really a timing artefact. A reading of raw 375
+# against a request of 0.35 was exactly this, and briefly looked like a
+# non-linear brightness curve -- see docs/42.
+LAST=""; PREV=""
+for _ in 1 2 3 4 5 6 7 8; do
+    LAST=$(last_logged)
+    [ -n "$LAST" ] && [ "$LAST" = "$PREV" ] && break
+    PREV=$LAST
+    sleep 1
+done
+if [ -n "$LAST" ]; then
+    EXP=$(( LAST * MAX / 255 ))
+    GOT=$(raw)
+    D=$(( GOT > EXP ? GOT - EXP : EXP - GOT ))
+    printf "  android sent %s/255 -> panel %s, mapping says %s" "$LAST" "$GOT" "$EXP"
+    if [ "$D" -le 1 ]; then echo "  OK"; else echo "  MISMATCH"; FAIL=$((FAIL + 1)); fi
 else
-    echo "  no daemon log; start it with --verbose to enable this check"
+    # Not "no log": waydroid.log is always there. The daemon logged no brightness
+    # change during this run, which on a working system it cannot have avoided --
+    # the sweep above asked for four different levels.
+    echo "  the daemon logged nothing during this run. Expected a"
+    echo "  'brightness N/255' line in one of:"
+    printf "    %s\n" "${LOGS[@]}"
+    echo "  waydroid-ext-sensord before 1.0.1 logs that line at DEBUG, which"
+    echo "  container_manager.py has no way to enable -- check with"
+    echo "    rpm -q waydroid-ext-sensord"
 fi
 
-echo "### daemon's own view (needs --verbose to have been passed)"
-for L in /tmp/sensord-v.log /tmp/sensord-lights.log; do
-    [ -f "$L" ] && grep -a -E "brightness [0-9]+/255" "$L" | tail -4
+echo "### daemon's own view (brightness changes logged during this run)"
+i=0
+for L in "${LOGS[@]}"; do
+    M=${LOG_MARKS[$i]}; i=$((i + 1))
+    [ -r "$L" ] || continue
+    tail -c "+$((M + 1))" "$L" 2>/dev/null |
+        grep -a -E "brightness [0-9]+/255" | tail -4
 done
 
 echo
