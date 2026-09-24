@@ -247,7 +247,9 @@ for every installed user. This has to be fixed before any APK is published anywh
 Per-job ephemeral disk: ~2 GB for an RPM job, ~1.5 GB for an APK job, ~8 GB if the camera wrapper
 is ever rebuilt. GitHub-hosted runners give roughly 14 GB on `/` and 65 GB on `/mnt`, so all three
 fit — but **the NDK is not needed in CI at all**, because the built wrapper is already committed
-at `artifacts/phase2/*.so`.
+at `artifacts/phase2/*.so`. (That framing is under review since the no-vendored-binaries policy
+of 2026-09-24 — committed build output is not what the policy forbids, but it is the open
+question in [docs/54](54-no-vendored-binaries.md).)
 
 Cache: only the Android toolchain is worth caching, ~300–400 MB compressed against a 10 GB
 default limit. Published repositories: an RPM repo with ten versions retained is ~50 MB, an
@@ -310,16 +312,24 @@ string Android reports through the sensors HAL, so changing it changes observabl
    [retired](12-v4l2-frame-errors.md) rather than written, which makes the `camera` group
    resolvable for the first time.
    What remains of this item now, in order:
-   - **A third migration**: install those five on bigtab01. Nothing from the batch is installed,
-     so the machine's overlay coverage is still 2 of 13 whatever the package count says. Five of
-     the seven payload files are already byte-identical to what is live there and the other two
-     differ by one word in a comment, so the transaction changes almost nothing Android sees —
-     which is the same argument that made the second migration safe, and the same trap: install
-     without removing the hand-placed copies and nothing has changed.
+   - **A third migration**: install `brightness-overlay`, `wifi-framework` and `wifi-hostd` on
+     bigtab01 — the three whose payload is text written here, so the no-vendored-binaries policy
+     does not touch them. (`wifi-hostd` additionally needs `wifid` to have a binary RPM first.)
+     Nothing from the batch is installed, so the machine's overlay coverage is still 2 of 13
+     whatever the package count says. Their payload files are byte-identical to what is live
+     there apart from one word in a comment, so the transaction changes almost nothing Android
+     sees — which is the same argument that made the second migration safe, and carries the same
+     trap: install without removing the hand-placed copies and nothing has changed.
    - **The four Widevine files**, which are not another `.mod` file. They need a fetched-row and a
      symlink-row in the manifest format, and therefore a version bump of `waydroid-ext-overlay-sync`
      — the keystone, already installed on bigtab01. Scoped in
-     [docs/47](47-package-split.md).
+     [docs/47](47-package-split.md). **Folded into the larger item below**, since the
+     no-vendored-binaries policy needs the same keystone bump.
+   - **Comply with the no-vendored-binaries policy** ([docs/54](54-no-vendored-binaries.md), set
+     2026-09-24). `camera-hal` and `battery` ship patched vendor binaries and must instead ship
+     the patch, deriving the file from the user's own `vendor.img` at reconcile time — verified
+     feasible unprivileged. This supersedes the migration ordering above: **hold `camera-hal` and
+     `battery` out of the third migration**; the other three ship only text and are unaffected.
    - **`mediad`**, the cheapest remaining host package.
    - **`wifi/build.sh --rpm`**, plus the component argument for `artifacts/wifi/install.sh` that
      `artifacts/overlay/install.sh` already has. This unblocks `wifid`'s `-ba` and with it

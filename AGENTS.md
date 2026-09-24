@@ -600,6 +600,42 @@ This repo is the record of the work. It should contain detailed documentation an
 produced during troubleshooting and configuration — findings, configs, scripts, captured logs,
 and the reasoning behind each change.
 
+### Policy: no binaries from external sources in this repository
+
+**Set by the owner, 2026-09-24. It applies to the whole repository, not only to new work.**
+
+Do not commit a binary that came from somewhere else — a vendor image, an upstream archive, a
+proprietary prebuilt. **If a package needs one, it is obtained at RPM install time or inside
+Android, never carried here.** This is not only a licence question, though it is that too: a
+binary in git is a copy that ages silently against the thing it was taken from, and the
+repository stops being the record of the work and starts being a redistribution channel for
+somebody else's build.
+
+What that means in practice, cheapest case first:
+
+- **The bytes are usually already on the user's machine.** `camera-hal` and `battery` are a
+  one-byte and a five-byte patch of files that ship inside Waydroid's own `vendor.img`. Nothing
+  needs fetching: `debugfs -R "dump /<path> /tmp/x" /etc/waydroid-extra/images/vendor.img`
+  extracts a file **unprivileged, with no loop mount and no root** — verified on bigtab01
+  2026-09-24, and the sha256 of both extracts matched the `stock` rows already recorded in the
+  component manifests. So ship the *patch* — source path in the image, expected stock sha256,
+  the offsets, and the sha256 of the result — and let the reconciler derive the file. A stock
+  hash that no longer matches means the image changed under us, which is exactly the
+  `--check-upstream` alarm [docs/47](docs/47-package-split.md) wanted and never got.
+- **Only fetch when the bytes genuinely are not on the machine.** That is Widevine, and only
+  Widevine: a Google prebuilt that Waydroid's image does not carry. Fetch it at install time
+  from the pinned upstream archive, verify the recorded digest, and never commit it.
+- **A stock copy kept as the upstream tripwire is a hash, not a file.** `artifacts/*/….orig`
+  and `artifacts/lib/*.so` exist to be compared against, and a sha256 in the `.mod` does that
+  job exactly as well for 64 bytes instead of 400 KB.
+
+Reference data dumped from *this machine's own hardware* — `artifacts/acpi/*.aml`,
+`artifacts/hid/*.rd` — is not what this policy is about. It is evidence, it is never shipped in
+a package, and it came from the host rather than from a third party.
+
+**Nothing in this repository complies yet.** The inventory and the migration are in
+[docs/54-no-vendored-binaries.md](docs/54-no-vendored-binaries.md).
+
 - `docs/` — numbered investigation notes, one per topic
 - `bin/` — helper scripts for working with the host, incl. stdlib-only V4L2 probes
   (`v4l2-formats.py`, `v4l2-curfmt.py`, `v4l2-grab.py`) written because `v4l-utils` is not
