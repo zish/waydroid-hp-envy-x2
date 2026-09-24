@@ -318,6 +318,27 @@ Three things learned putting it on the machine:
   the hash distinguished them. Any deployment check that compares sizes, or eyeballs `ls -l`,
   would have reported this update as not having happened.
 
+- **`LiveCommit` is how you check the apply landed, and whether a reboot is outstanding.**
+  `rpm-ostree status` annotates the booted deployment with `LiveCommit` and `LiveDiff` once a
+  live apply has happened. The running filesystem is consistent exactly when that hash equals
+  the *pending* deployment's `Commit`:
+
+  ```
+  * fedora:fedora/44/x86_64/sericea      <- booted
+                     Commit: 63d6f6c9…
+                 LiveCommit: 8b954b23…   <- what is actually running
+                   LiveDiff: 1 upgraded
+
+    fedora:fedora/44/x86_64/sericea      <- pending
+                     Commit: 8b954b23…   <- the same commit
+  ```
+
+  When they match there is nothing left to apply: the running system is already at the state
+  the next boot lands on, whether that boot is planned or a power cut. A reboot then buys only
+  the retirement of the `LiveCommit` line — worth taking opportunistically, since this project
+  has twice lost time to something that looked installed and was not, but not worth the LUKS
+  passphrase on its own.
+
 The cost that remains is the container restart, which drops the kiosk to the SDDM greeter and
 needs someone at the machine — but not the console, and not the LUKS passphrase.
 
