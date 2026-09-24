@@ -45,6 +45,7 @@ class MainActivity : Activity() {
 
         view = TouchView(this)
         view.onNewMax = { writeReport() }
+        view.onAbout = { About.show(this) }
         setContentView(view)
 
         // AFTER setContentView, always. window.insetsController reaches through

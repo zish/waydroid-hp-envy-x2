@@ -73,7 +73,15 @@ class MainActivity : Activity() {
             setPadding(16, 4, 16, 4)
             text = buildLegend()
         }
-        root.addView(legend)
+        // Beside the legend rather than in the button bar below: those three
+        // are controls for a running capture, and an About box is not one.
+        root.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM
+            addView(legend, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(About.link(this@MainActivity, 0xFF4FC3F7.toInt()))
+        })
 
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL

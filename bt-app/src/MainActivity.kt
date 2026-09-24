@@ -289,6 +289,9 @@ class MainActivity : Activity(), BtClient.Listener {
         val detail = profile?.let { status + " · " + it.describe() } ?: status
         titles.addView(label(detail, 12f, if (live) DIM else WARN))
         row.addView(titles)
+        // In the header, so it is reachable from the "no connection profile"
+        // screen too -- that branch of render() returns before the lists.
+        row.addView(About.link(this, ACCENT))
         row.addView(smallButton("⚙") { editConnection() })
         return row
     }

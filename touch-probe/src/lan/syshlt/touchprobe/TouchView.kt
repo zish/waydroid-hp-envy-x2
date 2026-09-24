@@ -29,6 +29,9 @@ class TouchView(context: Context) : View(context) {
     /** Invoked whenever [maxConcurrent] increases, so the report can be rewritten. */
     var onNewMax: ((Int) -> Unit)? = null
 
+    /** Invoked when the ABOUT target is tapped. See [aboutRect]. */
+    var onAbout: (() -> Unit)? = null
+
     var maxConcurrent = 0
         private set
     var eventCount = 0
@@ -99,6 +102,12 @@ class TouchView(context: Context) : View(context) {
     }
 
     private val resetRect = RectF()
+    // Drawn rather than laid out: this view fills the window on its own, and a
+    // real TextView over it would swallow every touch that landed on it
+    // *without* the swallow being visible in the count -- which is exactly the
+    // measurement this app exists to make. A canvas target is consumed in
+    // onTouchEvent, on the same terms as RESET, where the rule is written down.
+    private val aboutRect = RectF()
     private val tmpRect = RectF()
 
     init {
@@ -164,6 +173,12 @@ class TouchView(context: Context) : View(context) {
             resetRect.contains(event.x, event.y)
         ) {
             reset()
+            return true
+        }
+        if (event.actionMasked == MotionEvent.ACTION_DOWN &&
+            aboutRect.contains(event.x, event.y)
+        ) {
+            onAbout?.invoke()
             return true
         }
         ingest(event, hover = false)
@@ -355,6 +370,13 @@ class TouchView(context: Context) : View(context) {
         resetRect.set(width - rw - pad, pad, width - pad, pad + rh)
         canvas.drawRoundRect(resetRect, 8f * d, 8f * d, hudBg)
         canvas.drawText("RESET", resetRect.left + 22f * d, resetRect.centerY() + 6f * d, hudText)
+
+        // Directly under it, in the same dead corner and on the same terms: a
+        // tap here is consumed, so it is neither a contact nor a lost one.
+        aboutRect.set(resetRect.left, resetRect.bottom + 8f * d,
+            resetRect.right, resetRect.bottom + 8f * d + rh)
+        canvas.drawRoundRect(aboutRect, 8f * d, 8f * d, hudBg)
+        canvas.drawText("ABOUT", aboutRect.left + 22f * d, aboutRect.centerY() + 6f * d, hudDim)
 
         canvas.drawText(
             "put as many fingers on the glass as you can -- MAX is the answer",

@@ -110,7 +110,16 @@ class MainActivity : Activity(), SensorEventListener {
             text = "Hide sensors synthesised in software"
             setOnCheckedChangeListener { _, _ -> applyFilter() }
         }
-        root.addView(hideSoftware)
+        // The About link rides alongside the filter rather than on a line of
+        // its own: the panel above it is already capped at a third of the
+        // screen, and every row it does not take is a sensor card on screen.
+        root.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            addView(hideSoftware, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(About.link(this@MainActivity))
+        })
 
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 

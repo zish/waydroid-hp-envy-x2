@@ -9,7 +9,9 @@
   why there is no READ_EXTERNAL_STORAGE here: it never opens a file.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="lan.syshlt.removablemedia">
+    package="lan.syshlt.removablemedia"
+    android:versionCode="1"
+    android:versionName="1.0">
 
     <!-- Android 13 gates notifications behind a runtime grant.
          build.sh —install does `pm grant`, since a kiosk has nobody to tap. -->

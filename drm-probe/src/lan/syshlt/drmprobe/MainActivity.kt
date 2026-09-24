@@ -8,6 +8,8 @@ import android.media.MediaDrm
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.ViewGroup
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import java.io.File
@@ -56,7 +58,15 @@ class MainActivity : Activity() {
             setPadding(16, 16, 16, 16)
             setTextIsSelectable(true)
         }
-        setContentView(ScrollView(this).apply { addView(tv) })
+        // Above the dump, not below it: the report runs to a few hundred
+        // lines and a link at the end of it is a link nobody finds.
+        setContentView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(About.link(this@MainActivity))
+            addView(ScrollView(this@MainActivity).apply { addView(tv) },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        })
 
         probe()
         tv.text = out.toString()

@@ -63,6 +63,9 @@ class StatusActivity : Activity() {
             }
         }
 
+        root.addView(spacer(dp(24)))
+        root.addView(About.link(this, Color.parseColor("#4FC3F7")))
+
         setContentView(ScrollView(this).apply { addView(root) })
     }
 
