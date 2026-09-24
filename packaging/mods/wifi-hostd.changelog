@@ -1,0 +1,6 @@
+* Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Ships both files together because each one alone leaves the
+  Wi-Fi toggle off, for two entirely different reasons.
+- Hard Requires on waydroid-ext-wifid; waydroid-ext-wifid only Recommends this,
+  so the pair is not a cycle and the daemon stays testable on an image with no
+  overlay at all.

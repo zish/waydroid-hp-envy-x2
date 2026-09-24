@@ -1,0 +1,8 @@
+* Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Closes the last unsatisfiable dependency of the camera group
+  together with the retirement of waydroid-ext-uvc-autosuspend (docs/12).
+- Requires waydroid-ext-camera-gbm rather than recommending it: this package
+  only makes more apps willing to open a camera whose frames are black without
+  that one.
+- The resolution cap is stated in the description, not just in a comment. It
+  costs a 1080p-capable camera its top mode and that is not a detail to bury.

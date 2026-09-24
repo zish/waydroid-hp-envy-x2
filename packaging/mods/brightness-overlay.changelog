@@ -1,0 +1,6 @@
+* Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Completes the brightness group's overlay half; the daemon and
+  the SELinux policy were already packaged.
+- Hard Requires on waydroid-ext-sensord, unlike waydroid-ext-backlight's
+  Recommends for the same daemon. The difference is real: a label is correct
+  before anything uses it, a stood-down HAL is not.

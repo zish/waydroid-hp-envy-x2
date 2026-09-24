@@ -1,2 +1,10 @@
+* Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
+- Drop waydroid-ext-uvc-autosuspend. docs/12 measured the device suspending and
+  resuming with no frame errors and no sequence gaps, so the rule solves
+  nothing, and it names one vendor:product pair besides. The group is now
+  camera-gbm and camera-hal, both of which exist.
+- This makes the group resolvable for the first time: it has required
+  waydroid-ext-camera-hal since it was written and that package landed today.
+
 * Wed Sep 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First group package (docs/47).

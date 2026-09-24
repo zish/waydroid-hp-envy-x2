@@ -80,7 +80,7 @@ nothing needs to. Their real value is the one the owner's question implies: they
 way to notice that an image upgrade changed a file we are shadowing, at which point our copy
 is silently reverting somebody's fix.
 
-Of the twelve overlay files, **seven replace a stock file and five add a new one**:
+Of the thirteen overlay files, **seven replace a stock file and six add a new one**:
 
 | Overlay path | replaces? | stock copy in repo |
 |---|---|---|
@@ -114,8 +114,17 @@ machine's hardware. Most of what this project produced is *not* HP Envy x2 speci
 minigbm fix is a bug in Waydroid's own wrapper, the health HAL patch is Waydroid's own
 hardcoded fakes — and a package named after one laptop will not be installed by anyone else.
 
-**Overlay components.** Each ships payload to `%{_datadir}/waydroid-overlay/<component>/`
+**Overlay components.** Each ships payload to `%{_prefix}/lib/waydroid-overlay/<component>/`
 plus a manifest, and requires `waydroid-ext-overlay-sync`. None owns a file in `/var`.
+(`%{_datadir}` until 2026-09-22: most of this payload is Android ELF and `/usr/share` is defined
+as architecture-independent data. `/usr/share/waydroid-overlay` is still searched, second, so an
+older staging tree is not stranded.)
+
+**Six of the seven are built as of 2026-09-24** — `camera-gbm`, `camera-hal`, `battery`,
+`brightness-overlay`, `wifi-framework` and `wifi-hostd` — which is 9 of the 13 overlay files.
+The seventh is `widevine`, holding the other 4, and it needs mechanism this design does not yet
+have; see the note below the table. Built is not installed: on bigtab01 the overlay is still
+`camera-gbm`'s 2 files and 11 hand-placed ones.
 
 | Package | Files | Doc |
 |---|---|---|
@@ -126,6 +135,21 @@ plus a manifest, and requires `waydroid-ext-overlay-sync`. None owns a file in `
 | `waydroid-ext-wifi-hostd` | `wificond.rc` stand-down + supplicant VINTF entry | [34](34-wifi-second-radio.md) |
 | `waydroid-ext-brightness-overlay` | stub light-HAL stand-down | [37](37-brightness.md) |
 | `waydroid-ext-widevine` | `.rc` + VINTF manifest + **fetcher**, no blob | [21](21-netflix-widevine.md) |
+
+`waydroid-ext-widevine` is the one overlay component the machinery above cannot express yet, and
+it needs three changes rather than a `.mod` file (noted 2026-09-24):
+
+- **A fetched row.** Two of its four files are a Google prebuilt this project will not
+  redistribute, so they are `%ghost` and arrive at install time. `packaging/stage-overlay.sh`
+  writes a manifest row only for a file it has staged, and the generated `%check` verifies every
+  row against the buildroot — so a fetched row fails the build of its own package.
+- **A symlink row.** `vendor/lib64/libprotobuf-cpp-lite.so -> libprotobuf-cpp-lite-3.9.1.so` is
+  required, not cosmetic: `libwvaidl.so` needs the unversioned soname and a vendor process cannot
+  reach `/system/lib64`. The manifest format is `<mode> <sha256> <path>` and
+  `waydroid-overlay-sync` tests `[ -f ]` and runs `install -D -m`, so neither can carry a symlink.
+- **A version bump of `waydroid-ext-overlay-sync`**, which is the keystone package and is already
+  installed on bigtab01. That makes Widevine a migration of the thing everything else depends on,
+  not an addition beside them.
 
 **Host daemons and services.**
 
@@ -142,7 +166,6 @@ plus a manifest, and requires `waydroid-ext-overlay-sync`. None owns a file in `
 | `waydroid-ext-cage` | noarch | the kiosk session | [25](25-waydroid-in-cage.md) |
 | `waydroid-ext-binder-nice` | noarch | `RLIMIT_NICE` drop-in — one file, ~1 000 000 log lines a boot | [40](40-binder-nice.md) |
 | `waydroid-ext-backlight-selinux` | noarch | CIL module + udev rule | [42](42-backlight-selinux.md) |
-| `waydroid-ext-uvc-autosuspend` | noarch | the UVC autosuspend rule | [12](12-v4l2-frame-errors.md) |
 | `waydroid-ext-mdns` | noarch | avahi reflector + firewalld rule reconciler | [45](45-mdns-reflection.md) |
 | `waydroid-ext-dexopt` | noarch | dexopt property reconciler, values in `%config(noreplace)` | [43](43-app-freezer.md) |
 | `waydroid-ext-lxc-config` | noarch | **new** — reconciles `lxc.net.0.name` before container start | [34](34-wifi-second-radio.md) |
@@ -153,7 +176,18 @@ plus a manifest, and requires `waydroid-ext-overlay-sync`. None owns a file in `
 | Package | Contents |
 |---|---|
 | `waydroid-ext-hw-ite8350` | sensor-hub resume check, sleep hook, the reprobe machinery ([19](19-sensor-hub-suspend-wedge.md)) |
-| `waydroid-ext-hw-envyx2` | metapackage: `hw-ite8350` + the Core M-5Y70 dexopt values + `uvc-autosuspend` |
+| `waydroid-ext-hw-envyx2` | metapackage: `hw-ite8350` + the Core M-5Y70 dexopt values |
+
+**`waydroid-ext-uvc-autosuspend` was in both tables above and is retired, 2026-09-24.** It would
+have shipped [artifacts/udev/99-uvc-no-autosuspend.rules](../artifacts/udev/99-uvc-no-autosuspend.rules),
+which pins the reference webcam out of USB runtime suspend. That rule was installed and withdrawn
+in the same session, and [docs/12](12-v4l2-frame-errors.md) then closed the question by measuring
+it: 150 frames pulled off a *suspended* device, zero error flags, zero sequence gaps, and the
+device re-suspending on its own ten seconds later. Resume costs nothing measurable and corrupts
+nothing. The rule is keyed to one `idVendor`/`idProduct` pair besides, so packaging it would have
+meant every camera user installing a machine-specific rule that solves no problem. The file stays
+in the repository as the record of a hypothesis that was tested and rejected — which is what the
+`.rules` header has said since the day it was withdrawn.
 
 **Android apps.** APK plus a helper that installs it into a running container; they cannot be
 installed by rpm, only staged.
@@ -166,7 +200,7 @@ installed by rpm, only staged.
 **Groups.** Nothing but `Requires`, so a user picks a feature rather than a file list.
 
 ```
-waydroid-ext-camera      -> camera-gbm, camera-hal, uvc-autosuspend
+waydroid-ext-camera      -> camera-gbm, camera-hal
 waydroid-ext-wifi        -> wifid, wifi-framework, wifi-hostd, wifi-sync
 waydroid-ext-sensors     -> sensord, binder-nice
 waydroid-ext-brightness  -> sensord, brightness-overlay, backlight-selinux

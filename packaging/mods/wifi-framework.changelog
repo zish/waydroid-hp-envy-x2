@@ -1,0 +1,6 @@
+* Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. One file, and the one that makes the other three Wi-Fi
+  packages mean anything.
+- Recommends rather than Requires waydroid-ext-wifid, so that the Stage 0
+  configuration -- feature declared, nothing behind it -- stays installable.
+  That is how the no-vendor-HAL question was answered.

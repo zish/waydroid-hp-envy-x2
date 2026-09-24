@@ -72,7 +72,7 @@ Individual packages are `waydroid-ext-<thing>`. Group packages exist for conveni
 in the pieces of one feature:
 
 ```
-waydroid-ext-camera      camera-gbm, camera-hal, uvc-autosuspend
+waydroid-ext-camera      camera-gbm, camera-hal
 waydroid-ext-wifi        wifid, wifi-framework, wifi-hostd, wifi-sync
 waydroid-ext-sensors     sensord, binder-nice
 waydroid-ext-brightness  sensord, brightness-overlay, backlight-selinux

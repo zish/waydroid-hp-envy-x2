@@ -25,7 +25,9 @@ are ahead of the code in several places and reading them alone gives the wrong a
 ## Packaging coverage, measured rather than assumed
 
 [docs/47](47-package-split.md) names ~33 packages, plus `restartd`, `pidguard` and `btd` added
-afterwards — about **36**, excluding the APK packages. `packaging/mods/` holds **7**.
+afterwards — about **36**, excluding the APK packages. `packaging/mods/` holds **14** as of
+2026-09-24, one of which (`uvc-autosuspend`) was struck off the ~36 rather than written, so the
+denominator is really ~35.
 
 That ratio is the optimistic reading. The pessimistic one comes from asking `rpm` what the built
 packages actually require:
@@ -43,7 +45,12 @@ $ rpm -qp --requires build/rpm/RPMS/*/*.rpm
 | `waydroid-ext-sensord` | **yes**, `--prebuilt` on this box | source build needs Fedora's `libgbinder-devel` |
 | `waydroid-ext-camera-gbm` | **yes**, since 2026-09-23 | was blocked on `waydroid-ext-overlay-sync`, now written |
 | `waydroid-ext-overlay-sync` | **yes** | the keystone; written 2026-09-23 |
-| `waydroid-ext-camera` | **no** | requires `camera-hal` and `uvc-autosuspend` — neither exists |
+| `waydroid-ext-camera` | ~~**no**~~ **yes**, since 2026-09-24 | required `camera-hal`, now written, and `uvc-autosuspend`, now [retired](12-v4l2-frame-errors.md) |
+| `waydroid-ext-camera-hal` | **yes**, since 2026-09-24 | — |
+| `waydroid-ext-battery` | **yes**, since 2026-09-24 | — |
+| `waydroid-ext-brightness-overlay` | **yes**, since 2026-09-24 | — |
+| `waydroid-ext-wifi-framework` | **yes**, since 2026-09-24 | — |
+| `waydroid-ext-wifi-hostd` | **no** | hard-requires `waydroid-ext-wifid`, which is SRPM only — correctly, since standing wificond down with no daemon behind it is worse than stock |
 | `waydroid-ext-wifid` | **no** | SRPM only |
 
 **`waydroid-ext-overlay-sync` was the keystone and it was missing. It was written on
@@ -82,12 +89,14 @@ section: the only thing that catches it is running it.
 
 ### What is unpackaged, by feature
 
-Cross-referencing `packaging/README.md`'s host audit against the seven mods: `sensord` and its
+Cross-referencing `packaging/README.md`'s host audit against the fourteen mods: `sensord` and its
 `ILight` half, `mediad`, `wifi-sync`, the cage session, graceful exit and shutdown,
-android-power, binder-nice, uvc-autosuspend, mdns, dexopt, the ITE8350 resume machinery, the
-`lxc.net.0.name` edit, and **11 of the 13 overlay files** — the camera HAL and its config XML,
-the health HAL, `wificond.rc`, the light `.rc`, the Wi-Fi feature XML, the supplicant VINTF
-manifest, and all four Widevine files. (This said "10 of the 12" and "three Widevine files"; the
+android-power, binder-nice, mdns, dexopt, the ITE8350 resume machinery, the
+`lxc.net.0.name` edit, and ~~**11 of the 13 overlay files**~~ **4 of the 13** as of 2026-09-24:
+the four Widevine files. The camera HAL and its config XML, the health HAL, `wificond.rc`, the
+light `.rc`, the Wi-Fi feature XML and the supplicant VINTF manifest were packaged that day —
+built, not installed. `uvc-autosuspend` has left this list by being retired rather than packaged
+([docs/12](12-v4l2-frame-errors.md)). (This said "10 of the 12" and "three Widevine files"; the
 overlay was counted on the host on 2026-09-24 and holds 13 files, of which 4 are Widevine —
 `libwvaidl.so` was the one missing from the count. `sensord` and its `ILight` half are packaged
 as of 2026-09-24 and no longer belong on this list.)
@@ -290,17 +299,31 @@ string Android reports through the sensors HAL, so changing it changes observabl
 
 ## To do, in the order it is worth doing
 
-1. **Build the RPMs.** ~~This is the next session's work~~ — **done for nine modifications, and
-   seven of them are now installed on bigtab01** (`sensord`, `btd`, `restartd`, `pidguard`,
-   `backlight`, `overlay-sync`, `camera-gbm`), across two migrations on 2026-09-24. Both are
-   recorded in [packaging/README.md](../packaging/README.md); the second one put the overlay
-   mechanism in force, for 2 of the 13 overlay files.
-   What remains of this item: **package the other 11 overlay files** — the camera HAL and its
-   config XML, the health HAL, the light `.rc`, the three Wi-Fi files and the four Widevine ones —
-   starting with `camera-hal` and `uvc-autosuspend`, which are also the last unsatisfiable
-   dependencies in the set, then `mediad`. Then implement `wifi/build.sh --rpm` and give
-   `artifacts/wifi/install.sh` the component argument that `artifacts/overlay/install.sh` already
-   has, which unblocks `wifid`'s `-ba`.
+1. **Build the RPMs.** ~~This is the next session's work~~ — **done for fourteen
+   modifications, and seven of them are installed on bigtab01** (`sensord`, `btd`, `restartd`,
+   `pidguard`, `backlight`, `overlay-sync`, `camera-gbm`), across two migrations on 2026-09-24.
+   Both are recorded in [packaging/README.md](../packaging/README.md); the second one put the
+   overlay mechanism in force, for 2 of the 13 overlay files.
+   ~~What remains of this item: package the other 11 overlay files~~ — **seven of those eleven
+   were packaged on 2026-09-24** (`camera-hal`, `battery`, `brightness-overlay`,
+   `wifi-framework`, `wifi-hostd`), and `uvc-autosuspend` was
+   [retired](12-v4l2-frame-errors.md) rather than written, which makes the `camera` group
+   resolvable for the first time.
+   What remains of this item now, in order:
+   - **A third migration**: install those five on bigtab01. Nothing from the batch is installed,
+     so the machine's overlay coverage is still 2 of 13 whatever the package count says. Five of
+     the seven payload files are already byte-identical to what is live there and the other two
+     differ by one word in a comment, so the transaction changes almost nothing Android sees —
+     which is the same argument that made the second migration safe, and the same trap: install
+     without removing the hand-placed copies and nothing has changed.
+   - **The four Widevine files**, which are not another `.mod` file. They need a fetched-row and a
+     symlink-row in the manifest format, and therefore a version bump of `waydroid-ext-overlay-sync`
+     — the keystone, already installed on bigtab01. Scoped in
+     [docs/47](47-package-split.md).
+   - **`mediad`**, the cheapest remaining host package.
+   - **`wifi/build.sh --rpm`**, plus the component argument for `artifacts/wifi/install.sh` that
+     `artifacts/overlay/install.sh` already has. This unblocks `wifid`'s `-ba` and with it
+     `wifi-hostd`, which is built but not installable for exactly that reason.
 2. **Move the APKs into their own GitHub repositories**, one per app, each with its own CI/CD.
    Added at the owner's request, 2026-09-22. There are six — [media-app/](../media-app)
    (`lan.syshlt.removablemedia`), [sensor-app/](../sensor-app) (`…sensorinfo`),

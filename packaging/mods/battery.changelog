@@ -1,0 +1,7 @@
+* Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Ships all three patches as one file, because patch 2 alone
+  produces a timer that is created and never armed, which reads as a working
+  fix and is not one.
+- The only overlay component with no companion package: the HAL reads the
+  host's power supply through the container's own sysfs, so there is no host
+  daemon behind it and nothing to require.

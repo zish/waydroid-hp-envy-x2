@@ -63,11 +63,14 @@ that line is still valid.
   2026-09-24 and reconciles `/var/lib/waydroid/overlay` from payload in
   `/usr/lib/waydroid-overlay` before the container starts, so a wiped overlay repairs itself and
   `waydroid-overlay-sync --verify` answers whether the live overlay still matches
-  ([docs/36-packaging.md](docs/36-packaging.md)). **It covers 2 of the 13 files in the overlay** —
-  the camera wrapper for both ABIs, from `waydroid-ext-camera-gbm`. The other 11 are still
-  hand-placed, unowned by any package, and erased by `waydroid init -f` with nothing to restore
-  them; packaging them is the open work
-  ([packaging/README.md](packaging/README.md), *Second migration*).
+  ([docs/36-packaging.md](docs/36-packaging.md)). **On bigtab01 it covers 2 of the 13 files in
+  the overlay** — the camera wrapper for both ABIs, from `waydroid-ext-camera-gbm`. The other 11
+  are hand-placed there, unowned by any package, and erased by `waydroid init -f` with nothing to
+  restore them. **Seven of those eleven are now packaged and not yet installed** (`camera-hal`,
+  `battery`, `brightness-overlay`, `wifi-framework`, `wifi-hostd`, written 2026-09-24), so the
+  gap on the machine is a migration rather than missing packages; the remaining four are
+  Widevine's and need manifest mechanism that does not exist yet
+  ([packaging/README.md](packaging/README.md), *Second migration* and the section after it).
 
 ### Where builds happen
 
@@ -709,12 +712,17 @@ and the reasoning behind each change.
   `build-mod.sh` ([docs/47-package-split.md](docs/47-package-split.md)); the four hand-written
   specs and `build-rpms.sh` are the superseded layout and still the only thing the legacy path
   can build. `packaging/README.md` records what has actually been through `rpmbuild`.
-  **Read it before assuming anything is packaged**: revised 2026-09-24, there are 9 `.mod`
-  files against ~36 modifications and 7 produce an *installable* package.
+  **Read it before assuming anything is packaged**: revised 2026-09-24, there are 14 `.mod`
+  files against ~36 modifications and 12 produce an *installable* package — the two that do
+  not are `wifid`, which is SRPM-only here because its source build needs Fedora's
+  `libgbinder-devel`, and `wifi-hostd`, which hard-requires it.
   `waydroid-ext-overlay-sync` — the keystone every overlay component hard-requires — now
-  exists, which makes the Android-side half reachable by RPM and `waydroid-ext-camera-gbm`
-  installable; the `camera` **group** still is not, needing `camera-hal` and
-  `uvc-autosuspend`. `sensord` is packaged too, which is what makes `backlight`
+  exists, which makes the Android-side half reachable by RPM; five more overlay components
+  were written on 2026-09-24 (`camera-hal`, `battery`, `brightness-overlay`,
+  `wifi-framework`, `wifi-hostd`), which takes the overlay from 2 packaged files to 9 of 13
+  and makes the `camera` **group** resolvable for the first time — `uvc-autosuspend` was
+  retired rather than written ([docs/12](docs/12-v4l2-frame-errors.md)). None of the five is
+  installed on bigtab01 yet. `sensord` is packaged too, which is what makes `backlight`
   stop being inert; it builds here only with `build-mod.sh --prebuilt`, because
   its source build needs Fedora's `libgbinder-devel`. Install and
   uninstall are tested by `packaging/test-install.sh`, which runs entirely on the dev box —

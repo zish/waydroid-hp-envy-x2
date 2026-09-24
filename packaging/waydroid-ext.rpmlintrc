@@ -73,6 +73,9 @@ addFilter("invalid-license (GPL-3.0-or-later|Apache-2.0|MIT)$")
 addFilter("no-dependency-on locales-gbm")
 # The same inference from "-btd". Same answer: no locale content anywhere.
 addFilter("no-dependency-on locales-btd")
+# And from the "-hal" of camera-hal. Nothing in that package is a translation
+# either; it is a vendor .so and an XML configuration file.
+addFilter("no-dependency-on locales-hal")
 
 # ------------------------------------------------------- tools named like libs
 #
@@ -88,6 +91,13 @@ addFilter("waydroid-ext-backlight.*explicit-lib-dependency libselinux-utils")
 # under %{_prefix}/lib is that rule. The check exists to catch a library package
 # that forgot its libraries; a udev rule is exactly where udev requires it.
 addFilter("waydroid-ext-backlight.*only-non-binary-in-usr-lib")
+# Three overlay components carry no ELF at all -- an init .rc, a feature
+# permission XML, a VINTF manifest fragment -- so their whole staged payload is
+# text under %{_prefix}/lib/waydroid-overlay. That is the staging directory the
+# reconciler reads, not a library directory, and the components that DO ship
+# Android ELF put it in exactly the same place. Named individually rather than
+# by a wildcard, so that a fourth package tripping this has to be looked at.
+addFilter("waydroid-ext-(brightness-overlay|wifi-framework|wifi-hostd).*only-non-binary-in-usr-lib")
 
 # ------------------------------------------- rm of our own state on uninstall
 #

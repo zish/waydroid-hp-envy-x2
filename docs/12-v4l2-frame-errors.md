@@ -198,6 +198,13 @@ being throttled by Waydroid, USB or the driver; it is being throttled by the lig
 To revert the revert, the rule is preserved at
 [artifacts/udev/99-uvc-no-autosuspend.rules](../artifacts/udev/99-uvc-no-autosuspend.rules).
 
+**It is not packaged, and that is now a decision rather than a backlog item (2026-09-24).**
+[docs/47](47-package-split.md) had reserved `waydroid-ext-uvc-autosuspend` and made the
+`waydroid-ext-camera` group require it. The requirement is gone and the package is retired: the
+measurements above say the rule solves nothing, and it names one `idVendor`/`idProduct` pair, so
+shipping it would have put a machine-specific rule in every camera user's install. The group is
+now `camera-gbm` plus `camera-hal`, both of which exist.
+
 ## Correction: these are two different bugs, not one
 
 This doc opened by treating two log lines as one phenomenon. They are not, and the distinction

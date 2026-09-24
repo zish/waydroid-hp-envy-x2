@@ -14,10 +14,10 @@ is an overlayfs lowerdir over a read-only image), names the seven overlay files 
 a stock file and are therefore the surface an image upgrade can break, and carries the
 Debian/Ubuntu and other-distro roadmap. Read it before touching anything here.
 
-## Built is not the same as installable — audited 2026-09-22, revised 2026-09-23
+## Built is not the same as installable — audited 2026-09-22, revised 2026-09-24
 
 The table below says which modifications survive `rpmbuild`. It does not say whether the
-resulting package can be installed, and for one of them it still cannot. Asked directly:
+resulting package can be installed, and for two of them it still cannot. Asked directly:
 
 ```
 $ rpm -qp --requires build/rpm/RPMS/*/*.rpm
@@ -32,17 +32,30 @@ half of the project is now reachable by RPM.** Proved rather than assumed —
 waydroid-ext-camera-gbm`, and adding `overlay-sync` to the same transaction removes that line,
 leaving only base-OS dependencies an empty test root cannot have.
 
-What is still uninstallable is the `camera` **group**, which requires `waydroid-ext-camera-hal`
-and `waydroid-ext-uvc-autosuspend`; neither has a `.mod` file. The group is a metapackage, so
-this costs nothing but the group itself: `camera-gbm` installs on its own today.
+~~What is still uninstallable is the `camera` **group**~~ — **resolvable since 2026-09-24.**
+It required `waydroid-ext-camera-hal`, which is now written, and
+`waydroid-ext-uvc-autosuspend`, which is now [retired](../docs/12-v4l2-frame-errors.md) rather
+than written. Proved the same way `camera-gbm` was: `rpm --test -i` on the group alone reported
+both missing packages by name before, and reports only base-OS dependencies an empty test root
+cannot have once the group, `camera-hal`, `camera-gbm` and `overlay-sync` are in one
+transaction. The group went to 1.0.1 for the dependency change.
 
-Of the nine modifications here, seven produce something installable: `overlay-sync`,
-`sensord`, `camera-gbm`, `btd`, `pidguard`, `restartd`, and `backlight` — which is no longer
-inert, because the `waydroid-sensord` it grants a permission to is now a package
-(`sensord`, written 2026-09-24). Its `Recommends` on that package resolves for the first time.
+**Of the fourteen modifications here, twelve produce something installable**: `overlay-sync`,
+`sensord`, `camera-gbm`, `btd`, `pidguard`, `restartd`, `backlight` — no longer inert, because
+the `waydroid-sensord` it grants a permission to is now a package, so its `Recommends`
+resolves for the first time — and, as of 2026-09-24, `camera-hal`, `battery`,
+`brightness-overlay`, `wifi-framework` and the `camera` group.
 
-Next cheapest, for the reason `overlay-sync` and `sensord` were: `mediad`, and the two camera
-dependencies (`camera-hal`, `uvc-autosuspend`) that make the `camera` group resolvable.
+**The two that are not installable are `wifid` and `wifi-hostd`, and it is one cause.** `wifid`
+is SRPM-only on this box because its source build needs Fedora's `libgbinder-devel` and it
+declares no `PREBUILT=`, so `build-mod.sh --prebuilt` has nothing to stage; `wifi-hostd`
+hard-requires it, correctly — standing wificond down with no daemon behind it is worse than
+stock. So `rpm --test -i wifi-hostd.rpm` reports `waydroid-ext-wifid is needed by
+waydroid-ext-wifi-hostd` and will keep reporting it until `wifi/build.sh` can produce a
+binary here. That is the same item as
+[docs/53](../docs/53-release-readiness.md)'s `wifi/build.sh --rpm`.
+
+Next cheapest, for the reason `overlay-sync` and `sensord` were: `mediad`, then `wifi-sync`.
 
 ### `sensord` is built `--prebuilt` here, and why that is not a fudge
 
@@ -118,6 +131,64 @@ plain — and asserts the harness reaches the right verdict on each.
 | `backlight` | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
 | `overlay-sync` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
 | `sensord` | yes | yes | **yes**, `--prebuilt` only | same, plus `no-manual-page-for-binary` and `unstripped-binary-or-object` |
+| `camera-hal` | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
+| `battery` | yes | yes | **yes** | same |
+| `brightness-overlay` | yes | yes | **yes** | same |
+| `wifi-framework` | yes | yes | **yes** | same |
+| `wifi-hostd` | yes | yes | **yes** | same |
+
+### The five overlay components added 2026-09-24
+
+They take the packaged share of the overlay from 2 files of 13 to 9, and they are the last
+`.mod` files the existing machinery can express — the remaining four are Widevine's and need
+manifest mechanism that does not exist (see [docs/47](../docs/47-package-split.md)).
+
+| Package | Overlay files | Hard dependency beyond `overlay-sync` | Why |
+|---|---|---|---|
+| `camera-hal` | the external camera HAL, `external_camera_config.xml` | `camera-gbm` | it only makes *more* apps willing to open a camera whose frames are black without that package |
+| `battery` | the health HAL | — | the only overlay component with no companion: it reads the host's power supply through the container's own sysfs |
+| `brightness-overlay` | the light `.rc` | `sensord` | the file exists to lose a name to that daemon; with no daemon there is nothing to lose it to |
+| `wifi-framework` | the feature XML | — (`wifid` recommended) | alone it produces a Wi-Fi panel that fails honestly at "no wlan0", which is how Stage 0 was verified |
+| `wifi-hostd` | `wificond.rc`, the supplicant VINTF manifest | `wifid` | standing wificond down with nothing behind it is worse than stock |
+
+Three decisions inside those rows are worth keeping, because none is obvious from the file list:
+
+- **`brightness-overlay` hard-requires `sensord`; `backlight` only recommends it.** Same daemon,
+  different strength, and the difference is real. `backlight`'s SELinux label is correct before
+  anything uses it and was staged that way. A stood-down HAL is correct only in the daemon's
+  presence.
+- **`wifi-framework` recommends `wifid`; `wifi-hostd` requires it.** The feature XML alone is a
+  legitimate configuration — it is the Stage 0 experiment that proved the framework proceeds past
+  a missing vendor HAL — so a hard dependency would forbid a thing that was deliberately done.
+  `wifi-hostd` is the case [docs/47](../docs/47-package-split.md) names as the reason hard edges
+  live on individual packages rather than on groups.
+- **`camera-hal` ships the resolution cap, and the cap costs something.** Trimming every mode
+  above 1280x720 is what stops the HAL picking 1080p and failing its own frame conversion, which
+  is a black preview. A camera that can do 1080p is capped at 720p while the package is
+  installed, so that is stated in the package description and not only in a comment.
+
+**Verified before any of this is installed anywhere**, which is the check that made the second
+migration safe and is the same one here:
+
+- Seven overlay files hashed on bigtab01 against the five packages' payload. **Five are
+  byte-identical.** The two that are not are the light `.rc` and `wificond.rc`, and the entire
+  difference is one word in a comment — the live copies still say `CLAUDE.md` where the repo
+  says `AGENTS.md`, left behind by the file rename. init does not read comments, so installing
+  these packages would rewrite two files without changing their meaning, and there is nothing
+  for a container restart to apply. Modes match on all seven.
+- All six components reconciled into a scratch overlay by `waydroid-overlay-sync` with
+  `STAGE_DIRS`/`OVERLAY_DIR`/`STATE_DIR` pointed at a temporary tree: nine files installed, a
+  second run reports "overlay already matches the staged components", and `--verify` exits 0.
+  The live overlay was not touched.
+- `packaging/test-install.sh --all`: 101 passed, 0 failed.
+
+**One cosmetic defect, not fixed here.** Every shipped manifest says `staged from
+bigtab01-waydroid unknown`, because `stage-overlay.sh` reads the commit with `git rev-parse` and
+inside `rpmbuild` it is running against an unpacked tarball with no `.git`. It is not new — the
+`camera-gbm` manifest installed on bigtab01 says the same — and the version-release in the
+package already identifies the build. Fixing it means stamping the commit into the tarball at
+`build-mod.sh` time, which is a change to the shared machinery and does not belong in a batch
+whose point was to add components without touching it.
 
 The four host packages added on 2026-09-22 all build fully, because none of them compiles
 anything: two are `bash`, two are stdlib or system-library Python, and `backlight` is a CIL
@@ -360,6 +431,11 @@ hand-placed and unowned, and `waydroid init -f` still erases them with nothing t
 `.rc`, `wificond.rc`, `android.hardware.wifi.xml`, the supplicant VINTF manifest, and the four
 Widevine files. Packaging those is the rest of this phase.
 
+> **Seven of those eleven were packaged later the same day** — see *The five overlay components
+> added 2026-09-24* above. That is packaged, **not installed**: on bigtab01 the coverage is still
+> 2 of 13 and the other 11 files are still hand-placed there, because nothing from that batch has
+> been through a migration yet. The remaining four are Widevine's.
+
 **The docs have been saying 12 overlay files and three Widevine files; both are off by one, and it
 is the same one.** The Widevine payload is four — `android.hardware.drm-service-lazy.widevine`, its
 `.rc`, `manifest_android.hardware.drm-service.widevine.xml`, and `vendor/lib64/libwvaidl.so` —
@@ -503,7 +579,9 @@ rpm-ostree deployment rollback keeps `/var` but nothing reconciles `/usr/local` 
 repo expects. Today the recovery is a human re-running installers from this tree.
 
 > **Still true for 11 of the 13 overlay files, and for the LXC config edit**, as of 2026-09-24.
-> `camera-gbm`'s two files now repair themselves; nothing else in that list does.
+> `camera-gbm`'s two files now repair themselves; nothing else in that list does. Seven more of
+> the eleven now have a package that *would* repair them, but the packages are built and not
+> installed, and a package on the dev box repairs nothing on bigtab01.
 
 ## Planned, not yet specced
 
