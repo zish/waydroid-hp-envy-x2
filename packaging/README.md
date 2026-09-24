@@ -185,7 +185,8 @@ Audited 2026-09-15, because "how much is packaged?" turned out to have a blunt a
 ### First real migration — done 2026-09-24
 
 **Five packages are installed and in force on bigtab01**, which makes the "zero percent" answer
-below historical rather than current. `waydroid-ext-{sensord,btd,restartd,pidguard,backlight}`
+below historical rather than current. (Seven as of later the same day — the overlay half went in
+afterwards; see the section below this one.) `waydroid-ext-{sensord,btd,restartd,pidguard,backlight}`
 are layered as `LocalPackages` on an otherwise unchanged base commit (`8b4dcffc…`); re-resolving
 the layer also pulled 71 already-layered packages to current versions, which is inherent to how
 rpm-ostree layering works and was not a base-image update.
@@ -342,6 +343,121 @@ Three things learned putting it on the machine:
 The cost that remains is the container restart, which drops the kiosk to the SDDM greeter and
 needs someone at the machine — but not the console, and not the LUKS passphrase.
 
+### Second migration — the overlay half, done 2026-09-24
+
+`waydroid-ext-overlay-sync` 1.0.0 and `waydroid-ext-camera-gbm` 1.0.0 are installed and live,
+which makes **seven** `waydroid-ext-*` packages layered on bigtab01 and the Android-side half of
+this project packaged for the first time. `waydroid-ext-backlight` went to 1.0.3 in the same
+session, first and deliberately: 1.0.3 is the version that announces a `/usr/local` shadow, and
+the thing being installed next has the same precedence design.
+
+Be precise about what this closes, because the headline overstates it: the overlay holds **13
+files and exactly 2 of them are now owned by a package.** What is fixed is the *mechanism* — a
+wiped overlay repairs itself, and `waydroid-overlay-sync --verify` answers "is the overlay what
+the packages say it should be?" in one command. The *coverage* is 2 of 13. The other 11 are still
+hand-placed and unowned, and `waydroid init -f` still erases them with nothing to put them back:
+`camera.device@3.4-external-impl.so` and `external_camera_config.xml`, the health HAL, the light
+`.rc`, `wificond.rc`, `android.hardware.wifi.xml`, the supplicant VINTF manifest, and the four
+Widevine files. Packaging those is the rest of this phase.
+
+**The docs have been saying 12 overlay files and three Widevine files; both are off by one, and it
+is the same one.** The Widevine payload is four — `android.hardware.drm-service-lazy.widevine`, its
+`.rc`, `manifest_android.hardware.drm-service.widevine.xml`, and `vendor/lib64/libwvaidl.so` —
+presumably the one left out, being the only Widevine file whose name does not say Widevine.
+Counted on the host rather than from the design notes: 13 files, 4 of them Widevine. Every "12" and "10 of the 12" elsewhere in this file and
+in [docs/53](../docs/53-release-readiness.md) predates that recount.
+
+#### Why this was safe to do with the container running, which is not the usual answer
+
+Normally an overlay change needs `systemctl restart waydroid-container.service` and therefore
+somebody at the machine. This one needed nothing, because it changed no bytes: the hand-placed
+wrappers were already byte-identical to the packaged payload and already mode `644`, so the
+reconciler's install loop — which skips on matching sha256 **and** mode — did nothing at all.
+Checked on both sides before the transaction (`d74e5de0…` 64-bit, `ccf61a8e…` 32-bit) rather than
+after, because "it probably matches" is not a reason to write into a mounted lowerdir.
+
+Confirmed the way [AGENTS.md](../AGENTS.md) insists — from *inside* the container, not by `ls`:
+
+```
+# waydroid shell -- sh -c "sha256sum /vendor/lib64/libgbm_mesa_wrapper.so"
+d74e5de03be83fa065a1f7daa64f9e8dd5aa2b28689e2532992df3ad3964d626  /vendor/lib64/…
+```
+
+So Android is reading the packaged bytes, and it was reading them before the install too. The
+package took ownership of a fix that was already in force, which is the cheapest possible first
+step and the reason to take it first.
+
+#### The shadow sweep was empty, and that was checked rather than assumed
+
+The lesson from `backlight` 1.0.2 is that a hand-staged file beats a packaged one silently. So
+before installing: `/var/usrlocal` holds 14 binaries, two user units and
+`share/waydroid-dexopt/dexopt.prop` — no `waydroid-overlay-sync` — and none of the four staging
+directories the reconciler searches (`/usr/{lib,share}/waydroid-overlay`,
+`/usr/local/{lib,share}/waydroid-overlay`) existed. It has to be `/var/usrlocal` and not
+`/usr/local`: the latter is a symlink, `find` will not follow it, and the falsely clean result
+looks exactly like a real one. 1.0.3 also printed no shadow note on the live host afterwards,
+which is the new code path staying correctly quiet rather than not working.
+
+#### `%post` could not do the reconcile, and that is the design
+
+The package's `%post` runs `waydroid-overlay-sync --quiet`, and on this host it did nothing twice
+over: scriptlets run against the compose, where there is no `/var/lib/waydroid` at all — so the
+reconciler's preflight exits 0 with *waydroid is not initialised* — and `apply-live` does not run
+scriptlets in the first place. `/var/lib/waydroid-overlay` was absent before the install and
+appeared only once `waydroid-overlay-sync.service` was started by hand. That unit is the real
+boot path, so starting it is what was verified, not the scriptlet.
+
+`deployed.list` then recorded **both** files even though neither had been rewritten, because the
+state file is written from the wanted set rather than from what changed. That is what makes the
+tool own a file it merely agreed with, so a later `camera-gbm` removal cleans up instead of
+orphaning.
+
+#### Self-repair was tested against a scratch overlay, not the live one
+
+The claim worth proving is that a wiped overlay comes back. Run with `--overlay-dir` and
+`--state-dir` pointed at `/tmp`, as an unprivileged user, against the real staged payload:
+
+| | result |
+|---|---|
+| fresh materialisation into an empty overlay | both files placed, mode `644`, hashes correct |
+| one file deleted, reconcile | restored, and only that one reported |
+| one file edited, `--verify` | `differs: vendor/lib/libgbm_mesa_wrapper.so`, exit **3**, file untouched |
+| same file, reconcile | restored to the manifest hash |
+
+**Why a scratch directory and not the live overlay:** deleting a file from a *mounted* overlayfs
+lowerdir is the same undefined behaviour this entire tool exists to warn about, and restoring it
+produces a new inode under a mount that has already cached the old dentry. Testing self-repair on
+the live overlay is legitimate either before the container starts or immediately after a restart;
+doing it under the running kiosk session would have risked the camera for that session to learn
+what a throwaway directory teaches for nothing.
+
+#### One defect found, deliberately not fixed here
+
+The *"The container is RUNNING, so none of the above is visible to Android yet"* warning fires on
+any reconcile that changed something, with no check that `OVERLAY_DIR` is actually the
+container's. In the scratch run it advised restarting the container over files written to `/tmp`.
+Harmless there, but the advice is expensive — it ends a kiosk session — so a false one should not
+be issued. Gate it on `OVERLAY_DIR` being the real overlay. Not fixed in this session on purpose:
+it is a code change to a package that was just installed and verified, and it belongs in the next
+version alongside the remaining overlay components.
+
+#### Two verification details worth reusing
+
+- **`rpm -V` reports `.......T.` on every file of all three packages, and that is mtime only** —
+  an ostree checkout artifact, not drift. Size, mode, digest, owner and capabilities all match.
+  Checked against packages nobody touched this session: `waydroid-ext-btd` and `waydroid-selinux`
+  each have **0** lines that are not mtime-only. (Fedora's own `waydroid` has 42, which is its own
+  story and not ours.) Without that comparison the output reads as twenty-one modified files.
+- **`LiveCommit` `19258cf9…` equals the pending deployment's `Commit`**, so the running system is
+  already what the next boot lands on and nothing is owed. A reboot now buys only the retirement
+  of the `LiveCommit` line.
+
+`backlight` 1.0.3 cost no policy rebuild: the CIL is unchanged from 1.0.2, so the stamp already
+matched (`ac8cb72e…`), `semodule` was not re-run, and `--verify` reports *already loaded and
+current* with `waydroid_backlight_t` on the attribute. `systemd-backlight` has stayed off
+`systemctl --failed` — the only failed unit is `systemd-remount-fs`, failing since 2026-09-12 and
+ordinary read-only-root behaviour.
+
 ## What was deployed on bigtab01 before that — audited 2026-09-15
 
 **None of it. Zero percent of this project's output was installed as an RPM.** Every spec above was
@@ -361,7 +477,7 @@ each):
 | `/etc/udev/rules.d` | `99-waydroid-backlight.rules`, `99-bluetooth-boot.rules` | 2 |
 | `/etc/wayland-sessions` | `waydroid-cage.desktop` | 1 |
 | SELinux | `waydroid_backlight` module, loaded via `semodule` | 1 |
-| `/var/lib/waydroid/overlay` | 12 Android files — the camera wrapper for both ABIs, the health HAL, Widevine, the Wi-Fi feature XML and `.rc` files | 12 |
+| `/var/lib/waydroid/overlay` | 13 Android files — the camera wrapper for both ABIs, the camera HAL and its config XML, the health HAL, the light `.rc`, four Widevine files, the Wi-Fi feature XML, `wificond.rc` and the supplicant manifest (recounted 2026-09-24; this row said 12) | 13 |
 | `/var/lib/waydroid/lxc/waydroid/config` | the hand-edited `lxc.net.0.name = wlan0` | 1 line |
 
 Note `/usr/local/bin` is deliberate and not an accident of laziness: `/usr` is read-only on an
@@ -375,10 +491,19 @@ overlay is still 12 hand-copied files with no self-repair. The machinery is writ
 has simply never been deployed, because deploying it means building and installing the RPM. The
 documentation describes the design, and the design is not in force.
 
+> **Partly resolved 2026-09-24.** `waydroid-overlay-sync` is now installed and reconciles on every
+> boot, so the mechanism is in force — but for 2 of the 13 overlay files, not all of them, and the
+> staging directory is `/usr/lib/waydroid-overlay` rather than the `/usr/share` path named above.
+> The sentence in AGENTS.md was accurate about the design and wrong about the deployment; it is now
+> accurate about both, with the coverage stated. See *Second migration* above.
+
 **The practical risk this leaves** is the one the specs exist to close: a `waydroid upgrade` or
 `waydroid init` erases the LXC config edit and the overlay, and nothing reinstalls them; an
 rpm-ostree deployment rollback keeps `/var` but nothing reconciles `/usr/local` against what the
 repo expects. Today the recovery is a human re-running installers from this tree.
+
+> **Still true for 11 of the 13 overlay files, and for the LXC config edit**, as of 2026-09-24.
+> `camera-gbm`'s two files now repair themselves; nothing else in that list does.
 
 ## Planned, not yet specced
 

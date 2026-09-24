@@ -59,11 +59,15 @@ that line is still valid.
   needs someone at the machine. Always confirm a file is in effect by reading it from *inside* the
   container, never by `ls`-ing the overlay directory. See
   [docs/32-wifi-stage3.md](docs/32-wifi-stage3.md); this bit a Stage 0 file that had silently not
-  been in effect for a day. Overlay content is now packaged rather than hand-copied:
-  `waydroid-overlay-sync` reconciles `/var/lib/waydroid/overlay` from payload in
-  `/usr/share/waydroid-overlay` before the container starts, so a wiped overlay repairs
-  itself and `waydroid-overlay-sync --verify` answers whether the live overlay still matches
-  ([docs/36-packaging.md](docs/36-packaging.md)).
+  been in effect for a day. `waydroid-overlay-sync` is installed on bigtab01 as of
+  2026-09-24 and reconciles `/var/lib/waydroid/overlay` from payload in
+  `/usr/lib/waydroid-overlay` before the container starts, so a wiped overlay repairs itself and
+  `waydroid-overlay-sync --verify` answers whether the live overlay still matches
+  ([docs/36-packaging.md](docs/36-packaging.md)). **It covers 2 of the 13 files in the overlay** —
+  the camera wrapper for both ABIs, from `waydroid-ext-camera-gbm`. The other 11 are still
+  hand-placed, unowned by any package, and erased by `waydroid init -f` with nothing to restore
+  them; packaging them is the open work
+  ([packaging/README.md](packaging/README.md), *Second migration*).
 
 ### Where builds happen
 

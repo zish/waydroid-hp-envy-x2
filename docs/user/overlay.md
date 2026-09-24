@@ -40,8 +40,10 @@ mounted lowerdir is undefined behaviour, and in practice Android simply cannot s
 error appears anywhere. `ls` shows your file. Android behaves as though you never wrote it.
 
 This is why the packages do not copy files into place themselves. They stage payload into
-`/usr/share/waydroid-overlay/`, and `waydroid-overlay-sync.service` reconciles it into
+`/usr/lib/waydroid-overlay/`, and `waydroid-overlay-sync.service` reconciles it into
 `/var/lib/waydroid/overlay` **before** `waydroid-container.service` on every boot.
+(`/usr/share/waydroid-overlay/` is still searched, after it, so anything staged under the
+older layout keeps working.)
 
 If you change anything by hand, the container has to be restarted for it to exist:
 

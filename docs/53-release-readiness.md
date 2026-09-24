@@ -59,6 +59,11 @@ from this section is the second half — `packaging/README.md` still says zero p
 project is installed as an RPM on bigtab01, and that has not changed: the packages are now
 installable, and none of them is installed.
 
+**Superseded 2026-09-24.** Seven of them are installed now, in two migrations the same day; the
+second one put `overlay-sync` and `camera-gbm` in force and so ended the "none of them is
+installed" answer for the overlay half too. See `packaging/README.md`, *First real migration* and
+*Second migration*.
+
 ### A third reason `wifid` cannot do a full build, which nobody had written down
 
 [packaging/mods/wifid.mod](../packaging/mods/wifid.mod) sets:
@@ -80,9 +85,12 @@ section: the only thing that catches it is running it.
 Cross-referencing `packaging/README.md`'s host audit against the seven mods: `sensord` and its
 `ILight` half, `mediad`, `wifi-sync`, the cage session, graceful exit and shutdown,
 android-power, binder-nice, uvc-autosuspend, mdns, dexopt, the ITE8350 resume machinery, the
-`lxc.net.0.name` edit, and **10 of the 12 overlay files** — the camera HAL and its config XML,
+`lxc.net.0.name` edit, and **11 of the 13 overlay files** — the camera HAL and its config XML,
 the health HAL, `wificond.rc`, the light `.rc`, the Wi-Fi feature XML, the supplicant VINTF
-manifest, and all three Widevine files.
+manifest, and all four Widevine files. (This said "10 of the 12" and "three Widevine files"; the
+overlay was counted on the host on 2026-09-24 and holds 13 files, of which 4 are Widevine —
+`libwvaidl.so` was the one missing from the count. `sensord` and its `ILight` half are packaged
+as of 2026-09-24 and no longer belong on this list.)
 
 ## Documentation: not enough, and the gap is structural
 
@@ -111,6 +119,9 @@ Two pieces of doc drift a reader would hit immediately:
   on rpmlint's advice. It *works* — `waydroid-overlay-sync` searches both, deliberately — but the
   user-facing pages describe the superseded layout. `artifacts/overlay/install.sh` also still
   stages to `$PREFIX/share` while `artifacts/overlay-manager/install.sh` uses `$PREFIX/lib`.
+  **Both pages fixed 2026-09-24**, once the installed package made the wrong path a statement about
+  a live system rather than about a plan; `docs/user/overlay.md` now also names `/usr/share` as the
+  fallback that is still searched. The `install.sh` mismatch is untouched and still open.
 - `packaging/README.md` opens by saying the four-spec layout is "superseded in design, not yet in
   code", which leaves a reader unable to tell which of two packaging systems to use.
 
@@ -279,11 +290,17 @@ string Android reports through the sensors HAL, so changing it changes observabl
 
 ## To do, in the order it is worth doing
 
-1. **Build the RPMs.** This is the next session's work — see
-   [docs/06-next-session.md](06-next-session.md). Start with `waydroid-ext-overlay-sync`, because
-   nothing overlay-shaped can install without it and two already-built packages are blocked on it.
-   Then implement `wifi/build.sh --rpm` and give `artifacts/wifi/install.sh` the component
-   argument that `artifacts/overlay/install.sh` already has, which unblocks `wifid`'s `-ba`.
+1. **Build the RPMs.** ~~This is the next session's work~~ — **done for nine modifications, and
+   seven of them are now installed on bigtab01** (`sensord`, `btd`, `restartd`, `pidguard`,
+   `backlight`, `overlay-sync`, `camera-gbm`), across two migrations on 2026-09-24. Both are
+   recorded in [packaging/README.md](../packaging/README.md); the second one put the overlay
+   mechanism in force, for 2 of the 13 overlay files.
+   What remains of this item: **package the other 11 overlay files** — the camera HAL and its
+   config XML, the health HAL, the light `.rc`, the three Wi-Fi files and the four Widevine ones —
+   starting with `camera-hal` and `uvc-autosuspend`, which are also the last unsatisfiable
+   dependencies in the set, then `mediad`. Then implement `wifi/build.sh --rpm` and give
+   `artifacts/wifi/install.sh` the component argument that `artifacts/overlay/install.sh` already
+   has, which unblocks `wifid`'s `-ba`.
 2. **Move the APKs into their own GitHub repositories**, one per app, each with its own CI/CD.
    Added at the owner's request, 2026-09-22. There are six — [media-app/](../media-app)
    (`lan.syshlt.removablemedia`), [sensor-app/](../sensor-app) (`…sensorinfo`),

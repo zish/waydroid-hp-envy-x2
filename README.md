@@ -84,7 +84,7 @@ waydroid-ext-all         all of the above
 A group is convenience only. Every hard requirement lives on the individual package, so
 picking packages by hand cannot leave you with something installable but broken.
 
-Android-side packages install their payload under `/usr/share/waydroid-overlay/` and a
+Android-side packages install their payload under `/usr/lib/waydroid-overlay/` and a
 reconciler deploys it before the container starts, on every boot. That is why installing a
 package before you have ever run `waydroid init` is harmless, and why an overlay wiped by
 `waydroid init -f` repairs itself at the next boot. See
