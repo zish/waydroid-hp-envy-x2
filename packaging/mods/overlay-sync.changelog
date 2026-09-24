@@ -1,0 +1,10 @@
+* Wed Sep 23 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package, and the one every overlay component has been waiting on: until
+  now they declared Requires: waydroid-ext-overlay-sync against a package that
+  had never been written, so all of them built cleanly and none could install.
+- Owns the two staging directories as well as the tool, because component
+  packages list only their own subdirectory and their own manifest.
+- The uninstall scriptlet reports drift and leaves /var/lib/waydroid/overlay
+  in place. The
+  overlay is state, not installed content, and an uninstall that discarded it
+  would be removing Android's working configuration to tidy up after itself.
