@@ -1,6 +1,39 @@
+* Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.3-1
+- Say so when a /usr/local CIL shadows the packaged one, and say louder when
+  the two differ. The precedence is deliberate -- a hand-staged policy should
+  beat a packaged one on an immutable host -- but after a migration it silently
+  defeats the package instead, which is what happened on the day 1.0.2 shipped:
+  an unowned copy left over from the by-hand install shadowed the fixed policy,
+  its hash matched the stamp, and the loader reported "already loaded and
+  current" while the unfixed policy was the one in force.
+
+* Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.2-1
+- Grant init_t write on waydroid_backlight_t, fixing a regression this module
+  caused on the day it was introduced: relabelling the brightness attribute to
+  a private type silently revoked systemd-backlight's access to it, so the
+  panel's brightness was no longer saved at shutdown or restored at boot and
+  the host sat permanently `degraded`. It succeeded on 2026-09-09 and failed
+  every boot from 2026-09-10, 978 times.
+- Confirmed by experiment rather than by reading: relabelling the attribute
+  back to sysfs_t makes the unit succeed immediately, relabelling it forward
+  makes it fail again, and the grant makes it succeed with the label in place.
+- No AVC is logged for the denial even with dontaudit disabled, so the symptom
+  is a bare EACCES with nothing in the audit log pointing at SELinux.
+
+* Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
+- Load the SELinux module from a boot-time unit instead of from %%post. On an
+  rpm-ostree host the scriptlet ran against the compose and never reached the
+  booted system, so the package installed and its SELinux half did nothing --
+  found on the first real install and confirmed against the deployment's
+  pristine /usr/etc, which held no waydroid_backlight.
+- The loader is idempotent by CIL hash rather than by module name: semodule -l
+  cannot distinguish this policy from a differently-versioned one of the same
+  name, and semodule -i rebuilds the whole store, so a name check would skip a
+  real upgrade and a blind reload would cost seconds on every boot.
+- Ships the enable symlink rather than calling systemctl enable, for the same
+  reason the load moved out of the scriptlet.
+
 * Tue Sep 22 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
-- First package. Ships the CIL module and the udev rule that together let
-  waydroid_t write the panel backlight, so Android's brightness slider reaches
-  the real display (docs/42).
-- The udev rule installs to /usr/lib/udev/rules.d rather than the installer's
-  /etc default, leaving /etc free for an admin override.
+- First package. The SELinux half of the brightness fix: a CIL module granting
+  waydroid_t write on a private type, and the udev rule that applies that label
+  to the panel's brightness attribute on every boot.

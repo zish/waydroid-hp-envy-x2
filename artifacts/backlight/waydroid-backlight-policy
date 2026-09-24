@@ -1,0 +1,156 @@
+#!/bin/sh
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# waydroid-backlight-policy -- load the waydroid_backlight SELinux module and
+# put its label back on the panel's brightness attribute.
+#
+# WHY THIS EXISTS RATHER THAN A %post SCRIPTLET
+#
+# The package used to load the module from %post, and on an rpm-ostree host that
+# does not work and does not announce itself. Scriptlets there run against the
+# compose, not against the booted system, so the module never reaches the
+# running machine's /etc/selinux. Found on the first real install, 2026-09-24:
+# the package was installed, the policy was absent from the deployment's
+# pristine /usr/etc, and the only reason brightness still worked was a copy
+# hand-loaded weeks earlier and carried forward by ostree's /etc merge. The
+# package looked correct and did nothing.
+#
+# So the load happens at boot instead, from waydroid-backlight-policy.service.
+# That is the same answer waydroid-overlay-sync reaches for the same reason, and
+# it works on an ordinary host too -- there is no ostree-specific branch here.
+#
+# IDEMPOTENT BY HASH, NOT BY NAME
+#
+# `semodule -l` answers whether a module called waydroid_backlight is loaded,
+# never whether it is THIS one, so an upgrade carrying a changed policy would
+# look already-done and be skipped. The stamp records the hash of the CIL that
+# was actually loaded and a mismatch is what triggers the reinstall. This
+# matters for cost as well as correctness: semodule -i rebuilds the whole policy
+# store and takes seconds, which is not a thing to do on every boot for nothing.
+#
+# THE LABEL IS THE OTHER HALF
+#
+# Loading the module grants waydroid_t nothing by itself: the permission is on
+# waydroid_backlight_t, and sysfs labels do not survive a reboot. The udev rule
+# applies it at device-add, so after a fresh load the existing device is still
+# unlabelled and has to be re-triggered. Absence of errors is not success, so
+# the label is read back and a failure to land is reported.
+#
+# Usage:
+#   waydroid-backlight-policy            load if the loaded policy is not this one
+#   waydroid-backlight-policy --verify   report, change nothing (exit 3 on drift)
+#   waydroid-backlight-policy --unload   remove the module and the stamp
+#   waydroid-backlight-policy --force    reload even if the stamp already matches
+#
+# Env: CIL, STATE_DIR
+set -eu
+
+MODULE=waydroid_backlight
+STATE_DIR=${STATE_DIR:-/var/lib/waydroid-backlight}
+STAMP="$STATE_DIR/policy.sha256"
+
+# /usr/local first so a hand-staged CIL beats a packaged one on an immutable
+# host, which is the same precedence waydroid-overlay-sync uses.
+PACKAGED=/usr/share/waydroid-backlight/waydroid_backlight.cil
+if [ -z "${CIL:-}" ]; then
+	for c in /usr/local/share/waydroid-backlight/waydroid_backlight.cil \
+	         "$PACKAGED"; do
+		[ -f "$c" ] && CIL="$c" && break
+	done
+fi
+
+VERIFY=0
+UNLOAD=0
+FORCE=0
+QUIET=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--verify|-n|--dry-run) VERIFY=1; shift ;;
+	--unload)              UNLOAD=1; shift ;;
+	--force)               FORCE=1; shift ;;
+	--quiet|-q)            QUIET=1; shift ;;
+	-h|--help) sed -n '44,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	*) echo "unknown argument: $1" >&2; exit 2 ;;
+	esac
+done
+
+say()  { [ "$QUIET" = 1 ] || echo "$@"; }
+warn() { echo "$@" >&2; }
+
+# Not an error. A host built without SELinux is one where this module would be
+# meaningless rather than wrong, and the unit should not fail on it.
+if ! command -v selinuxenabled >/dev/null 2>&1 || ! selinuxenabled 2>/dev/null; then
+	say "SELinux is not enabled -- nothing to load"
+	exit 0
+fi
+
+if [ "$UNLOAD" = 1 ]; then
+	semodule -r "$MODULE" 2>/dev/null || :
+	rm -f "$STAMP"
+	say "removed $MODULE"
+	exit 0
+fi
+
+if [ -z "${CIL:-}" ] || [ ! -f "$CIL" ]; then
+	warn "no policy to load: waydroid_backlight.cil is not installed"
+	exit 1
+fi
+
+# That precedence is a feature until a migration leaves the old hand-installed
+# copy behind, at which point it silently defeats the package -- which is
+# exactly what happened on 2026-09-24: an unowned /usr/local CIL predating the
+# packaging shadowed the fixed one, the hashes matched the stamp, and this tool
+# reported "already loaded and current" while the policy in force was the old
+# one. Shadowing a package is a legitimate thing to do deliberately and a
+# miserable thing to do by accident, so say which file won whenever it is not
+# the packaged one.
+if [ -f "$PACKAGED" ] && [ "$CIL" != "$PACKAGED" ]; then
+	warn "note: using $CIL, which shadows the packaged $PACKAGED"
+	if ! cmp -s "$CIL" "$PACKAGED"; then
+		warn "      and they DIFFER -- the packaged policy is not the one in force."
+		warn "      Remove the first to go back to the packaged one."
+	fi
+fi
+
+want=$(sha256sum "$CIL" | cut -d' ' -f1)
+have=""
+if semodule -l 2>/dev/null | grep -qx "$MODULE"; then
+	have=$(cat "$STAMP" 2>/dev/null || echo "unknown")
+fi
+
+if [ "$want" = "$have" ] && [ "$FORCE" != 1 ]; then
+	say "$MODULE already loaded and current"
+else
+	if [ "$VERIFY" = 1 ]; then
+		if [ -z "$have" ]; then say "not loaded: $MODULE"
+		else say "differs: $MODULE (loaded $have, packaged $want)"; fi
+		exit 3
+	fi
+	say "loading $MODULE from $CIL"
+	semodule -i "$CIL"
+	mkdir -p "$STATE_DIR"
+	printf '%s\n' "$want" >"$STAMP"
+fi
+
+# Re-apply the label. Cheap, and required after a fresh load -- see the header.
+if [ "$VERIFY" != 1 ]; then
+	udevadm control --reload || :
+	udevadm trigger --subsystem-match=backlight --action=add || :
+fi
+
+ok=0
+for d in /sys/class/backlight/*/; do
+	[ -e "$d/brightness" ] || continue
+	ctx=$(ls -Z "$d/brightness" 2>/dev/null | awk '{print $1}')
+	case "$ctx" in *waydroid_backlight_t*) ok=1 ;; esac
+	say "  $(basename "$d")  $ctx"
+done
+
+if [ "$ok" != 1 ]; then
+	# Not fatal: there may be no backlight on this machine at all, and a unit
+	# that fails at boot for that is worse than one that says so.
+	warn "warning: no backlight carries waydroid_backlight_t -- brightness will not move"
+	[ "$VERIFY" = 1 ] && exit 3
+fi
+exit 0

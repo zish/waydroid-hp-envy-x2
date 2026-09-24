@@ -36,3 +36,24 @@
 ;; Whoever applies the label -- udev at device add, or a hand-run chcon.
 (allow udev_t waydroid_backlight_t (file (relabelto relabelfrom getattr open read write)))
 (allow unconfined_t waydroid_backlight_t (file (relabelto relabelfrom getattr open read write)))
+
+;; systemd, which saves the brightness at shutdown and restores it at boot via
+;; systemd-backlight@.service. It is init_t and not a domain of its own here:
+;; /usr/lib/systemd/systemd-backlight is init_exec_t with no transition, so the
+;; helper runs as PID 1's own domain.
+;;
+;; THIS LINE IS A REGRESSION FIX, NOT A NEW FEATURE. Giving brightness a private
+;; type means ONLY the domains named in this file can touch it -- and the base
+;; policy's rule letting init_t write sysfs_t stopped applying the moment the
+;; relabel landed. systemd-backlight had been writing that file perfectly well
+;; until then: it succeeded on 2026-09-09 and failed on every boot from
+;; 2026-09-10, the day this module was introduced, 978 times. Proved by
+;; relabelling the attribute back to sysfs_t, at which point the unit succeeds
+;; immediately, and by relabelling it forward again, at which point it does not.
+;;
+;; Granting it costs nothing: init_t is already the most privileged domain in
+;; userspace, and this restores exactly the access it had before this module
+;; narrowed the type. Without it the host sits permanently `degraded`, which is
+;; worse than it sounds -- a failed unit nobody can fix is a failed unit nobody
+;; reads, and it hides the next one.
+(allow init_t waydroid_backlight_t (file (getattr open read write)))

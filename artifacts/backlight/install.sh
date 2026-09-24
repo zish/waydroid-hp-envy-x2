@@ -32,14 +32,34 @@ PREFIX=${PREFIX:-/usr/local}
 DESTDIR=${DESTDIR:-}
 UDEVRULESDIR=${UDEVRULESDIR:-/etc/udev/rules.d}
 CILDIR=${CILDIR:-$PREFIX/share/waydroid-backlight}
+# See artifacts/overlay-manager/install.sh for why units default to /etc and
+# not to $PREFIX: /usr/local is a symlink to /var/usrlocal, SELinux labels that
+# lib_t, and init_t may not start a unit file labelled lib_t.
+UNITDIR=${UNITDIR:-/etc/systemd/system}
 src=$(dirname "$0")
 
 install -D -m 0644 "$src/waydroid_backlight.cil" "$DESTDIR$CILDIR/waydroid_backlight.cil"
 install -D -m 0644 "$src/99-waydroid-backlight.rules" \
 	"$DESTDIR$UDEVRULESDIR/99-waydroid-backlight.rules"
 
-# Staging for a package: the %post scriptlet does the loading, because
-# semodule and udevadm must run against the live system, not a buildroot.
+# The loader and its boot unit. The module is loaded from here and NOT from the
+# package's %post, because on an rpm-ostree host a scriptlet runs against the
+# compose and the policy never reaches the booted system -- found the hard way
+# on 2026-09-24. See the script's own header.
+install -D -m 0755 "$src/waydroid-backlight-policy" \
+	"$DESTDIR$PREFIX/bin/waydroid-backlight-policy"
+sed "s|@BINDIR@|$PREFIX/bin|g" "$src/waydroid-backlight-policy.service" >"$src/.unit.tmp"
+install -D -m 0644 "$src/.unit.tmp" \
+	"$DESTDIR$UNITDIR/waydroid-backlight-policy.service"
+rm -f "$src/.unit.tmp"
+
+# Enabled with the symlink `systemctl enable` would create, so the RPM needs no
+# scriptlet -- required on an ostree host for the same reason as above.
+mkdir -p "$DESTDIR$UNITDIR/multi-user.target.wants"
+ln -sf ../waydroid-backlight-policy.service \
+	"$DESTDIR$UNITDIR/multi-user.target.wants/waydroid-backlight-policy.service"
+
+# Staging for a package: loading happens at boot, from the unit above.
 if [ -n "$DESTDIR" ]; then exit 0; fi
 
 if ! command -v semodule >/dev/null 2>&1; then
@@ -47,31 +67,20 @@ if ! command -v semodule >/dev/null 2>&1; then
 	exit 1
 fi
 
-semodule -i "$CILDIR/waydroid_backlight.cil"
+systemctl daemon-reload
 
-udevadm control --reload
-udevadm trigger --subsystem-match=backlight --action=add
-
-# Absence of errors is not success: confirm the label actually landed, because
-# the relabel fails silently if the module did not load, and a rule that runs
-# but achieves nothing looks identical to one that worked.
-ok=0
-for d in /sys/class/backlight/*/; do
-	[ -e "$d/brightness" ] || continue
-	ctx=$(ls -Z "$d/brightness" | awk '{print $1}')
-	printf '  %-24s %s\n' "$(basename "$d")" "$ctx"
-	case "$ctx" in *waydroid_backlight_t*) ok=1 ;; esac
-done
-
-if [ "$ok" != 1 ]; then
-	echo "FAILED: no backlight carries waydroid_backlight_t" >&2
-	exit 1
-fi
+# One call does the module, the udev reload and the label check, and reports a
+# label that did not land -- absence of errors is not success, because a relabel
+# fails silently when the module is missing and a rule that runs and achieves
+# nothing looks identical to one that worked.
+CIL="$CILDIR/waydroid_backlight.cil" "$PREFIX/bin/waydroid-backlight-policy"
 
 cat <<EOM
 installed:
   $CILDIR/waydroid_backlight.cil   (loaded: semodule -l | grep waydroid_backlight)
   $UDEVRULESDIR/99-waydroid-backlight.rules
+  $PREFIX/bin/waydroid-backlight-policy
+  $UNITDIR/waydroid-backlight-policy.service   (wanted by multi-user.target)
 
 The running daemon does NOT pick this up -- SELinux checks the write, and a
 daemon already spawned as waydroid_t simply stops being denied from here on,
@@ -79,7 +88,7 @@ so no restart is needed for the fix itself. Verify with bin/brightness-test.sh,
 and read its header first: a dimmed display reports SKIPPED, not FAILED.
 
 To revert:
-  semodule -r waydroid_backlight
+  waydroid-backlight-policy --unload
   rm $UDEVRULESDIR/99-waydroid-backlight.rules
   udevadm control --reload
 EOM

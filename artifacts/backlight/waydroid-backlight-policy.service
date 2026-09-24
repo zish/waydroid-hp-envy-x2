@@ -1,0 +1,34 @@
+# Load the waydroid_backlight SELinux module, every boot.
+#
+# This exists because the package's %post cannot do it on an rpm-ostree host:
+# scriptlets run against the compose and not against the booted system, so the
+# module never reaches the running machine. That was found on the first real
+# install (2026-09-24), where the package was present, its policy was not, and
+# nothing reported a problem. waydroid-overlay-sync.service exists for the same
+# reason and is ordered the same way.
+#
+# Before=waydroid-container.service so the permission is in place before
+# container_manager.py spawns waydroid-sensord as waydroid_t. The running daemon
+# does not need a restart to benefit -- SELinux checks each write, so a daemon
+# already running simply stops being denied -- but a first setLight that lands
+# before the policy would fail for no reason worth debugging later.
+#
+# NOT Requires=/RequiredBy= anything: a brightness slider that does not move is
+# a bad day, and a container that refuses to start is a worse one.
+
+[Unit]
+Description=Load the waydroid_backlight SELinux module
+Documentation=file:///usr/share/doc/waydroid-ext-backlight/42-backlight-selinux.md
+Before=waydroid-container.service
+After=local-fs.target
+ConditionSecurity=selinux
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# --quiet: on a healthy host the stamp already matches and there is nothing to
+# say, so the journal gets a line only when the policy actually changed.
+ExecStart=@BINDIR@/waydroid-backlight-policy --quiet
+
+[Install]
+WantedBy=multi-user.target
