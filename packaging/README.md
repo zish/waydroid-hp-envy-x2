@@ -256,8 +256,8 @@ Audited 2026-09-15, because "how much is packaged?" turned out to have a blunt a
 ### First real migration — done 2026-09-24
 
 **Five packages are installed and in force on bigtab01**, which makes the "zero percent" answer
-below historical rather than current. (Seven as of later the same day — the overlay half went in
-afterwards; see the section below this one.) `waydroid-ext-{sensord,btd,restartd,pidguard,backlight}`
+below historical rather than current. (Nine as of later the same day — the overlay half went in
+afterwards, over two further migrations; see the two sections below this one.) `waydroid-ext-{sensord,btd,restartd,pidguard,backlight}`
 are layered as `LocalPackages` on an otherwise unchanged base commit (`8b4dcffc…`); re-resolving
 the layer also pulled 71 already-layered packages to current versions, which is inherent to how
 rpm-ostree layering works and was not a base-image update.
@@ -432,9 +432,10 @@ hand-placed and unowned, and `waydroid init -f` still erases them with nothing t
 Widevine files. Packaging those is the rest of this phase.
 
 > **Seven of those eleven were packaged later the same day** — see *The five overlay components
-> added 2026-09-24* above. That is packaged, **not installed**: on bigtab01 the coverage is still
-> 2 of 13 and the other 11 files are still hand-placed there, because nothing from that batch has
-> been through a migration yet. The remaining four are Widevine's.
+> added 2026-09-24* above — and **two of those seven were installed in a third migration**, which
+> took the coverage to 4 of 13. The other 9 files are still hand-placed. `camera-hal` and
+> `battery` are built and held back on purpose, `wifi-hostd` is built and blocked on `wifid`, and
+> the remaining four are Widevine's. See *Third migration* below.
 
 **The docs have been saying 12 overlay files and three Widevine files; both are off by one, and it
 is the same one.** The Widevine payload is four — `android.hardware.drm-service-lazy.widevine`, its
@@ -482,6 +483,12 @@ reconciler's preflight exits 0 with *waydroid is not initialised* — and `apply
 scriptlets in the first place. `/var/lib/waydroid-overlay` was absent before the install and
 appeared only once `waydroid-overlay-sync.service` was started by hand. That unit is the real
 boot path, so starting it is what was verified, not the scriptlet.
+
+> **`systemctl start` only works the first time, and the third migration found that out.** The
+> unit is `Type=oneshot` with `RemainAfterExit=yes`, so once it has run it stays `active` and
+> `systemctl start` on it is a silent no-op — exit 0, no journal line, no reconcile. The recipe
+> above is correct exactly once per boot. Any later hand reconcile needs `systemctl restart
+> waydroid-overlay-sync.service`, or the binary directly.
 
 `deployed.list` then recorded **both** files even though neither had been rewritten, because the
 state file is written from the wanted set rather than from what changed. That is what makes the
@@ -534,6 +541,78 @@ current* with `waydroid_backlight_t` on the attribute. `systemd-backlight` has s
 `systemctl --failed` — the only failed unit is `systemd-remount-fs`, failing since 2026-09-12 and
 ordinary read-only-root behaviour.
 
+### Third migration — two more overlay files, done 2026-09-24
+
+`waydroid-ext-wifi-framework` 1.0.0 and `waydroid-ext-brightness-overlay` 1.0.0 are installed and
+live. That makes **nine** `waydroid-ext-*` packages layered on bigtab01 and takes the overlay from
+**2 of 13 files owned to 4 of 13**. `LiveCommit a370a645…` equals the pending deployment's
+`Commit`, so the running system is again already what the next boot lands on.
+
+Two of the five components from that batch were held back, for unrelated reasons:
+
+- **`wifi-hostd` is blocked, not deferred.** It requires `waydroid-ext-wifid`, which has no binary
+  RPM because `wifi/build.sh` has no `--rpm` mode. Building that is the prerequisite, and it is
+  the same item already recorded in `wifid.mod`.
+- **`camera-hal` and `battery` were held out on purpose.**
+  [docs/54](../docs/54-no-vendored-binaries.md) is about to change their payload from a patched
+  vendor binary into a derived row, and installing a version whose shape is about to change is how
+  a machine ends up with two answers to where a file comes from.
+
+#### One file was free and one was not, and which was which was known before the transaction
+
+`wifi-framework`'s payload was byte-identical to the live file (`21e1bd1e…`) at mode `644`, so the
+reconciler skipped it, exactly as it skipped both camera wrappers in migration 2.
+`brightness-overlay`'s was not. The live light `.rc` differed from the packaged one by **one word
+in one comment** — `CLAUDE.md` where the repo now says `AGENTS.md`, line 53, left behind by the
+file rename. `--verify` before the reconcile named that one file and nothing else, exit **3**.
+
+So this migration deliberately did the thing migration 2 was able to avoid: it wrote into a
+mounted overlayfs lowerdir. The shadow sweep was empty again beforehand — no `/usr/local` staging
+directories, nothing matching `*waydroid-overlay*` under `/var/usrlocal`, and
+`waydroid-overlay-sync` resolving to `/usr/bin`. `overlay_rw` was empty too, so nothing was masking
+the layer.
+
+#### `install` replaces the inode on this host, so Android's view went stale instead of updating
+
+The write was predicted to be safe on the grounds that `install -D -m` truncates in place and
+keeps the inode, leaving the mount's cached dentry valid. **On bigtab01 it does not.** Measured
+across the reconcile:
+
+| | before | after |
+|---|---|---|
+| inode | `2005375` | `2405078` |
+| sha256 on disk | `9e842e3d…` | `71f2b6fa…` (the manifest hash) |
+| sha256 **read from inside the container** | `9e842e3d…` | `9e842e3d…` — unchanged |
+
+The file did not vanish; Android still reads it, at 3087 bytes with its original mtime. It is
+simply the *old* bytes, because the mount had already cached the inode the reconcile replaced.
+That is the same invisibility AGENTS.md documents for files *added* to a mounted lowerdir, and it
+applies just as much to files *modified* there.
+
+SELinux is not the cause and was ruled out on the host: a probe with source and destination
+carrying the same label, on the same filesystem, replaces the inode too. The visible difference is
+the coreutils version — `install` is 9.10 on bigtab01 and 9.7 on the development box, where the
+same probe keeps the inode. Either way the lesson is the version-independent one: **do not reason
+about what a lowerdir write does from a test run on a different machine.**
+
+The consequence here is nil, because the difference is a comment and `init` reads the file only at
+container start, which is also when the view becomes consistent again. The consequence in general
+is not nil, and it is the argument for keeping the byte-identical check in front of every future
+migration rather than treating it as a formality.
+
+#### What was verified
+
+- `--verify` exits **0** and reports *overlay matches the staged components*.
+- `deployed.list` now records **four** files — the two camera wrappers plus
+  `system/etc/permissions/android.hardware.wifi.xml` and the light `.rc` — so a later removal of
+  either package cleans up after itself instead of orphaning.
+- Staged payload in `/usr/lib/waydroid-overlay/` hashes equal to the shipped manifests for both
+  new components.
+- The reconcile ran from the unit, not the binary, because the unit is the boot path. It took a
+  `systemctl restart` to do it; see the note under the second migration for why `start` did
+  nothing.
+- The container was never restarted and the kiosk session survived the whole migration.
+
 ## What was deployed on bigtab01 before that — audited 2026-09-15
 
 **None of it. Zero percent of this project's output was installed as an RPM.** Every spec above was
@@ -568,7 +647,8 @@ has simply never been deployed, because deploying it means building and installi
 documentation describes the design, and the design is not in force.
 
 > **Partly resolved 2026-09-24.** `waydroid-overlay-sync` is now installed and reconciles on every
-> boot, so the mechanism is in force — but for 2 of the 13 overlay files, not all of them, and the
+> boot, so the mechanism is in force — but for 4 of the 13 overlay files after the third migration,
+> not all of them, and the
 > staging directory is `/usr/lib/waydroid-overlay` rather than the `/usr/share` path named above.
 > The sentence in AGENTS.md was accurate about the design and wrong about the deployment; it is now
 > accurate about both, with the coverage stated. See *Second migration* above.

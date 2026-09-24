@@ -123,8 +123,9 @@ older staging tree is not stranded.)
 **Six of the seven are built as of 2026-09-24** — `camera-gbm`, `camera-hal`, `battery`,
 `brightness-overlay`, `wifi-framework` and `wifi-hostd` — which is 9 of the 13 overlay files.
 The seventh is `widevine`, holding the other 4, and it needs mechanism this design does not yet
-have; see the note below the table. Built is not installed: on bigtab01 the overlay is still
-`camera-gbm`'s 2 files and 11 hand-placed ones.
+have; see the note below the table. Built is not installed, but two more of them are as of the
+third migration that day: on bigtab01 the overlay is `camera-gbm`'s 2 files plus
+`wifi-framework`'s and `brightness-overlay`'s one each, and 9 hand-placed ones.
 
 | Package | Files | Doc |
 |---|---|---|

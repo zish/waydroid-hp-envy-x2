@@ -66,10 +66,10 @@ from this section is the second half — `packaging/README.md` still says zero p
 project is installed as an RPM on bigtab01, and that has not changed: the packages are now
 installable, and none of them is installed.
 
-**Superseded 2026-09-24.** Seven of them are installed now, in two migrations the same day; the
+**Superseded 2026-09-24.** Nine of them are installed now, in three migrations the same day; the
 second one put `overlay-sync` and `camera-gbm` in force and so ended the "none of them is
-installed" answer for the overlay half too. See `packaging/README.md`, *First real migration* and
-*Second migration*.
+installed" answer for the overlay half too, and the third took the overlay to 4 of its 13 files.
+See `packaging/README.md`, *First real migration*, *Second migration* and *Third migration*.
 
 ### A third reason `wifid` cannot do a full build, which nobody had written down
 
@@ -94,8 +94,9 @@ Cross-referencing `packaging/README.md`'s host audit against the fourteen mods: 
 android-power, binder-nice, mdns, dexopt, the ITE8350 resume machinery, the
 `lxc.net.0.name` edit, and ~~**11 of the 13 overlay files**~~ **4 of the 13** as of 2026-09-24:
 the four Widevine files. The camera HAL and its config XML, the health HAL, `wificond.rc`, the
-light `.rc`, the Wi-Fi feature XML and the supplicant VINTF manifest were packaged that day —
-built, not installed. `uvc-autosuspend` has left this list by being retired rather than packaged
+light `.rc`, the Wi-Fi feature XML and the supplicant VINTF manifest were packaged that day.
+Built, not installed — except the light `.rc` and the Wi-Fi feature XML, which went onto bigtab01
+in the third migration the same day. `uvc-autosuspend` has left this list by being retired rather than packaged
 ([docs/12](12-v4l2-frame-errors.md)). (This said "10 of the 12" and "three Widevine files"; the
 overlay was counted on the host on 2026-09-24 and holds 13 files, of which 4 are Widevine —
 `libwvaidl.so` was the one missing from the count. `sensord` and its `ILight` half are packaged
@@ -303,23 +304,25 @@ string Android reports through the sensors HAL, so changing it changes observabl
 
 1. **Build the RPMs.** ~~This is the next session's work~~ — **done for fourteen
    modifications, and seven of them are installed on bigtab01** (`sensord`, `btd`, `restartd`,
-   `pidguard`, `backlight`, `overlay-sync`, `camera-gbm`), across two migrations on 2026-09-24.
-   Both are recorded in [packaging/README.md](../packaging/README.md); the second one put the
-   overlay mechanism in force, for 2 of the 13 overlay files.
+   `pidguard`, `backlight`, `overlay-sync`, `camera-gbm`) — **nine after a third migration the
+   same day** added `wifi-framework` and `brightness-overlay`. All three are recorded in
+   [packaging/README.md](../packaging/README.md); the second put the overlay mechanism in force,
+   and the third took it from 2 of the 13 overlay files to **4 of 13**.
    ~~What remains of this item: package the other 11 overlay files~~ — **seven of those eleven
    were packaged on 2026-09-24** (`camera-hal`, `battery`, `brightness-overlay`,
    `wifi-framework`, `wifi-hostd`), and `uvc-autosuspend` was
    [retired](12-v4l2-frame-errors.md) rather than written, which makes the `camera` group
    resolvable for the first time.
    What remains of this item now, in order:
-   - **A third migration**: install `brightness-overlay`, `wifi-framework` and `wifi-hostd` on
-     bigtab01 — the three whose payload is text written here, so the no-vendored-binaries policy
-     does not touch them. (`wifi-hostd` additionally needs `wifid` to have a binary RPM first.)
-     Nothing from the batch is installed, so the machine's overlay coverage is still 2 of 13
-     whatever the package count says. Their payload files are byte-identical to what is live
-     there apart from one word in a comment, so the transaction changes almost nothing Android
-     sees — which is the same argument that made the second migration safe, and carries the same
-     trap: install without removing the hand-placed copies and nothing has changed.
+   - ~~**A third migration**: install `brightness-overlay`, `wifi-framework` and `wifi-hostd`~~
+     — **done 2026-09-24 for the first two**; overlay coverage is now 4 of 13 and `--verify`
+     exits 0. **`wifi-hostd` is the part that did not land**, and it is blocked rather than
+     deferred: it requires `waydroid-ext-wifid`, which has no binary RPM, which is the
+     `wifi/build.sh --rpm` item further down this same list. Two findings from the transaction
+     are in `packaging/README.md`, *Third migration* — `systemctl start` is a silent no-op on the
+     reconciler's `RemainAfterExit` unit once it has run, and a write into a mounted lowerdir
+     replaces the inode on this host, so Android keeps reading the old bytes until the container
+     restarts.
    - **The four Widevine files**, which are not another `.mod` file. They need a fetched-row and a
      symlink-row in the manifest format, and therefore a version bump of `waydroid-ext-overlay-sync`
      — the keystone, already installed on bigtab01. Scoped in
