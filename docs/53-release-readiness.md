@@ -39,17 +39,25 @@ $ rpm -qp --requires build/rpm/RPMS/*/*.rpm
 | `waydroid-ext-btd` | **yes** | — |
 | `waydroid-ext-pidguard` | **yes** | — |
 | `waydroid-ext-restartd` | **yes** | — |
-| `waydroid-ext-backlight` | yes, but inert | needs `waydroid-ext-sensord`, which has no `.mod` |
-| `waydroid-ext-camera-gbm` | **no** | `Requires: waydroid-ext-overlay-sync` — no such package |
+| `waydroid-ext-backlight` | **yes**, since 1.0.1 | 1.0.0's `%post semodule -i` was inert on ostree; now loaded by a boot unit |
+| `waydroid-ext-sensord` | **yes**, `--prebuilt` on this box | source build needs Fedora's `libgbinder-devel` |
+| `waydroid-ext-camera-gbm` | **yes**, since 2026-09-23 | was blocked on `waydroid-ext-overlay-sync`, now written |
+| `waydroid-ext-overlay-sync` | **yes** | the keystone; written 2026-09-23 |
 | `waydroid-ext-camera` | **no** | requires `camera-hal` and `uvc-autosuspend` — neither exists |
 | `waydroid-ext-wifid` | **no** | SRPM only |
 
-**`waydroid-ext-overlay-sync` is the keystone and it is missing.** Every overlay component hard-
-requires it by design, and it has no `.mod` file. So the entire Android-side half of the project —
-all 12 overlay files, including the camera fix that is nominally the one packaged feature — is
-unreachable by RPM. `packaging/README.md` already says zero percent of this project is installed
-as an RPM on bigtab01; what it does not say is that even the packages that *build* could not be
-installed if somebody tried.
+**`waydroid-ext-overlay-sync` was the keystone and it was missing. It was written on
+2026-09-23.** Every overlay component hard-requires it by design, so while it had no `.mod`
+file the entire Android-side half of the project — all 12 overlay files, including the camera
+fix that is nominally the one packaged feature — was unreachable by RPM, and even the packages
+that *built* could not have been installed if somebody had tried.
+
+That is now closed, and closed demonstrably rather than by assertion: `rpm --test -i` on
+`camera-gbm` alone reports `waydroid-ext-overlay-sync is needed by waydroid-ext-camera-gbm`,
+and the same command with both packages in one transaction no longer does. What remains true
+from this section is the second half — `packaging/README.md` still says zero percent of this
+project is installed as an RPM on bigtab01, and that has not changed: the packages are now
+installable, and none of them is installed.
 
 ### A third reason `wifid` cannot do a full build, which nobody had written down
 

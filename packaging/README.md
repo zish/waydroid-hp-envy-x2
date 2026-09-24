@@ -14,29 +14,92 @@ is an overlayfs lowerdir over a read-only image), names the seven overlay files 
 a stock file and are therefore the surface an image upgrade can break, and carries the
 Debian/Ubuntu and other-distro roadmap. Read it before touching anything here.
 
-## Built is not the same as installable — audited 2026-09-22
+## Built is not the same as installable — audited 2026-09-22, revised 2026-09-23
 
 The table below says which modifications survive `rpmbuild`. It does not say whether the
-resulting package can be installed, and for two of them it cannot. Asked directly:
+resulting package can be installed, and for one of them it still cannot. Asked directly:
 
 ```
 $ rpm -qp --requires build/rpm/RPMS/*/*.rpm
 ```
 
-`waydroid-ext-camera-gbm`'s only dependency is **`waydroid-ext-overlay-sync`**, which has no
-`.mod` file and has never been built. `waydroid-ext-camera` additionally requires
-`waydroid-ext-camera-hal` and `waydroid-ext-uvc-autosuspend`, neither of which exists. So the
-two camera packages build cleanly and are uninstallable, and since every overlay component
-hard-requires `overlay-sync` by design, **the whole Android-side half of the project is
-unreachable by RPM until that one package is written**.
+**The keystone is no longer missing.** `waydroid-ext-overlay-sync` was written on 2026-09-23
+and builds, lints to the same baseline as every other package here, and installs. That closes
+`waydroid-ext-camera-gbm`, whose only unsatisfiable dependency it was, and with it the general
+case: every overlay component hard-requires `overlay-sync` by design, so **the Android-side
+half of the project is now reachable by RPM.** Proved rather than assumed —
+`rpm --test -i camera-gbm.rpm` reports `waydroid-ext-overlay-sync is needed by
+waydroid-ext-camera-gbm`, and adding `overlay-sync` to the same transaction removes that line,
+leaving only base-OS dependencies an empty test root cannot have.
 
-Of the seven modifications here, four produce something installable today: `btd`, `pidguard`,
-`restartd`, and `backlight` — the last of which installs but does nothing, because it grants a
-permission to `waydroid-sensord`, which also has no `.mod`.
+What is still uninstallable is the `camera` **group**, which requires `waydroid-ext-camera-hal`
+and `waydroid-ext-uvc-autosuspend`; neither has a `.mod` file. The group is a metapackage, so
+this costs nothing but the group itself: `camera-gbm` installs on its own today.
 
-Write `overlay-sync` first. It is the cheapest change with the largest effect on this table.
+Of the nine modifications here, seven produce something installable: `overlay-sync`,
+`sensord`, `camera-gbm`, `btd`, `pidguard`, `restartd`, and `backlight` — which is no longer
+inert, because the `waydroid-sensord` it grants a permission to is now a package
+(`sensord`, written 2026-09-24). Its `Recommends` on that package resolves for the first time.
+
+Next cheapest, for the reason `overlay-sync` and `sensord` were: `mediad`, and the two camera
+dependencies (`camera-hal`, `uvc-autosuspend`) that make the `camera` group resolvable.
+
+### `sensord` is built `--prebuilt` here, and why that is not a fudge
+
+`packaging/build-mod.sh --prebuilt` stages the binary `sensors/build.sh` already produced into
+the tarball under `prebuilt/` and passes `--with prebuilt` to rpmbuild, exactly as the older
+`build-rpms.sh --prebuilt` does. The `.mod` declares the **source build as the default** — it
+is what a distribution builder runs, and a source package that cannot be built from source is
+not one — and the `%bcond` selects the other arm. This box is Debian and has no
+`libgbinder-devel`, so the prebuilt arm is the only one it can execute.
+
+Two `%global`s apply to that arm alone. `debug_package %{nil}`, because there is no source in
+the build tree for a debuginfo package to point at and the extraction needs `eu-strip`, which
+this box does not have — that failure is how this was found. `__brp_strip %{nil}`, so the
+packaged binary stays byte-for-byte the file that was built and tested against bigtab01;
+verified, both are sha256 `0e6dcd15…`. The resulting `unstripped-binary-or-object` warning is
+therefore expected and is deliberately **not** filtered: filtering it would also hide a
+genuinely unstripped binary in a future source build.
+
+rpm still reads the ELF and generates the real soname dependencies from it —
+`libgbinder.so.1`, `libglibutil.so.1`, `libglib-2.0.so.0` — on top of the declared ones, which
+is what makes a prebuilt package honest about what it links rather than merely what it claims.
 
 Full audit in [docs/53-release-readiness.md](../docs/53-release-readiness.md).
+
+## Install and uninstall are tested, without touching bigtab01
+
+`packaging/test-install.sh` installs every built package into a throwaway root, edits every
+file it owns behind rpm's back, uninstalls it, and checks what happened. It needs no sudo, no
+container runtime and no reboot: `unshare -r` supplies a user namespace in which `rpm --root`
+may chroot, which is the only privilege the exercise actually requires.
+
+```
+$ packaging/test-install.sh --selftest --all
+test-install: 46 passed, 0 failed
+```
+
+It does not run scriptlets — rpm chroots to run them and the test root has no shell — so they
+are syntax-checked with `sh -n` instead. That catches the error that really happens, a typo in
+a `%postun` nobody executed before shipping.
+
+**The policy it enforces**, decided 2026-09-23: an uninstall must never fail, and must never
+silently discard a file somebody edited. Measured, not assumed — on erase, rpm preserves an
+edited `%config` as `.rpmsave` and prints a warning, and deletes an edited plain file without
+a word. Both exit 0. So the enforceable rule is *anything under `/etc` must be `%config`*,
+because `/etc` is where an administrator edits; everything else lands in `/usr`, which is
+read-only on an rpm-ostree host and cannot be edited in place at all.
+
+Failing the transaction instead was considered and rejected. A `%preun` that exits non-zero
+aborts the erase, leaving a package that cannot be removed without `--noscripts`, and on
+bigtab01 that failure surfaces inside an rpm-ostree deployment build rather than as a message
+anybody reads. It also contradicts the rule this repository already adopted for `backlight`'s
+`semodule` scriptlets: no scriptlet may fail a transaction.
+
+`--selftest` is not decoration. Every package here happens to ship no `%config` file, so the
+two checks that matter most never fire on real input, and a check that has never failed is not
+known to work. It builds two deliberate fixtures — one correct, one shipping an `/etc` file
+plain — and asserts the harness reaches the right verdict on each.
 
 ## Generated per-modification packages — these have been built
 
@@ -53,6 +116,8 @@ Full audit in [docs/53-release-readiness.md](../docs/53-release-readiness.md).
 | `restartd` | yes | yes | **yes** | same |
 | `btd` | yes | yes | **yes** | same |
 | `backlight` | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
+| `overlay-sync` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
+| `sensord` | yes | yes | **yes**, `--prebuilt` only | same, plus `no-manual-page-for-binary` and `unstripped-binary-or-object` |
 
 The four host packages added on 2026-09-22 all build fully, because none of them compiles
 anything: two are `bash`, two are stdlib or system-library Python, and `backlight` is a CIL
@@ -117,10 +182,121 @@ otherwise.
 
 Audited 2026-09-15, because "how much is packaged?" turned out to have a blunt answer.
 
-**None of it. Zero percent of this project's output is installed as an RPM.** Every spec above is
-written and payload-verified; none has been built, and `rpm -qa` on the host lists only Fedora's own
-`waydroid` and `waydroid-selinux`. Everything this repository produces is hand-placed, and survives
-only because nothing has overwritten it yet.
+### First real migration — done 2026-09-24
+
+**Five packages are installed and in force on bigtab01**, which makes the "zero percent" answer
+below historical rather than current. `waydroid-ext-{sensord,btd,restartd,pidguard,backlight}`
+are layered as `LocalPackages` on an otherwise unchanged base commit (`8b4dcffc…`); re-resolving
+the layer also pulled 71 already-layered packages to current versions, which is inherent to how
+rpm-ostree layering works and was not a base-image update.
+
+The reboot alone changed nothing, exactly as predicted: `/usr/local/bin` precedes `/usr/bin` in
+PATH and units in `/etc/systemd/system` outrank `/usr/lib/systemd/system`, so the packages sat
+shadowed and inert until the hand-placed copies were removed. That shadowing is the trap in
+this migration — install without removing and you have changed nothing while believing you
+have. Verified after: all three units now resolve to `/usr/lib/systemd/system`, every binary
+resolves into `/usr/bin` and `rpm -qf` names its package, and the running daemons are
+`/usr/bin/python3 /usr/bin/waydroid-{btd,restartd}`.
+
+Removed, after a backup to `~jmelanso/waydroid-handplaced-2026-09-24.tar.gz` (16 entries):
+five binaries from `/usr/local/bin`, four units and three enable symlinks from
+`/etc/systemd/system`, and the duplicate udev rule from `/etc/udev/rules.d` — that last only
+after confirming it was byte-identical to the packaged one. **`waydroid-sensord` keeps running
+from its deleted inode** (`/var/usrlocal/bin/waydroid-sensord (deleted)`) until the next session
+start, which is harmless because the packaged binary is byte-identical to it.
+
+Two pre-existing failures are visible in `systemctl --failed` and neither is ours:
+`systemd-backlight@backlight:intel_backlight` failed at 21:30:02, before the removals at 21:33,
+and failed identically on the previous boot; `systemd-remount-fs` has failed since 2026-09-12
+with `overlay: No changes allowed in reconfigure`, which is ordinary read-only-root behaviour.
+
+#### `systemctl is-enabled` reports `disabled`, and that is correct and harmless
+
+Do not "fix" it. These packages ship the enable symlink inside
+`/usr/lib/systemd/system/<target>.wants/` rather than running `systemctl enable` from a
+scriptlet, because on an ostree host scriptlets run against the compose and not the booted
+system. systemd honours those symlinks for activation — `systemctl show multi-user.target -p
+Wants` lists `waydroid-btd.service` and `waydroid-restartd.service`, and `timers.target` lists
+`waydroid-pidguard.timer` — but `is-enabled` defines "enabled" as a symlink under `/etc`, which
+is deliberately not where these live. The units do start at boot; the word is a reporting
+artifact of where the symlink lives.
+
+#### Fixed: `waydroid-ext-backlight` did not load its policy on an ostree host
+
+Found on the first real install and fixed the same day, in 1.0.1.
+
+`backlight`'s `%post` ran `semodule -i`, and **it did not take.** Proved by looking at the
+deployment's pristine `/usr/etc`, which is what the live `/etc` is merged from at boot: it held
+`extra_varrun` and `permissive_bootupd_t` and no `waydroid_backlight`. The module was loaded on
+the running system only because the hand-loaded copy from before the migration was carried
+forward by that merge. The package installed, its SELinux half did nothing, and nothing
+anywhere reported a problem — so the hand-loaded module was deliberately left in place rather
+than removed as the migration plan originally had it, which would have broken brightness with
+nothing to restore it.
+
+The fix is the one `overlay-sync` already uses: the module is loaded at boot by
+`waydroid-backlight-policy.service`, not from a scriptlet, and the enable symlink is shipped
+rather than created by `systemctl enable`. `%post` still calls the loader, which makes the fix
+immediate on an ordinary host and is a harmless no-op on ostree.
+
+The loader is **idempotent by CIL hash, not by module name**. `semodule -l` answers whether a
+module of that name is loaded, never whether it is *this* one, so an upgrade carrying a changed
+policy would look already-done and be skipped; and `semodule -i` rebuilds the whole policy store
+and takes seconds, so reloading unconditionally every boot would be a visible cost for nothing.
+A stamp under `/var/lib/waydroid-backlight` records what was loaded.
+
+Validated against the real host before shipping: `waydroid-backlight-policy --verify` on
+bigtab01 reported `differs: waydroid_backlight (loaded unknown, packaged fdf43f5c…)` and exited
+3 — correctly identifying the hand-loaded module as of unknown provenance — while changing
+nothing. After the reboot it reported *already loaded and current*, with the stamp matching and
+the label applied, which is what confirms the boot unit did the work rather than finding the
+old module and shrugging.
+
+#### And the regression that verification then exposed — fixed in 1.0.2
+
+Once the packaged policy was in force, the one remaining failed unit turned out to be this
+project's own doing. Relabelling `brightness` to a private type silently revoked
+`systemd-backlight`'s access to it: the unit succeeded on 2026-09-09, failed on 2026-09-10 —
+the day the module first landed — and had failed **978 times** since, leaving the host
+permanently `degraded`. No AVC is logged for it even with `dontaudit` disabled, so the only
+symptom is a bare `EACCES` with nothing implicating SELinux. Confirmed by experiment
+(relabel to `sysfs_t` → succeeds; relabel back → fails) and fixed with one `allow init_t` line.
+Full account in [docs/42](../docs/42-backlight-selinux.md). 1.0.2 is staged on bigtab01.
+
+The lesson generalises to every private type this project introduces: **a narrow type takes
+access away as well as granting it**, so ask what else writes the file before narrowing it.
+
+#### And the shadow that made 1.0.2 look like it worked when it had not
+
+Verifying the fix after the reboot turned up a third thing, and it is the same trap as the
+`/usr/local/bin` shadowing that Phase 3 was written to clear — in a location Phase 3 did not
+cover. The loader searches `/usr/local/share/waydroid-backlight` before `/usr/share`, on
+purpose, so a hand-staged policy can beat a packaged one on an immutable host. An unowned CIL
+left over from the by-hand install was still sitting there, *without* the `init_t` fix. The
+loader picked it, its hash matched the stamp, and it reported "already loaded and current"
+while the policy actually in force was the old one — brightness worked only because the fixed
+module happened to survive in `/etc` from a hand `semodule -i` before the reboot.
+
+A sweep of `/var/usrlocal` — and it must be that path, because `/usr/local` is a symlink and
+`find` will not follow it, which is an easy way to get a falsely clean result — showed exactly
+one file shadowing a packaged one. The other thirteen hand-installed binaries there have no
+packaged twin yet and are not shadows. Removing it made the loader pick the packaged CIL,
+reinstall, and write the matching stamp.
+
+1.0.3 makes this announce itself: the loader now says which file won whenever it is not the
+packaged one, and says louder when the two differ. **The migration lesson is broader than
+PATH**: when a modification moves from hand-installed to packaged, the old copy has to be
+removed from *every* location the tool searches, not just from `/usr/local/bin` and
+`/etc/systemd/system`. `waydroid-overlay-sync` has the same precedence design and will want
+the same treatment before it is installed.
+
+## What was deployed on bigtab01 before that — audited 2026-09-15
+
+**None of it. Zero percent of this project's output was installed as an RPM.** Every spec above was
+written and payload-verified; none had been built, and `rpm -qa` on the host listed only Fedora's own
+`waydroid` and `waydroid-selinux`. Everything this repository produced was hand-placed, and survived
+only because nothing had overwritten it. The five packages above are the first part of that to
+change; the rest of the table below still stands.
 
 What that means concretely — all of the following is unowned by any package (`rpm -qf` says so for
 each):

@@ -693,11 +693,18 @@ and the reasoning behind each change.
   `build-mod.sh` ([docs/47-package-split.md](docs/47-package-split.md)); the four hand-written
   specs and `build-rpms.sh` are the superseded layout and still the only thing the legacy path
   can build. `packaging/README.md` records what has actually been through `rpmbuild`.
-  **Read it before assuming anything is packaged**: audited 2026-09-22, there are 7 `.mod`
-  files against ~36 modifications, only 4 produce an *installable* package, and
-  `waydroid-ext-overlay-sync` — which every overlay component hard-requires — does not exist,
-  so the whole Android-side half of the project is unreachable by RPM. `waydroid-ext-camera-gbm`
-  builds cleanly and cannot be installed for exactly that reason. See
+  **Read it before assuming anything is packaged**: revised 2026-09-24, there are 9 `.mod`
+  files against ~36 modifications and 7 produce an *installable* package.
+  `waydroid-ext-overlay-sync` — the keystone every overlay component hard-requires — now
+  exists, which makes the Android-side half reachable by RPM and `waydroid-ext-camera-gbm`
+  installable; the `camera` **group** still is not, needing `camera-hal` and
+  `uvc-autosuspend`. `sensord` is packaged too, which is what makes `backlight`
+  stop being inert; it builds here only with `build-mod.sh --prebuilt`, because
+  its source build needs Fedora's `libgbinder-devel`. Install and
+  uninstall are tested by `packaging/test-install.sh`, which runs entirely on the dev box —
+  `unshare -r` for the chroot, no sudo, no container, no reboot — and enforces the uninstall
+  policy: never fail the transaction, never silently discard an edited file, so anything
+  under `/etc` must be `%config`. See
   [docs/53-release-readiness.md](docs/53-release-readiness.md), which also covers the
   documentation and path audits, what genuinely cannot be applied by RPM, and the lefthook and
   GitHub Actions plan

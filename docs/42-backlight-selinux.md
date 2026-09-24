@@ -257,3 +257,53 @@ Android had been up for sixteen minutes, which is the signature to look for.
   skipped, and the panel stays where the external write left it. It self-heals as soon as
   Android requests a different value, but in the meantime it looks exactly like a broken
   daemon.
+
+## The regression this fix caused, and did not notice for a fortnight
+
+Found 2026-09-24, fixed in `waydroid-ext-backlight` 1.0.2.
+
+A private type takes access away as well as granting it. Relabelling
+`/sys/class/backlight/intel_backlight/brightness` to `waydroid_backlight_t` means the base
+policy's rules about `sysfs_t` no longer apply to that file — including the one that let
+`systemd-backlight` write it. That helper saves the panel value at shutdown and restores it at
+boot, and it had been doing so perfectly well:
+
+| | |
+|---|---|
+| 2026-09-09 11:06:51 | `Finished systemd-backlight@backlight:intel_backlight.service` |
+| 2026-09-10 13:33:59 | `intel_backlight: Failed to write system 'brightness' attribute: Permission denied` |
+
+2026-09-10 is the day this module first landed. It then failed on every boot for a fortnight —
+**978 recorded failures** — and left the host permanently `degraded`, which is the part that
+actually costs something: a failed unit nobody can explain is a failed unit nobody reads, and
+it hides the next one.
+
+**There is no AVC for it.** Not in `ausearch`, not in `dmesg`, and not even after
+`semodule -DB` rebuilt the policy with every `dontaudit` rule disabled — the host records zero
+AVCs for the whole boot. So the only symptom available is a bare `EACCES` with nothing
+anywhere pointing at SELinux, which is why a fortnight passed. If you are ever chasing a
+permission error on a file this project relabels, do not wait for an audit record to confirm
+it; there will not be one.
+
+What settled it was an experiment, not a reading of the policy:
+
+```
+chcon -t sysfs_t   …/brightness  →  systemctl restart systemd-backlight@…  →  succeeds
+udevadm trigger …                →  (label back to waydroid_backlight_t)   →  fails again
+```
+
+The fix is one line in the CIL, granting `init_t` the access the relabel took away:
+
+```
+(allow init_t waydroid_backlight_t (file (getattr open read write)))
+```
+
+`init_t` and not a domain of its own: `/usr/lib/systemd/systemd-backlight` is `init_exec_t`
+with no transition rule, so the helper runs as PID 1's own domain. Granting it costs nothing —
+`init_t` is already the most privileged domain in userspace, and this restores precisely the
+access it had before this module narrowed the type.
+
+**The general lesson, for the next private type this project introduces.** Ask what *else*
+writes the file before narrowing it. The check is cheap — relabel, exercise the other writer,
+relabel back — and it is the only thing that would have caught this, because the audit trail
+that normally makes SELinux debuggable was not there.
