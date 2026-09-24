@@ -629,12 +629,32 @@ What that means in practice, cheapest case first:
   and `artifacts/lib/*.so` exist to be compared against, and a sha256 in the `.mod` does that
   job exactly as well for 64 bytes instead of 400 KB.
 
-Reference data dumped from *this machine's own hardware* — `artifacts/acpi/*.aml`,
-`artifacts/hid/*.rd` — is not what this policy is about. It is evidence, it is never shipped in
-a package, and it came from the host rather than from a third party.
+#### What we built ourselves is not external, and the signature is what says so
 
-**Nothing in this repository complies yet.** The inventory and the migration are in
-[docs/54-no-vendored-binaries.md](docs/54-no-vendored-binaries.md).
+**Owner's ruling, 2026-09-24.** Build output this project produced may be committed.
+`artifacts/phase2/libgbm_mesa_wrapper-fixed-{32,64}.so` is the case in point: NDK r27c against
+`phase2/build.sh`, `phase2/stubs/` and `phase2/0001-gbm_import-geometry.patch`, all of which are
+here. It is ours, so the policy does not reach it, and committing it keeps the NDK out of the
+package build path for everyone who is not changing the wrapper.
+
+**The condition is that the commit is signed**, and that is what makes the claim checkable
+rather than a comment. A signature says a known key vouched for these exact bytes at this exact
+point in history — which is the provenance record a committed binary otherwise has no way to
+carry. Note the asymmetry that makes the policy coherent: signing your own build output attests
+where it came from; signing somebody *else's* binary attests only that you chose to redistribute
+it, which is the thing being forbidden. A signature is not a licence.
+
+So the gate in `bin/check-signed-commits.sh` is now load-bearing for more than authorship, and
+it already holds: **all 108 commits verify `G`**, including `91f9d6a`, the one that introduced
+the wrapper binaries. Do not weaken it, and do not commit build output on an unsigned commit —
+that is the one way to put a binary here with nothing standing behind it.
+
+Reference data dumped from *this machine's own hardware* — `artifacts/acpi/*.aml`,
+`artifacts/hid/*.rd` — is not what this policy is about either. It is evidence, it is never
+shipped in a package, and it came from the host rather than from a third party.
+
+**4.23 MiB of third-party binaries are still here and none of it complies yet.** The inventory
+and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-binaries.md).
 
 - `docs/` — numbered investigation notes, one per topic
 - `bin/` — helper scripts for working with the host, incl. stdlib-only V4L2 probes

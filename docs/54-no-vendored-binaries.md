@@ -5,12 +5,14 @@
 needs one, it is obtained at RPM install time or inside Android, never carried in this
 repository.
 
-This note is the inventory it applies to and the migration out. **Nothing here complies yet.**
+This note is the inventory it applies to and the migration out. **None of the third-party
+binaries comply yet.** Build output this project produced is a separate case and was ruled
+compliant the same day — see *What we built is not external*, below.
 
 ## The inventory
 
 Every tracked binary, what it is, and where it came from. Sizes are the files themselves, not
-their weight in git history — see the last section for that distinction.
+their weight in git history — see *Deleting them from `HEAD`…* for why that distinction matters.
 
 | File | Bytes | Provenance | Shipped by | Verdict |
 |---|---|---|---|---|
@@ -25,12 +27,13 @@ their weight in git history — see the last section for that distinction.
 | `artifacts/lib/android-libgbm_mesa-32.so` | 12,796 | Waydroid image, stock | — (reference) | **violates** — becomes a hash |
 | `artifacts/widevine/…drm-service-lazy.widevine` | 12,056 | Google prebuilt, ChromeOS `nissa` | (planned) `widevine` | **violates** — fetched at install |
 | `artifacts/widevine/…libwvaidl.so` | 2,960,376 | Google prebuilt, ChromeOS `nissa` | (planned) `widevine` | **violates** — fetched at install |
-| `artifacts/phase2/libgbm_mesa_wrapper-fixed-64.so` | 1,068,888 | **our own NDK r27c build** | `camera-gbm` | not external — see *The one open question* |
-| `artifacts/phase2/libgbm_mesa_wrapper-fixed-32.so` | 1,070,036 | **our own NDK r27c build** | `camera-gbm` | not external — same |
+| `artifacts/phase2/libgbm_mesa_wrapper-fixed-64.so` | 1,068,888 | **our own NDK r27c build** | `camera-gbm` | **compliant** — ours, on a signed commit |
+| `artifacts/phase2/libgbm_mesa_wrapper-fixed-32.so` | 1,070,036 | **our own NDK r27c build** | `camera-gbm` | **compliant** — same |
 | `artifacts/acpi/*.aml` (7 files) | 148,480 | **this machine's own firmware** | never | out of scope — evidence, not payload |
 | `artifacts/hid/*.rd` (2 files) | 8,192 | **this machine's own devices** | never | out of scope — same |
 
-**4,439,156 bytes — 4.23 MiB — came from a third party.** Two thirds of that is Widevine.
+**4,439,156 bytes — 4.23 MiB — came from a third party.** Two thirds of that is Widevine. The
+2.04 MiB of `artifacts/phase2/` is not in that figure: it is ours, and it stays (see below).
 
 `bin/__pycache__/magn-calibrate.cpython-313.pyc` is also tracked, and is neither evidence nor
 payload: it is build spoil that predates the `.gitignore` entry covering it. Delete it.
@@ -117,16 +120,46 @@ That is less alarming here than it sounds: **this repository has already had one
 in a non-fast-forward state relative to local, and nothing has been published. It is still the
 owner's call and it is not reversible for anyone who has already cloned.
 
-## The one open question
+## What we built is not external — settled 2026-09-24
 
-`artifacts/phase2/libgbm_mesa_wrapper-fixed-{32,64}.so` — 2.04 MiB — are **not** from an external
-source. They are this project's own NDK r27c build, from `phase2/build.sh`, `phase2/stubs/` and
-`phase2/0001-gbm_import-geometry.patch`, all of which are in the repository. The policy as stated
-is about third-party binaries and does not reach them.
+`artifacts/phase2/libgbm_mesa_wrapper-fixed-{32,64}.so` — 2.04 MiB — are this project's own NDK
+r27c build, from `phase2/build.sh`, `phase2/stubs/` and `phase2/0001-gbm_import-geometry.patch`,
+all of which are in this repository. **The owner's ruling is that build output we produced is not
+external and may be committed, on the condition that the commit is signed.** So `camera-gbm`
+needs no redesign, and [docs/53](53-release-readiness.md)'s position stands: the NDK stays out of
+the package build path for everyone not changing the wrapper.
 
-But they are still committed build output, and building them needs NDK r27c plus minigbm and Mesa
-sources fetched at build time. [docs/53](53-release-readiness.md) currently treats having them
-committed as an *advantage* — "the NDK is not needed in CI at all, because the built wrapper is
-already committed". Whether the policy should extend from "not external" to "not built output" is
-the owner's call, and it is a much larger one: it puts a 757 MB-class toolchain into the package
-build path for every builder.
+**The signature is the whole mechanism, so it is worth being exact about what it does.** A
+committed binary carries no provenance of its own — it is bytes, and nothing in the file says who
+produced it or from what. A signature over the commit that introduced it says a known key vouched
+for exactly those bytes at exactly that point in history, which is the record that was otherwise
+missing. It is checkable years later, by anyone, without trusting the person asking.
+
+The asymmetry is what makes the policy coherent rather than arbitrary:
+
+| | what a signature attests | is that enough? |
+|---|---|---|
+| our own build output | *we* produced these bytes, from sources in this tree | **yes** — that is the provenance claim being made |
+| a third-party binary | we chose to redistribute somebody else's bytes | **no** — it attests the act, not the origin, and redistribution is the thing being avoided |
+
+A signature is not a licence, and it cannot make Widevine's prebuilt ours.
+
+Checked rather than assumed, 2026-09-24:
+
+```
+$ git log --format='%G?' | sort | uniq -c
+    108 G
+$ git log --format='%h %G? %s' -- 'artifacts/phase2/*.so'
+91f9d6a G Goal 1 done: fix the camera by rebuilding libgbm_mesa_wrapper.so
+```
+
+Every commit in the repository verifies, including the one that introduced the wrapper binaries,
+so the attestation holds retroactively and nothing needs re-committing.
+
+**This promotes `bin/check-signed-commits.sh` from an authorship check to a provenance
+mechanism.** It is wired two ways on purpose — a generated `.git/hooks/pre-push` shim and a
+`lefthook.yml` `pre-push` job — so it holds whether or not lefthook is installed, and
+[docs/53](53-release-readiness.md) lists re-running it in CI. Weakening it now costs more than it
+used to. The corollary is a rule with teeth: **build output committed on an unsigned commit is a
+binary with nothing standing behind it**, and is the one way to reintroduce this problem under a
+compliant-looking policy.

@@ -247,9 +247,9 @@ for every installed user. This has to be fixed before any APK is published anywh
 Per-job ephemeral disk: ~2 GB for an RPM job, ~1.5 GB for an APK job, ~8 GB if the camera wrapper
 is ever rebuilt. GitHub-hosted runners give roughly 14 GB on `/` and 65 GB on `/mnt`, so all three
 fit — but **the NDK is not needed in CI at all**, because the built wrapper is already committed
-at `artifacts/phase2/*.so`. (That framing is under review since the no-vendored-binaries policy
-of 2026-09-24 — committed build output is not what the policy forbids, but it is the open
-question in [docs/54](54-no-vendored-binaries.md).)
+at `artifacts/phase2/*.so`. (Confirmed against the no-vendored-binaries policy of 2026-09-24:
+build output this project produced is not external and may be committed, the signed commit being
+what attests to its provenance. [docs/54](54-no-vendored-binaries.md).)
 
 Cache: only the Android toolchain is worth caching, ~300–400 MB compressed against a 10 GB
 default limit. Published repositories: an RPM repo with ten versions retained is ~50 MB, an
