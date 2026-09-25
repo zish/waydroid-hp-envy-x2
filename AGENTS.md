@@ -476,8 +476,8 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [docs/50-bluetooth.md](docs/50-bluetooth.md).
 
 9. **AppFuse — `openProxyFileDescriptor` for apps that synthesise their bytes.** **Added
-   2026-09-24 at the owner's request; diagnosed the same day, fixed and verified 2026-09-25.
-   Not yet packaged.**
+   2026-09-24 at the owner's request; diagnosed the same day, fixed, packaged and verified
+   2026-09-25. `waydroid-ext-appfuse` 1.0.0 builds clean; not yet layered on bigtab01.**
    AppFuse is how an app serves a *real* file descriptor for content it has no file for:
    `vold` mounts a FUSE filesystem at `/mnt/appfuse/<uid>_<mountId>` and the **app itself**
    answers the protocol through a `ProxyFileDescriptorCallback`. Every `DocumentsProvider`
@@ -534,14 +534,24 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    `ausearch`**: delivered to `sh -s` on stdin, a command that reads stdin consumes the rest of
    the script, and the symptom is not an error but the script stopping mid-run and **exiting
    0**. Every stdin-touching command in it now has `</dev/null`.
-   **Still open**: no `waydroid-ext-appfuse` package yet (it should be among the cheapest in
-   [docs/47](docs/47-package-split.md), but the module must **not** load from an RPM `%post` —
-   on an rpm-ostree host a scriptlet runs against the compose and never reaches the booted
-   system); **write access is untested**, everything so far being `MODE_READ_ONLY`, so `onWrite`
-   and `onFsync` have never run here; crippy's own instrumented suite has not been watched
-   turning green, which needs adb-over-TCP enabled in the container; and only this one image
-   has been tested (LineageOS 20 / API 33 / x86_64 / MAINLINE). Also rejected and recorded in
-   case the policy route ever closes: byte-patching the option string out of `vold`.
+   **Packaged as `waydroid-ext-appfuse`** ([packaging/mods/appfuse.mod](packaging/mods/appfuse.mod)),
+   `noarch`, rpmlint landing on exactly the `backlight` baseline. The module **must not load
+   from an RPM `%post`** — on an rpm-ostree host a scriptlet runs against the compose and never
+   reaches the booted system, which is how `waydroid-ext-backlight` was found doing nothing on
+   its first real install — so it loads from `waydroid-appfuse-policy.service` at boot. That
+   loader is idempotent by CIL hash rather than module name, and it **verifies** rather than
+   trusting `semodule`'s exit status: it writes each context vold needs to
+   `/sys/fs/selinux/context`, which needs no privilege and no setools, and `seinfo` is
+   installed on neither machine.
+   **Still open**: the package has only been installed **by hand** into `/usr/local` — layering
+   it with `rpm-ostree` is the real test, and is also what would exercise the loader's
+   shadow-detection warning, which could not be tested here because `/usr` is read-only and only
+   `rpm-ostree` can stage a packaged CIL. **Write access is untested**, everything so far being
+   `MODE_READ_ONLY`, so `onWrite` and `onFsync` have never run here; crippy's own instrumented
+   suite has not been watched turning green, which needs adb-over-TCP enabled in the container;
+   and only this one image has been tested (LineageOS 20 / API 33 / x86_64 / MAINLINE). Also
+   rejected and recorded in case the policy route ever closes: byte-patching the option string
+   out of `vold`.
    See [docs/55-appfuse.md](docs/55-appfuse.md).
 
 **Screen brightness — DONE, and not on the list above.** Added at the owner's request on

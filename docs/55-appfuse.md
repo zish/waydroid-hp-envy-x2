@@ -1,8 +1,9 @@
 # 55 — AppFuse: every `openDocument` failed, and the host's SELinux policy is why
 
 **Date:** 2026-09-24 (diagnosed), 2026-09-25 (fixed and verified)
-**Status:** **Fixed and verified**, on the probe and on a real third-party app. Not yet
-packaged — see [What is left](#what-is-left).
+**Status:** **Fixed, packaged and verified**, on the probe and on a real third-party app.
+`waydroid-ext-appfuse` 1.0.0 builds clean; not yet layered on bigtab01 — see
+[What is left](#what-is-left).
 
 Goal 9. `StorageManager.openProxyFileDescriptor()` did not work in this container, and
 nothing that depends on it could work either.
@@ -216,7 +217,10 @@ here in case the policy route ever becomes unavailable.
   that is the API level `openProxyFileDescriptor` was added in.
 - **[bin/appfuse-test.sh](../bin/appfuse-test.sh)** — the whole loop in one command:
   force-stop, launch, wait, print the report, then print `vold`'s line and the kernel's.
-- **[artifacts/appfuse/](../artifacts/appfuse)** — the module and its installer.
+- **[artifacts/appfuse/](../artifacts/appfuse)** — the module, its loader, the loader's unit
+  and the installer.
+- **[packaging/mods/appfuse.mod](../packaging/mods/appfuse.mod)** — `waydroid-ext-appfuse`,
+  a `noarch` host package. See [Packaging](#packaging).
 
 ## What is verified
 
@@ -263,8 +267,13 @@ through our own harness.
 ### Persistence
 
 `semodule -i` writes the module to `/etc/selinux/targeted/active/modules/400/waydroid_appfuse/`,
-so **it survives a reboot** with no unit and no boot-time loader. It needs neither, unlike
-[42](42-backlight-selinux.md), whose loader exists only because sysfs labels do not persist.
+so **once loaded it survives a reboot by itself** — nothing has to reapply it, unlike
+[42](42-backlight-selinux.md), whose loader also exists because sysfs labels do not persist.
+
+The package nevertheless ships a boot-time unit, and the distinction is worth keeping
+straight: it is not there to *re*-load the policy, it is there to get the **first** load to
+happen on the booted system at all, because an RPM `%post` cannot do that on rpm-ostree. See
+[Packaging](#packaging).
 
 **No container restart is needed, and none should be done.** `vold` performs the AppFuse
 mount on demand, per call, so the next call already uses the new policy. Restarting the
@@ -295,14 +304,86 @@ container would drop a kiosk session to the greeter for nothing.
   the context checks in this document were done with `security_check_context()` through
   `ctypes` — which needs no root and no setools.
 
+## Packaging
+
+`waydroid-ext-appfuse` 1.0.0, `noarch`, `KIND=host`. Built with
+`packaging/build-mod.sh --lint appfuse`, and its rpmlint result is the
+`waydroid-ext-backlight` baseline exactly — two `no-signature` errors and three warnings
+(`no-manual-page-for-binary`, `invalid-url Source0`, `no-%check-section`), all three of
+which [the rpmlintrc](../packaging/waydroid-ext.rpmlintrc) deliberately leaves unfiltered
+because they are real and unfixed repo-wide.
+
+Two filters were widened rather than added, both previously scoped to `backlight` alone and
+both now covering either SELinux package: `explicit-lib-dependency libselinux-utils`
+(`selinuxenabled` is a *command* a scriptlet calls, which nothing can infer from the
+payload) and `dangerous-command-in-%postun rm` (the `rm` is of this package's own hash stamp,
+a fixed literal).
+
+### The module must not be loaded from `%post`, and that is why there is a unit
+
+On an rpm-ostree host a scriptlet runs against the **compose**, not the booted system, so
+`semodule -i` from `%post` never reaches the running machine's policy store. The package
+installs, its policy does nothing, and nothing reports a problem.
+
+That is not a prediction. `waydroid-ext-backlight` was found failing exactly that way on its
+first real install (2026-09-24) — see [42](42-backlight-selinux.md) and
+[packaging/README.md](../packaging/README.md). This package would have failed identically.
+
+So the load happens at boot, from `waydroid-appfuse-policy.service`. `%post` still calls the
+loader, which is right on an ordinary host — the fix lands immediately there — and is a
+harmless no-op on ostree.
+
+**Unlike backlight, nothing needs reapplying every boot.** That module's loader also exists
+because sysfs labels do not persist; this one only declares policy, and `semodule -i` writes
+it where it stays. The unit exists purely to get the load to happen on the booted system
+once.
+
+### The loader verifies instead of assuming
+
+`semodule` exiting 0 is not evidence the fix is in force — the whole fault is an unparseable
+context reported with nothing in the audit log. So
+[waydroid-appfuse-policy](../artifacts/appfuse/waydroid-appfuse-policy) writes each context
+vold needs to `/sys/fs/selinux/context`, which asks the kernel to parse it and returns
+`EINVAL` if it cannot. That file is mode 0666, so the check needs no privilege and no
+setools — which matters, because **`seinfo` is installed on neither machine**. Same
+principle as `waydroid-backlight-policy` reading its label back.
+
+It is idempotent **by CIL hash, not by module name**: `semodule -l` cannot tell this policy
+from a differently-versioned one of the same name, and `semodule -i` rebuilds the whole
+policy store, so a name check would skip a real upgrade and a blind reload would cost
+seconds on every boot.
+
+### What was tested, and the one thing that could not be
+
+Verified on bigtab01 on 2026-09-25, by hand rather than through `rpm-ostree`:
+
+| | result |
+|---|---|
+| `--verify` against a hand-loaded module with no stamp | `differs: … (loaded unknown, packaged 9d41a43…)`, exit 3 |
+| load | loads, stamps, both contexts `ok` |
+| second run | `already loaded and current` — no store rebuild |
+| stamp contents | equals `sha256sum` of the CIL |
+| `--unload` | module gone, and crippy's `openDocument` fails again |
+| loader with no CIL present | `no policy to load`, exit 1 |
+| `systemd-analyze verify` on the unit | silent |
+| unit enabled via the shipped symlink | `enabled` |
+| `systemctl restart` | `Result=success`, `ExecMainStatus=0` |
+
+**The shadow-detection path could not be tested on this host.** The loader prefers a
+`/usr/local` CIL over the packaged one — deliberately, so a hand-staged policy beats a
+packaged one on an immutable host — and warns when the two differ, because that precedence
+silently defeated `waydroid-ext-backlight` 1.0.2 after a migration. Exercising it needs a
+file in `/usr/share/waydroid-appfuse`, and `/usr` is read-only here: only `rpm-ostree` can
+put one there. The code path is carried over from the module it was learned on, and it is
+untested in this package.
+
 ## What is left
 
-- **Packaging.** There is no `waydroid-ext-appfuse` yet. It is one `.cil` and one script, so
-  it should be among the cheapest packages in [47](47-package-split.md) — but note
-  `install.sh`'s header: **the module must not be loaded from an RPM `%post`**, because on an
-  rpm-ostree host a scriptlet runs against the compose and the policy never reaches the
-  booted system. Either ship a boot-time loader the way
-  [artifacts/backlight/](../artifacts/backlight) does, or require the one-time script run.
+- **Layer the package on bigtab01.** It has only ever been installed by hand, into
+  `/usr/local` with the unit in `/etc/systemd/system`. `rpm-ostree install` plus
+  `--apply-live` is the real test, and it is also what would exercise the shadow warning
+  above — the hand-staged `/usr/local` CIL now on that machine is exactly the situation the
+  warning exists for, so expect it to fire and mean it.
 - **Write access is untested.** Everything here opened `MODE_READ_ONLY`, because that is
   what `openProxyFileDescriptor`'s read path needs and what crippy uses. `onWrite` and
   `onFsync` have never been exercised in this container.

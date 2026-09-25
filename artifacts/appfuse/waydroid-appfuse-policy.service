@@ -1,0 +1,36 @@
+# Load the waydroid_appfuse SELinux module, every boot.
+#
+# This exists because the package's %post cannot do it on an rpm-ostree host:
+# scriptlets run against the compose and not against the booted system, so the
+# module never reaches the running machine's policy store. waydroid_backlight was
+# found failing exactly that way on its first real install (2026-09-24) -- package
+# present, policy absent, nothing reporting a problem. waydroid-overlay-sync.service
+# exists for the same reason and is ordered the same way.
+#
+# ORDERING IS A COURTESY HERE, NOT A REQUIREMENT, and that is the difference from
+# waydroid-backlight-policy.service. vold performs the AppFuse mount on demand,
+# per openProxyFileDescriptor call, so a policy that lands late costs only the
+# calls made before it -- the next one works, with no restart of anything. The
+# Before= is still right: an app that opens a document in the first seconds of a
+# session would otherwise fail for a reason nobody would think to look up.
+#
+# NOT Requires=/RequiredBy= anything. An app that cannot open its own documents
+# is a bad day; a container that refuses to start is a worse one.
+
+[Unit]
+Description=Load the waydroid_appfuse SELinux module
+Documentation=file:///usr/share/doc/waydroid-ext-appfuse/55-appfuse.md
+Before=waydroid-container.service
+After=local-fs.target
+ConditionSecurity=selinux
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# --quiet: on a healthy host the stamp already matches and there is nothing to
+# say, so the journal gets a line only when the policy actually changed or the
+# context check failed.
+ExecStart=@BINDIR@/waydroid-appfuse-policy --quiet
+
+[Install]
+WantedBy=multi-user.target

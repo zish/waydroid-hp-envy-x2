@@ -1,0 +1,169 @@
+#!/bin/sh
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# waydroid-appfuse-policy -- load the waydroid_appfuse SELinux module, so that
+# vold's AppFuse mount can be labelled and StorageManager.openProxyFileDescriptor()
+# works. See docs/55-appfuse.md.
+#
+# WHY THIS EXISTS RATHER THAN A %post SCRIPTLET
+#
+# On an rpm-ostree host a scriptlet runs against the compose, not against the
+# booted system, so `semodule -i` from %post never reaches the running machine's
+# policy store. That was found the hard way for waydroid_backlight on 2026-09-24:
+# the package was installed, its policy was absent from the deployment's pristine
+# /usr/etc, and nothing reported a problem. The package looked correct and did
+# nothing. This one would fail the same way.
+#
+# So the load happens at boot, from waydroid-appfuse-policy.service. That works
+# on an ordinary host too; there is no ostree-specific branch here.
+#
+# IDEMPOTENT BY HASH, NOT BY NAME
+#
+# `semodule -l` answers whether a module called waydroid_appfuse is loaded, never
+# whether it is THIS one, so an upgrade carrying a changed policy would look
+# already-done and be skipped. The stamp records the hash of the CIL actually
+# loaded, and a mismatch is what triggers the reinstall. That matters for cost as
+# well as correctness: `semodule -i` rebuilds the whole policy store and takes
+# seconds, which is not a thing to do on every boot for nothing.
+#
+# WHY IT VERIFIES CONTEXTS AND NOT JUST semodule's EXIT STATUS
+#
+# The entire fault this module fixes is a context Fedora's policy cannot parse,
+# and the kernel reports that as EINVAL from mount(2) with NOTHING in ausearch --
+# a parse failure never becomes an AVC. So "semodule exited 0" is not evidence
+# the fix is in force. Writing a context to /sys/fs/selinux/context asks the
+# kernel to parse it and returns EINVAL if it cannot; that file is mode 0666, so
+# the check needs no privilege and no setools. It is the same principle as
+# waydroid-backlight-policy reading the label back: absence of errors is not
+# success.
+#
+# Usage:
+#   waydroid-appfuse-policy            load if the loaded policy is not this one
+#   waydroid-appfuse-policy --verify   report, change nothing (exit 3 on drift)
+#   waydroid-appfuse-policy --unload   remove the module and the stamp
+#   waydroid-appfuse-policy --force    reload even if the stamp already matches
+#
+# Env: CIL, STATE_DIR
+set -eu
+
+MODULE=waydroid_appfuse
+STATE_DIR=${STATE_DIR:-/var/lib/waydroid-appfuse}
+STAMP="$STATE_DIR/policy.sha256"
+
+# The two contexts vold asks mount(2) for. Hardcoded rather than parsed out of
+# the CIL: these are what the Android binary demands, so they are the thing to
+# test against, and a CIL that stopped producing them is exactly the regression
+# this check should catch.
+CONTEXTS='u:object_r:app_fuse_file:s0 u:object_r:app_fusefs:s0'
+
+# /usr/local first so a hand-staged CIL beats a packaged one on an immutable
+# host -- the same precedence waydroid-backlight-policy and waydroid-overlay-sync
+# use.
+PACKAGED=/usr/share/waydroid-appfuse/waydroid_appfuse.cil
+if [ -z "${CIL:-}" ]; then
+	for c in /usr/local/share/waydroid-appfuse/waydroid_appfuse.cil \
+	         "$PACKAGED"; do
+		[ -f "$c" ] && CIL="$c" && break
+	done
+fi
+
+VERIFY=0
+UNLOAD=0
+FORCE=0
+QUIET=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--verify|-n|--dry-run) VERIFY=1; shift ;;
+	--unload)              UNLOAD=1; shift ;;
+	--force)               FORCE=1; shift ;;
+	--quiet|-q)            QUIET=1; shift ;;
+	-h|--help) sed -n '41,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	*) echo "unknown argument: $1" >&2; exit 2 ;;
+	esac
+done
+
+say()  { [ "$QUIET" = 1 ] || echo "$@"; }
+warn() { echo "$@" >&2; }
+
+# Does the kernel accept this context string? Not an opinion -- selinuxfs parses
+# it and returns EINVAL if it cannot. stderr is discarded because a rejection
+# prints "write error: Invalid argument", which is the answer, not a problem.
+context_ok() {
+	printf '%s' "$1" >/sys/fs/selinux/context 2>/dev/null
+}
+
+# Not an error. A host built without SELinux is one where this module would be
+# meaningless rather than wrong, and the unit must not fail on it. It is also the
+# one case where AppFuse needs no help at all: with no policy to parse against,
+# mount(2) ignores the context options entirely.
+if ! command -v selinuxenabled >/dev/null 2>&1 || ! selinuxenabled 2>/dev/null; then
+	say "SELinux is not enabled -- nothing to load, and AppFuse needs nothing"
+	exit 0
+fi
+
+if [ "$UNLOAD" = 1 ]; then
+	semodule -r "$MODULE" 2>/dev/null || :
+	rm -f "$STAMP"
+	say "removed $MODULE -- openProxyFileDescriptor will fail again"
+	exit 0
+fi
+
+if [ -z "${CIL:-}" ] || [ ! -f "$CIL" ]; then
+	warn "no policy to load: waydroid_appfuse.cil is not installed"
+	exit 1
+fi
+
+# Shadowing a package is a legitimate thing to do deliberately and a miserable
+# thing to do by accident. waydroid_backlight lost a day to exactly this on
+# 2026-09-24, when an unowned /usr/local CIL left over from a by-hand install
+# shadowed the fixed packaged one and the stamp matched, so the loader reported
+# "already loaded and current" while the old policy was the one in force.
+if [ -f "$PACKAGED" ] && [ "$CIL" != "$PACKAGED" ]; then
+	warn "note: using $CIL, which shadows the packaged $PACKAGED"
+	if ! cmp -s "$CIL" "$PACKAGED"; then
+		warn "      and they DIFFER -- the packaged policy is not the one in force."
+		warn "      Remove the first to go back to the packaged one."
+	fi
+fi
+
+want=$(sha256sum "$CIL" | cut -d' ' -f1)
+have=""
+if semodule -l 2>/dev/null | grep -qx "$MODULE"; then
+	have=$(cat "$STAMP" 2>/dev/null || echo "unknown")
+fi
+
+if [ "$want" = "$have" ] && [ "$FORCE" != 1 ]; then
+	say "$MODULE already loaded and current"
+else
+	if [ "$VERIFY" = 1 ]; then
+		if [ -z "$have" ]; then say "not loaded: $MODULE"
+		else say "differs: $MODULE (loaded $have, packaged $want)"; fi
+		exit 3
+	fi
+	say "loading $MODULE from $CIL"
+	semodule -i "$CIL"
+	mkdir -p "$STATE_DIR"
+	printf '%s\n' "$want" >"$STAMP"
+fi
+
+# The check that actually matters. A loaded module that does not yield these two
+# contexts leaves every openDocument failing with `Failed to mount` and nothing
+# in ausearch to explain it.
+bad=0
+for ctx in $CONTEXTS; do
+	if context_ok "$ctx"; then
+		say "  ok       $ctx"
+	else
+		warn "  REJECTED $ctx"
+		bad=1
+	fi
+done
+
+if [ "$bad" != 0 ]; then
+	warn "warning: the kernel will not parse the contexts vold needs --"
+	warn "         AppFuse will keep failing with 'Failed to mount'."
+	warn "         Check dmesg for security_context_str_to_sid, NOT ausearch."
+	exit 3
+fi
+exit 0

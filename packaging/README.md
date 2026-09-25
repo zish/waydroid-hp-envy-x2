@@ -136,6 +136,7 @@ plain — and asserts the harness reaches the right verdict on each.
 | `brightness-overlay` | yes | yes | **yes** | same |
 | `wifi-framework` | yes | yes | **yes** | same |
 | `wifi-hostd` | yes | yes | **yes** | same |
+| `appfuse` | yes | yes | **yes** | yes — the backlight baseline exactly: `no-signature`, `invalid-url Source0`, `no-%check-section`, `no-manual-page-for-binary` |
 
 ### The five overlay components added 2026-09-24
 

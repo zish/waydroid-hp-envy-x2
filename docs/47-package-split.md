@@ -167,6 +167,7 @@ it needs three changes rather than a `.mod` file (noted 2026-09-24):
 | `waydroid-ext-cage` | noarch | the kiosk session | [25](25-waydroid-in-cage.md) |
 | `waydroid-ext-binder-nice` | noarch | `RLIMIT_NICE` drop-in — one file, ~1 000 000 log lines a boot | [40](40-binder-nice.md) |
 | `waydroid-ext-backlight-selinux` | noarch | CIL module + udev rule | [42](42-backlight-selinux.md) |
+| `waydroid-ext-appfuse` | noarch | CIL module + boot-time loader — makes `openProxyFileDescriptor` work | [55](55-appfuse.md) |
 | `waydroid-ext-mdns` | noarch | avahi reflector + firewalld rule reconciler | [45](45-mdns-reflection.md) |
 | `waydroid-ext-dexopt` | noarch | dexopt property reconciler, values in `%config(noreplace)` | [43](43-app-freezer.md) |
 | `waydroid-ext-lxc-config` | noarch | **new** — reconciles `lxc.net.0.name` before container start | [34](34-wifi-second-radio.md) |

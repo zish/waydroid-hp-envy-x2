@@ -82,8 +82,9 @@ addFilter("no-dependency-on locales-hal")
 # libselinux-utils is where selinuxenabled lives. rpmlint reads any lib* name as
 # a shared library that the automatic dependency generator should have found,
 # but this is a dependency on a COMMAND used by a scriptlet, which nothing can
-# infer from the payload. Scoped to the one package that needs it.
-addFilter("waydroid-ext-backlight.*explicit-lib-dependency libselinux-utils")
+# infer from the payload. Scoped to the packages that need it -- both of the
+# SELinux ones, whose loaders call selinuxenabled before touching policy.
+addFilter("waydroid-ext-(backlight|appfuse).*explicit-lib-dependency libselinux-utils")
 
 # ------------------------------------------------- udev rules and nothing else
 #
@@ -101,14 +102,14 @@ addFilter("waydroid-ext-(brightness-overlay|wifi-framework|wifi-hostd).*only-non
 
 # ------------------------------------------- rm of our own state on uninstall
 #
-# waydroid-ext-backlight's %postun removes /var/lib/waydroid-backlight/policy.sha256,
+# Both SELinux packages' %postun remove /var/lib/waydroid-<name>/policy.sha256,
 # the stamp recording which CIL the loader last installed. The check is right to
 # be suspicious of rm in a scriptlet -- it is how a package deletes somebody
-# else's data -- but this path is written by this package's own loader, is a
+# else's data -- but this path is written by that package's own loader, is a
 # fixed literal with no variable in it, and is meaningless once the module is
 # gone. Leaving it behind would make a later reinstall believe the policy was
 # already current and skip the load.
-addFilter("waydroid-ext-backlight.*dangerous-command-in-%postun rm")
+addFilter("waydroid-ext-(backlight|appfuse).*dangerous-command-in-%postun rm")
 
 # ------------------------------------------------------------------- spelling
 #
