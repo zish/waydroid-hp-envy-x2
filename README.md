@@ -59,6 +59,14 @@ Useful mainly on a machine running Waydroid as its whole session, where there is
 Bluetooth UI to reach. It can also take the place of Android's own Bluetooth tile in the
 pull-down shade, which is dead weight in these images — there is no Bluetooth stack behind it.
 
+**PipeWire control** — an app that edits the host's audio graph: per-node volume and mute,
+default sink and source, device profiles and routes, and the patchbay proper — creating and
+destroying links between individual ports, including MIDI. Roughly what qpwgraph and
+pavucontrol do, from inside Android, on a machine whose only screen is the one Android is
+using. No audio crosses the bridge and nothing about Android's own audio path changes; what
+the app may do is a host-side policy, and links that would tap a microphone or a monitor port
+are refused unless you turn them on.
+
 **Session and power integration** — Android suspends and locks with the machine, shuts down
 cleanly instead of being killed at logout, and can run full-screen as a kiosk session.
 

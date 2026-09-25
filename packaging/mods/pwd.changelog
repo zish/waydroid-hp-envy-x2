@@ -1,0 +1,15 @@
+* Fri Sep 25 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Host-side PipeWire graph control for Waydroid's Android:
+  nodes, ports, links, volumes, defaults, device profiles and routes, and the
+  graph quantum (docs/55).
+- Needs no PipeWire bindings: `pw-dump --monitor` is already a delta protocol,
+  so the graph mirror is a subprocess and a line loop rather than a libpipewire
+  client vendored against whatever the host runs.
+- Runs unprivileged as a --user unit, because PipeWire is a user service. Only
+  the profile publisher is root, and only because the Android app's private
+  directory is mode 0700 owned by the app's uid.
+- Capability policy ships default-deny for links whose source is a capture
+  device or a monitor port, for node creation, and for module hosting.
+- The Android half is deliberately not packaged, for the reason no app here is:
+  an APK needs the Android SDK and the Kotlin compiler at build time, and a
+  prebuilt one would be the vendored binary docs/54 rules out.

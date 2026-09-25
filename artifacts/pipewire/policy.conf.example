@@ -1,0 +1,48 @@
+# waydroid-pwd capability policy. See docs/56-pipewire-control.md.
+#
+# Copy to /etc/waydroid-pwd/policy.conf (preferred) or to the daemon's state
+# directory, ~/.local/state/waydroid-pwd/policy.conf. Without either file the
+# defaults below apply, which are the values shown here.
+#
+# `key = value`, one per line, yes/no. Not INI and not YAML: this repository has
+# no YAML parser and does not want one (packaging/gen-spec.sh says why about .mod
+# files), and six keys do not need sections.
+#
+# WHAT THE GATES ARE ACTUALLY PROTECTING
+#
+# Anything inside the container that holds the token can call any enabled verb.
+# The token is in the app's private directory, which the kernel protects by uid
+# even though SELinux is disabled inside the container -- so in practice that
+# means the patchbay app, and anything running as its uid. These gates decide
+# what that is allowed to be.
+
+# Volume, mute, default sink/source, device profiles and routes. Reversible,
+# audible, and the thing the app is mostly for.
+mixer = yes
+
+# Creating and destroying links between ports -- the patchbay proper.
+links = yes
+
+# Links whose SOURCE is a capture device or a sink's monitor port. Split out
+# from `links` because making one is mechanically identical to making any other
+# link, so it cannot be caught by looking at the verb: only at the ports. A
+# monitor port carries everything the desktop is playing and an Audio/Source
+# carries the microphone, so this one is a recording tap and stays off until
+# somebody decides otherwise.
+links.capture = no
+
+# clock.force-quantum, clock.force-rate and WirePlumber settings. Affects the
+# whole host graph, not just Android's stream -- which is the point if the goal
+# is lowering the latency floor docs/44 measured at quantum 1024, and a reason
+# to think about it if not.
+graph = yes
+
+# Creating supervised nodes: pw-loopback instances, and with `modules` also on,
+# module instances hosted in their own `pipewire -c` process. These appear in
+# the host's graph and persist until destroyed or until the daemon stops.
+nodes = no
+
+# Module instances specifically (filter-chain, echo-cancel, combine-stream).
+# Needs `nodes` as well. The most powerful verb here by some distance: a filter
+# chain can do anything to anything it is linked to.
+modules = no

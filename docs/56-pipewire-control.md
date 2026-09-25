@@ -1,0 +1,433 @@
+# 55 — PipeWire: controlling the host's graph from inside Android
+
+*2026-09-25. Built; host-side measurements taken on bigtab01 the same day. Not yet run against
+the container — the end-to-end legs are listed under [Verified vs hypothesis](#verified-vs-hypothesis).*
+
+Under cage ([docs/25](25-waydroid-in-cage.md)) this machine has no host UI, so changing a sink,
+making a link or lowering the graph quantum means ssh-ing in and running `pw-link`. That is the gap
+this closes: an Android app that drives the host's PipeWire graph, and a host daemon underneath it.
+
+Two pieces, and a third that is deliberately absent:
+
+| | |
+|---|---|
+| [artifacts/pipewire/](../artifacts/pipewire) | `waydroid-pwd`, an unprivileged Python daemon. `pw-dump -m` on one side, newline-delimited JSON over TCP on the other. Plus `waydroid-pwd-publish`, the forty root lines |
+| [pw-app/](../pw-app) | "Patchbay", a dependency-free Kotlin app. No AndroidX, no Compose, no coroutines |
+| *no overlay component* | nothing changes inside the image: no vendor `.so`, no HAL, no feature XML, no SELinux policy, no mount |
+
+Verify with `bin/pipewire-test.sh`.
+
+## This is the control plane. docs/44 is the data plane
+
+The question that starts this looks like the one [docs/44](44-audio-alsa-backend.md) already
+answered — *should something in the guest speak PipeWire?* — and the answer there was no, firmly:
+`pipewire-pulse` already terminates the PulseAudio protocol natively, the PA protocol is stable
+where PipeWire's is not, and a native client would buy a few milliseconds against a HAL that spends
+85 ms.
+
+**That conclusion is about moving samples, and it does not transfer to controlling the graph.** The
+PulseAudio protocol carries sinks, sources, sink-inputs, cards and per-stream volume — that is a
+mixer, roughly `pavucontrol`. It has no concept of a **port** and no concept of a **link**. So
+where the data plane had a working incumbent to improve on, the control plane has nothing at all:
+today the container cannot see the graph, let alone edit it.
+
+The practical consequence is the nicest thing about this work. A control surface needs **no overlay
+file, no vendor `.so`, no HAL change, no policy XML, no `/dev/snd`, no SELinux work and no mount**.
+It is a host daemon and an ordinary APK. It is independent of every stage of docs/44's roadmap and
+could have been built before any of it.
+
+It is also not a substitute for that roadmap, and the boundary is worth stating plainly: **Android
+still appears in the graph as one client behind an 85 ms HAL and a stereo-only policy XML.** This
+app routes the host's graph beautifully and changes nothing about Android's own audio path. Per-track
+routing out of Android apps is docs/44's routes 2 and 4, not this.
+
+## What the host offers, measured
+
+Read-only on bigtab01, 2026-09-25, over non-PTY ssh ([docs/02](02-ssh-access.md)'s hang is resolved;
+`bin/rsh` was not needed).
+
+| | |
+|---|---|
+| PipeWire / WirePlumber | **1.6.8 / 0.5.14**; `pipewire`, `pipewire-pulse` and `wireplumber` user units all `active` |
+| tools | `pw-dump`, `pw-cli`, `pw-link`, `pw-mon`, `pw-metadata`, `pw-loopback`, `pw-top` (`pipewire-utils`), `wpctl` (`wireplumber`). **`qpwgraph` is not installed** |
+| graph size | 63 objects: 7 Node, 11 Port, 5 Client, 5 Device, 5 Metadata, 14 Module, 13 Factory, **0 Link** |
+| `link-factory` | present. `libpipewire-module-{loopback,filter-chain,echo-cancel,combine-stream}.so` all installed |
+| sockets | `/run/user/1000/pipewire-0` **and `pipewire-0-manager`**, both `srw-rw-rw-` |
+| MIDI, already there | `Midi-Bridge` (ALSA seq "Midi Through") and `bluez_midi.server` (BLE MIDI 1) |
+| quantum | `clock.quantum 1024`, `min 32`, `max 2048`, `force-quantum 0`, `rate 48000`, `allowed-rates [48000]` — matches docs/44 |
+| bridge | `waydroid0` = 192.168.240.1/24, firewalld zone **`trusted`**, container answers in 0.061 ms |
+| ports | btd holds `192.168.240.1:7712`; **7713 was free** and is what this uses |
+
+Zero links, with ports present on both the sink and the source, is not a fault: WirePlumber
+suspends idle nodes and nothing was playing. It is worth knowing before reading an empty patchbay as
+a bug.
+
+## The five findings that decided the design
+
+### 1. `pw-dump -m` is already a delta protocol
+
+This is the one that removed most of the work. `pw-dump --monitor` emits a **sequence of complete
+top-level JSON arrays** — an initial full snapshot, then one array per change batch — and object
+removal arrives as:
+
+```json
+[
+  {
+    "id": 62,
+    "info": null
+  }
+]
+```
+
+Crucially the framing is column-anchored: `[` and `]` are in column 0 and everything nested is
+indented by at least two spaces. So a top-level array is exactly the lines from a `[` at column 0
+through the next `]` at column 0, and **no incremental JSON parser is needed** — accumulate to a
+bare `]` and `json.loads`. Verified by watching five arrays over six seconds while transient clients
+came and went.
+
+So the entire graph mirror is a subprocess and a line loop: no libpipewire, no ctypes, no bindings,
+and **no version coupling to whatever PipeWire the host runs** — which is the objection docs/44
+raised against a guest-side client, sidestepped rather than argued with.
+
+### 2. `pw-link`'s names are unparseable. Its ids are not
+
+```
+$ pw-link -o
+Midi-Bridge:Midi Through: Port-0 (capture)
+alsa_output.pci-0000_00_1b.0.analog-stereo:monitor_FL
+```
+
+The `node:port` separator also occurs **inside** the port name, so splitting on `:` is wrong and
+splitting on the first or last `:` is wrong differently. There is no escaping.
+
+`pw-link` takes numeric ids though (`-I/--id` to list them, `pw-link -d <link-id>` to disconnect),
+so the rule throughout is: **enumerate with `pw-dump` (structured), act with ids.** Names are still
+what a *saved patch* must key on later — ids churn — but they are never used to address anything.
+
+Also measured, and load-bearing: `-L, --linger` is **the default**, so a link outlives the `pw-link`
+that created it. Without that this whole verb would be a no-op that looked like it worked.
+
+### 3. Every client is `unrestricted`
+
+`/usr/share/pipewire/pipewire.conf` line 191:
+
+```
+#access.socket = { pipewire-0 = "default", pipewire-0-manager = "unrestricted" }
+#access.legacy = true
+```
+
+Both commented out, and the comment above them says `access.legacy` is "enabled by default if
+access.socket is not specified". There is no `/etc/pipewire/pipewire.conf.d/`. Consistent with what
+the graph reports: every client, including WirePlumber and the Waydroid one, carries
+`pipewire.access = unrestricted`.
+
+**So anything that reaches the socket today gets the entire API** — including creating a link from
+any sink's monitor port into itself, which is a recording tap on everything the desktop plays.
+
+### 4. The container's client is identifiable, but not trustworthily
+
+Android's audio HAL already has a live, persistent PulseAudio connection, and it is visible:
+
+```
+application.name               = Waydroid
+application.process.binary     = threaded-ml
+application.process.host       = waydroid
+application.process.user       = system
+application.process.id         = 76            <- the pid INSIDE the container
+client.api                     = pipewire-pulse
+pipewire.sec.uid               = 1000          <- pipewire-pulse's
+pipewire.sec.pid               = 280906        <- pipewire-pulse's
+pipewire.sec.socket            = pipewire-0
+pipewire.sec.label             = unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023
+```
+
+Read the two halves against each other. The `application.*` props say "waydroid" clearly — but they
+are what the client said about **itself**, and anything in the container can say the same. The
+`pipewire.sec.*` props are the ones PipeWire vouches for, and they all describe
+**`pipewire-pulse`**, because that is the process holding the connection. So there is no property on
+this client that both identifies the container and can be trusted.
+
+Which kills the mounted-socket design on its own: even with `access.socket` enabled and a
+WirePlumber rule written, the rule could only restrict *the container as a whole*, never one app
+inside it — and the props it would have to match on are forgeable by anything in there.
+
+One more detail from the same probe: with nothing playing there are **no `sink-inputs`**. The client
+connection persists; the stream node appears only during playback. A patchbay must not treat a
+missing Waydroid node as a missing Waydroid. The app answers this with a Clients section and a
+standing phrase in the status line — "Android connected, idle" and "Android streaming" are
+different states, and on a quiet host both would otherwise look like nothing at all.
+
+### 5. The credential drop needs root. The daemon does not
+
+btd's profile lives at
+
+```
+~jmelanso/.local/share/waydroid/data/data/lan.syshlt.bluetooth/files/btd.json
+```
+
+measured as uid 10213, mode 0600, inside a `drwxr-x--x` directory. That is **real kernel DAC
+separation inside the container** — Android uids are real uids, so it holds even though
+`getenforce` there says `Disabled` ([docs/50](50-bluetooth.md)). It is also why only root can put a
+file there.
+
+Meanwhile `systemctl --user is-active pipewire wireplumber` is `active`, so a user unit works on
+this host. And PipeWire is a **user** service: the daemon's entire job — `pw-dump`, `pw-link`,
+`wpctl`, `pw-metadata` — is ordinary client work needing no privilege whatsoever.
+
+So this splits where btd did not. [waydroid-btd.service](../artifacts/bluetooth/waydroid-btd.service)
+says in its own header that root is needed "for exactly one thing" and that "with `--no-profile`
+this could be a user unit". That note is taken up here: `waydroid-pwd` is a `--user` unit, and
+`waydroid-pwd-publish` is the root half that does nothing else.
+
+## The design
+
+```
+    Android                          │  host (jmelanso session)
+                                     │
+    ┌───────────────────────────┐           │   ┌──────────────────┐        ┌───────────┐
+    │ Patchbay (app)            │ TCP/JSON  │   │  waydroid-pwd    │ pw-dump│ PipeWire  │
+    │ com.systemhalted.patchbay │ ─────────►│──►│  graph + policy  │───────►│ 1.6.8     │
+    │                           │◄───────── │◄──│  (--user unit)   │◄───────│WirePlumber│
+    └───────────────────────────┘  events   │   └──────────────────┘  wpctl └───────────┘
+      192.168.240.112                       │     192.168.240.1:7713   pw-link
+                                            │            ▲
+                                            │   ┌────────┴─────────┐
+                                            │   │ waydroid-pwd-    │  root, and only to write a
+                                            │   │ publish (root)   │  0700 app-private directory
+                                            │   └──────────────────┘
+```
+
+The container never gets a PipeWire handle. The attack surface is a JSON verb set somebody wrote,
+not the PipeWire API, and by finding 5 the token is bound to one app by the kernel.
+
+### Why TCP and not binder
+
+Settled by [docs/50](50-bluetooth.md) and unchanged: an ordinary app cannot reach an arbitrary
+binder name. `ServiceManager.getService()` is non-SDK on Android 13, the name would want an overlay
+`service_contexts` entry, `untrusted_app` would want an SELinux `find` rule, and
+[docs/35](35-wifi-stage5.md)'s `dontaudit`ed binder-transfer trap waits underneath all of it. A
+socket costs none of that and is testable with `nc`.
+
+### The wire
+
+Newline-delimited JSON, one long-lived connection, commands up and events down.
+
+```
+→ {"id":1,"cmd":"auth","token":"…"}
+← {"id":1,"ok":true,"version":1,"policy":{"links":true,"links.capture":false,…}}
+← {"ev":"ready","version":1,"ready":true,"policy":{…},"objects":[…],"spawned":[]}
+→ {"id":2,"cmd":"link-create","output":54,"input":53}
+← {"id":2,"ok":true}
+← {"ev":"update","changed":[{"id":91,"kind":"link","output_node":52,"output_port":54,
+                             "input_node":52,"input_port":53,"state":"active"}]}
+→ {"id":3,"cmd":"link-destroy","link":91}
+← {"ev":"update","removed":[91]}
+```
+
+Commands: `auth`, `ping`, `graph`, `policy`, `node-volume`, `node-mute`, `default-set`,
+`default-clear`, `device-profile`, `device-route`, `link-create`, `link-destroy`, `quantum`, `rate`,
+`wp-setting`, `node-create`, `node-destroy`, `nodes`. Events: `ready`, `graph`, `update`, `reset`,
+`error`, `node-spawned`, `node-gone`.
+
+**A verb names its target by type — `node`, `device`, `link`, `output`, `input` — and never `id`.**
+`id` is the request id every reply is correlated on, and an early draft used it for both; the two
+are then uncarryable in one message, and the bug presents as "the daemon says object 7 does not
+exist" when nobody mentioned 7. Found by the local protocol test, which is the only reason it is not
+still in there.
+
+Property projections are explicit allow-lists per object type rather than "send whatever pw-dump
+has", so the wire does not change shape when the host's PipeWire is updated. Module, Factory, Core,
+Profiler and SecurityContext are dropped entirely — 28 of the 63 objects, and no verb touches any of
+them.
+
+Two structural quirks of pw-dump the projection has to absorb: **`props` live under `info` for Node,
+Port, Link, Client and Device but at the top level for Metadata and SecurityContext**, and **ids are
+strings in some places and numbers in others** (`node.id` on a Port is `"56"`; `link.output.node` on
+a Link is `56`). Both were measured; both would silently break a join.
+
+### Capability policy, and why `links.capture` is its own gate
+
+`/etc/waydroid-pwd/policy.conf`, `key = value`, defaults shown:
+
+```
+mixer = yes           # volume, mute, defaults, device profiles and routes
+links = yes           # creating and destroying links
+links.capture = no    # ... where the SOURCE is a capture device or a monitor port
+graph = yes           # clock.force-quantum, clock.force-rate, wpctl settings
+nodes = no            # supervised pw-loopback instances
+modules = no          # module instances hosted in their own pipewire process
+```
+
+`links.capture` is split out because **making that link is mechanically identical to making any
+other one**. There is no separate verb to refuse, no different factory, no flag: the only thing that
+distinguishes "route this synth into that sink" from "route the microphone into a recorder" is which
+ports were named. So the gate has to inspect the ports, and it does: a link is a capture link if its
+source port is a monitor port (`port.monitor`, or a `monitor_*` name) or belongs to a node whose
+`media.class` starts with `Audio/Source`.
+
+The honest framing of what any of this protects: anything in the container holding the token can
+call any enabled verb. The token is in the app's 0700 private directory, so in practice that means
+the Patchbay app and anything running as its uid. These gates decide what that is allowed to be.
+
+### Supervised child processes, not `load-module`
+
+`pw-cli` does offer `load-module`, and using it would have been a mistake: **`pw-cli` loads the
+module into its own `pw_context` and then exits**, taking the module with it. That is almost
+certainly why `pw-loopback` exists as a standalone binary rather than as a documented `pw-cli`
+incantation.
+
+The mechanism that actually persists is the one `/usr/share/pipewire/filter-chain.conf` documents in
+its own header — *"Run the filters with `pipewire -c filter-chain.conf`"*. So `node-create` spawns
+and supervises a child process: `pw-loopback` directly, or `pipewire -c <generated config>` for a
+module instance, with the config written into the daemon's state directory and the standard client
+module preamble (`rt`, `protocol-native`, `client-node`, `adapter`) copied from that file.
+
+This is better than a loaded module on three counts, not just one: it is reversible by killing a pid,
+a crash takes out one node instead of the graph, and nothing survives a daemon restart to be puzzled
+over later. The daemon kills its children on shutdown for exactly that last reason.
+
+### Credential delivery
+
+The daemon writes the profile — address, port, token, TLS pin — to
+`~/.local/state/waydroid-pwd/profile.json` as the session user. `waydroid-pwd-publish` copies it to
+the app's `files/profile.json` with the app's uid and mode 0600, creating `files/` and chown-ing it
+first — [docs/46](46-removable-media.md) already paid for the version of this bug where a root-owned
+directory left the app unable to write its own files.
+
+Publication retries on an interval rather than running once, so installing the app after the daemon
+works without restarting anything, and a `waydroid init` that recreates the data tree repairs itself.
+`pw-app/build.sh --install` waits for exactly this, as `bt-app/build.sh` does for btd.
+
+TLS is optional (`--tls`), self-signed, and **pinned by certificate SHA-256 rather than
+CA-validated** — there is no name to verify on a bridge address and no CA to verify against, so
+pinning is both simpler and strictly stronger. Default is plaintext: on a trusted-zone bridge with a
+token, TLS buys confidentiality against something that would already have to be inside the container.
+
+## The Android half, and why it is a list before it is a canvas
+
+qpwgraph is the obvious model and the wrong place to start. It assumes a mouse with hover,
+right-click menus and a large screen; on this display a 60-object graph of bezier curves is a demo,
+not a tool. So the first screen is a list — sections by kind, a row per node, ports underneath, links
+in their own section — and the canvas view comes later over the same `Graph`.
+
+Connecting by two taps rather than by dragging is the same decision made twice. A drag between two
+port circles needs both on screen at a legible size simultaneously, which here means about eight
+ports; tapping an output port arms it, tapping an input port completes the link, and the arming
+survives scrolling the length of the graph.
+
+`PwClient.kt` is [`BtClient.kt`](../bt-app/src/BtClient.kt) with the names changed — the three-thread
+socket owner, the reconnect backoff, the pinned-TLS trust manager and the main-looper posting are
+transport, not Bluetooth. `About.kt` is the verbatim copy every app here carries.
+
+Two graph facts the UI has to respect, both from the findings above: **ids are ephemeral**, so a
+`reset` event throws the whole store away including whatever port was armed, rather than trying to
+reconcile; and **names are what endure**, so `Graph.nameKey` (node name + `:` + port name) exists
+now even though nothing saves patches yet, so that when something does it is not tempted by the id.
+
+## What this deliberately does not do
+
+| | why |
+|---|---|
+| bind-mount `pipewire-0` into the container | findings 3 and 4: every app in the container would get the whole API, and PipeWire cannot tell them apart |
+| use PipeWire's `SecurityContext` to mint a restricted socket | the global is there (id 3, permissions `rwx`, from `module-protocol-native`) but there is no CLI for it, `pw-cli` cannot even introspect the type, it needs `access.socket` turned on **host-wide**, and it still cannot distinguish apps inside the container |
+| enable `access.socket` | changes access for every client on the machine to fix one container |
+| port libpipewire to bionic | both ABIs, the version coupling docs/44 objects to, and docs/54's no-vendored-binaries policy. A pure-Kotlin native-protocol client is possible in principle — `LocalSocket` does support `SCM_RIGHTS` — but is thousands of lines of POD marshalling against a protocol that is not a stable contract |
+| use binder | docs/50 settled it |
+| package the APK | no app in this repository is packaged: an APK needs the Android SDK and Kotlin compiler at build time, neither a Fedora BuildRequires, and a prebuilt one would be the vendored binary docs/54 rules out |
+| touch anything in the image | there is nothing to touch. No overlay component exists for this work and none is needed |
+
+## Verified vs hypothesis
+
+**Verified on bigtab01, 2026-09-25** (all read-only): PipeWire 1.6.8 and WirePlumber 0.5.14 with all
+three user units active; the full tool set present and `qpwgraph` absent; the 63-object graph and its
+type breakdown; zero links while idle with ports present on both sink and source; `link-factory` and
+the four loopback/filter modules installed; both `pipewire-0` and `pipewire-0-manager` sockets at
+mode 0666; the two MIDI nodes; `clock.quantum` 1024 / min 32 / max 2048 / rate 48000 /
+allowed-rates `[48000]`; `waydroid0` at 192.168.240.1 in the `trusted` zone with the container
+0.061 ms away; 7713 free; `access.socket` commented out and every client `unrestricted`; the Waydroid
+client's full prop set including the `pipewire.sec.*` mismatch; no `sink-inputs` while idle;
+`pw-dump -m`'s array framing and `info: null` removals; `pw-link`'s colon-bearing port names, its id
+forms and `--linger` being the default; `pw-loopback`'s and `pw-metadata`'s option sets; `wpctl`'s
+verb list; `pw-cli`'s verb list; package ownership of every tool; btd's published profile at uid
+10213 mode 0600 in a 0751 directory; root being able to reach the user's PipeWire socket.
+
+**Verified locally, 2026-09-25**, against a fake `pw-dump` reproducing the measured framing:
+
+- **Projection** — node, port, link, client, device and metadata; the metadata
+  top-level-`props` fallback; string-to-int id coercion; cubic volume conversion
+  (`channelVolumes [0.125]` → `0.5`, matching what `wpctl` prints); monitor-port detection; delta
+  apply and `info: null` removal; Module/Factory/Core dropped.
+- **Policy** — `links.capture` refuses both a real capture source and a real monitor port and
+  says which capability did it; `nodes` and `modules` refuse; `quantum` is range-checked against
+  the live `min`/`max`; `rate` is checked against `allowed-rates`; port direction is checked.
+- **Protocol** — an unauthenticated command is refused; a 64-character token is accepted; the
+  `ready` snapshot matches an independently parsed `pw-dump` to within transient clients.
+- **Resync** — with a `pw-dump` that dies on a timer, the daemon emits
+  `error` → `reset` → `graph`, and the `graph` carries the *new* generation's objects. This is
+  the leg that was wrong on the first attempt: `_on_monitor_down` cleared the same flag
+  `_on_reset` used to tell a resync from a first sync, so every resync looked like a first sync
+  and no client was ever told its ids had gone stale. There are two flags now.
+- **The publisher** — the not-installed-yet path, the 0600 drop with the app's uid, and
+  idempotence on a second run.
+- **Packaging** — `build-mod.sh --lint pwd` reports exactly the classes btd reports and nothing
+  new; `test-install.sh pwd` passes 5 of 5 including uninstall with files edited behind rpm's
+  back.
+- **The app** — builds; the APK declares `INTERNET` and nothing else.
+
+**Verified on the device, 2026-09-25**, with the daemon run by hand out of `/tmp` against the real
+graph — nothing installed into `/usr`, no unit enabled:
+
+- **The daemon on the real host** — binds `192.168.240.1:7713` and parses the live `pw-dump -m`,
+  reporting `33 of 63 objects`. The 30 it drops are Modules and Factories. Both numbers are logged,
+  because the app's status line shows only the first and the gap otherwise reads as a loss.
+- **The credential drop** — `waydroid-pwd-publish --once` lands `profile.json` at uid 10220 mode
+  0600 inside the app's own directory: the kernel DAC gate finding 5 rests on, now measured rather
+  than reasoned about.
+- **The app** — installs, launches, and connects **from inside the container** (192.168.240.112),
+  rendering the real graph with sinks, sources, MIDI, clients, links and devices, and a policy
+  footer reading `+graph +links −links.capture +mixer −modules −nodes`.
+- **Control from the tablet** — a tap on MUTE muted sink 56 (`wpctl get-volume 56` →
+  `1.00 [MUTED]`); a second tap restored it. Touch → TCP/JSON → `wpctl` → monitor delta → back.
+- **Reconnect** — killing and restarting the daemon had the app back inside three seconds on its
+  own backoff, with nobody touching the panel.
+- **`client.id` correlation** — a `pipewire-pulse` stream node carries the `client.id` of its own
+  client, checked with a silent `pacat` stream (node 65 → client 62). That is what puts Android's
+  streams under the Waydroid client rather than loose in the list.
+
+Two defects only the screen could find, and both the same root cause: `optString` on a JSON null
+returns the four characters `"null"`, not `""`. So `media.class` rendered as `null · id 31` — and
+worse, the filter that hides `Dummy-Driver` and `Freewheel-Driver` tested `isNotEmpty()` and let
+both through, which is the check the code comment calls "not a rounding error". A local probe had
+reported no literal nulls because it tested Python `None`, so it was vacuous for exactly this case.
+Every projected string now goes through `Graph.text`.
+
+**Still hypothesis:** that two-tap linking works under a finger on the panel; that `pw-link` by id
+creates a link the daemon then sees via the monitor; that `wpctl set-volume` against a node id
+behaves as expected (mute is verified, the slider is not); that `clock.force-quantum` takes and that
+the host survives it; that a real `systemctl --user restart pipewire` produces the `reset` → `graph`
+sequence (the daemon's side is verified above against a fake monitor, but PipeWire's own restart
+behaviour is not); that a `--user` unit starts under the cage session's user manager at boot rather
+than only after a login; and whether `pipewire -c` with a generated config really does host a module
+instance the way `filter-chain.conf` implies.
+
+## First commands
+
+The host-side reads above needed no sudo. What is left needs the container running, and should be
+run when nothing else is mid-install:
+
+```bash
+# the daemon, by hand, against the real graph -- no install, no unit
+artifacts/pipewire/waydroid-pwd --listen 127.0.0.1 --port 7713 --no-auth --no-profile
+
+# does the projection match what pw-dump sees?
+printf '{"id":1,"cmd":"auth"}\n{"id":2,"cmd":"graph"}\n' | nc 127.0.0.1 7713
+
+# the safe link round-trip: the two MIDI Through ports, so no audio device moves
+pw-dump | python3 -c 'import json,sys
+for o in json.load(sys.stdin):
+    p = (o.get("info") or {}).get("props") or {}
+    if "Midi Through" in str(p.get("port.name")): print(o["id"], p.get("port.direction"), p.get("port.name"))'
+
+# then the whole thing
+bin/pipewire-test.sh
+```

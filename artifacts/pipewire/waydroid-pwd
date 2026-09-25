@@ -1,0 +1,1627 @@
+#!/usr/bin/python3
+"""waydroid-pwd -- drive the host's PipeWire graph from inside Waydroid's Android.
+
+See docs/56-pipewire-control.md for the investigation; the Android half is pw-app/.
+
+WHY THIS IS NOT THE AUDIO WORK
+
+docs/44 is about the data plane -- getting samples out of Android with fewer
+shims and less latency -- and it concluded that nobody should write a native
+PipeWire client for the guest, because pipewire-pulse already terminates the
+PulseAudio protocol natively and a native client would buy a few milliseconds
+against a HAL that spends 85 ms.
+
+None of that transfers to graph *control*. The PulseAudio protocol carries
+sinks, sources and sink-inputs -- a mixer -- and has no concept of a port or a
+link, so there is nothing it already does well here: today the container has no
+graph access at all, and there is no incumbent to compare against. Which is also
+why this needs no overlay file, no vendor .so, no HAL change and no SELinux
+work. It is a host daemon and an ordinary APK, and it is independent of
+everything docs/44 proposes.
+
+WHY A HOST DAEMON AND NOT A SOCKET IN THE CONTAINER
+
+The tempting shortcut is to bind-mount /run/user/1000/pipewire-0 into the
+container the way lxc.py already mounts the pulse socket at config_session:3.
+Measured on this host on 2026-09-25, and rejected:
+
+  * access.socket is commented out in /usr/share/pipewire/pipewire.conf (line
+    191), so access.legacy applies and every client is
+    pipewire.access=unrestricted. Anything that opens that socket gets the whole
+    API -- including linking a sink's monitor port into itself, which is a
+    recording tap on everything the desktop plays.
+  * SELinux is Disabled *inside* the container (docs/50 measured it), so there
+    is no per-app gate on a mounted path: the capability would be granted to
+    every app at once, not to the patchbay.
+  * PipeWire cannot tell container apps apart anyway. The Waydroid audio
+    client's pipewire.sec.* props are pipewire-pulse's own -- sec.uid=1000,
+    sec.pid=<pipewire-pulse>, sec.socket=pipewire-0 -- and the only props that
+    say "waydroid" are application.* ones the client supplies about itself.
+
+A token in the app's private directory is the opposite of all three: that
+directory is mode 0700 owned by the app's uid, Android uids are real uids, and
+the kernel enforces that regardless of SELinux being off inside the container.
+
+WHY NO PIPEWIRE BINDINGS
+
+`pw-dump -m` is already a delta protocol. Measured: it emits a sequence of
+complete top-level JSON arrays -- `[` and `]` in column 0, everything nested
+indented -- an initial full snapshot and then one array per change batch, with
+removals arriving as {"id": N, "info": null}. So the entire graph mirror is a
+subprocess and a line loop: no libpipewire, no ctypes, and no version coupling
+to whatever PipeWire the host happens to run.
+
+Acting on the graph is likewise CLI, and by *numeric id* throughout. pw-link's
+name form is unparseable -- `Midi-Bridge:Midi Through: Port-0 (capture)` puts
+the node:port separator inside the port name -- but it takes ids, and --linger
+is its default so a link outlives the pw-link that made it.
+
+DELIBERATELY NOT USED
+
+  * binder, for the reason docs/50 settled: an ordinary app cannot reach an
+    arbitrary binder name. ServiceManager.getService() is non-SDK on Android 13,
+    the name would want an overlay service_contexts entry, untrusted_app would
+    want a `find` allow rule, and docs/35's dontaudit'ed binder-transfer trap is
+    underneath all of it.
+  * pw-cli load-module as the way to add a node. pw-cli loads a module into its
+    OWN pw_context and then exits, which is very likely why pw-loopback exists
+    as a standalone binary at all. Persistent nodes here are supervised child
+    processes instead -- which are also reversible by killing them, and cannot
+    leak across a daemon restart.
+  * PipeWire's SecurityContext (global 3 on this host, from
+    module-protocol-native). It could mint a restricted socket for the
+    container, but it has no CLI, it needs access.socket turned on host-wide --
+    changing access for every client on the machine, not just Waydroid's -- and
+    it still cannot distinguish apps inside the container.
+
+PRIVILEGE
+
+None. PipeWire is a user service, so this runs as a systemd --user unit owned by
+the session's user. The one thing that does need root -- dropping the connection
+profile into the Android app's private directory -- is waydroid-pwd-publish,
+a separate unit, because there is no reason for the daemon holding a PipeWire
+connection to be the process with the privilege.
+"""
+
+import argparse
+import errno
+import hashlib
+import json
+import os
+import queue
+import re
+import secrets
+import shlex
+import signal
+import socket
+import ssl
+import subprocess
+import sys
+import threading
+import time
+
+PROTOCOL_VERSION = 1
+DEFAULT_PORT = 7713
+DEFAULT_PACKAGE = "com.systemhalted.patchbay"
+PROFILE_NAME = "profile.json"
+
+AUTH_TIMEOUT = 10
+MAX_CLIENTS = 8
+OUTBOX_LIMIT = 4096
+
+# pw-dump respawn backoff. A PipeWire restart is the common case and heals in
+# well under a second; the cap exists for the case where pw-dump is missing
+# entirely, so the journal does not fill up.
+MONITOR_BACKOFF_MIN = 0.5
+MONITOR_BACKOFF_MAX = 30.0
+
+# Object types the app is given. Module, Factory, Core, Profiler and
+# SecurityContext are deliberately dropped: they are 28 of the 63 objects on
+# this host and the app has no verb that touches any of them.
+TYPES = {
+    "PipeWire:Interface:Node": "node",
+    "PipeWire:Interface:Port": "port",
+    "PipeWire:Interface:Link": "link",
+    "PipeWire:Interface:Client": "client",
+    "PipeWire:Interface:Device": "device",
+    "PipeWire:Interface:Metadata": "metadata",
+}
+
+# Capability gates. `read` is not listed because it is not optional -- a client
+# that authenticated can always see the graph.
+#
+# links.capture is split out from links for a specific reason: a link whose
+# source is an Audio/Source or a sink's monitor port is a recording tap. Making
+# one is indistinguishable, mechanically, from making any other link, so it
+# cannot be caught by looking at the verb -- only at the ports.
+CAPABILITIES = ("mixer", "links", "links.capture", "graph", "nodes", "modules")
+DEFAULT_POLICY = {
+    "mixer": True,
+    "links": True,
+    "links.capture": False,
+    "graph": True,
+    "nodes": False,
+    "modules": False,
+}
+
+TRUE_WORDS = ("yes", "true", "on", "1", "allow", "enabled")
+FALSE_WORDS = ("no", "false", "off", "0", "deny", "disabled")
+
+
+def log(message):
+    sys.stderr.write("waydroid-pwd: %s\n" % message)
+    sys.stderr.flush()
+
+
+def run(argv, timeout=15):
+    return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, check=False, timeout=timeout)
+
+
+def as_int(value):
+    """pw-dump renders some ids as strings and some as numbers.
+
+    node.id on a Port is a string; link.output.node on a Link is a number. Both
+    have to end up as one type or the app's joins silently miss.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 10)
+        except ValueError:
+            return None
+    return None
+
+
+def as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in TRUE_WORDS
+    return bool(value)
+
+
+class Policy(object):
+    """Which verbs this daemon will carry out, read from a key = value file.
+
+    Not INI and not YAML: the repository has no YAML parser and does not want
+    one (packaging/gen-spec.sh says so about .mod files), and a flat file with
+    six keys does not need sections.
+    """
+
+    def __init__(self, caps=None):
+        self.caps = dict(DEFAULT_POLICY)
+        if caps:
+            self.caps.update(caps)
+
+    @classmethod
+    def load(cls, path):
+        caps = {}
+        if not path:
+            return cls()
+        try:
+            with open(path) as handle:
+                lines = handle.readlines()
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                log("cannot read %s (%s); using the default policy"
+                    % (path, exc.strerror))
+            return cls()
+        for number, line in enumerate(lines, 1):
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if "=" not in line:
+                log("%s:%d: expected `key = value`" % (path, number))
+                continue
+            key, value = (part.strip() for part in line.split("=", 1))
+            key = key.replace("_", ".").lower()
+            if key not in CAPABILITIES:
+                log("%s:%d: unknown capability %r" % (path, number, key))
+                continue
+            value = value.lower()
+            if value in TRUE_WORDS:
+                caps[key] = True
+            elif value in FALSE_WORDS:
+                caps[key] = False
+            else:
+                log("%s:%d: %r is not yes or no" % (path, number, value))
+        log("policy: %s" % ", ".join(
+            "%s=%s" % (cap, "yes" if caps.get(cap, DEFAULT_POLICY[cap])
+                       else "no") for cap in CAPABILITIES))
+        return cls(caps)
+
+    def allows(self, cap):
+        return bool(self.caps.get(cap, False))
+
+    def as_json(self):
+        return dict((cap, self.allows(cap)) for cap in CAPABILITIES)
+
+
+class Denied(Exception):
+    """A verb the policy refuses. Reported to the client, not logged as a fault."""
+
+
+# ---- the graph mirror ----------------------------------------------------
+#
+# One pw-dump -m subprocess is the only source of truth about the graph. Nothing
+# here ever asks PipeWire a question directly: a verb that changes something
+# runs a CLI tool and then waits for the monitor to report the change, so the
+# app's view and the daemon's view cannot drift apart. That is also why every
+# command reply is bare `ok` rather than the new state -- the state arrives as an
+# event, once, by the same path a change made from the host's own qpwgraph would.
+
+
+class Graph(object):
+
+    def __init__(self):
+        self.objects = {}
+
+    def reset(self):
+        self.objects = {}
+
+    def apply(self, batch):
+        """Apply one pw-dump array. Returns (changed ids, removed ids)."""
+        changed, removed = [], []
+        for obj in batch:
+            if not isinstance(obj, dict):
+                continue
+            oid = obj.get("id")
+            if not isinstance(oid, int):
+                continue
+            if "info" in obj and obj["info"] is None:
+                # How pw-dump -m spells "this global is gone". Measured.
+                if self.objects.pop(oid, None) is not None:
+                    removed.append(oid)
+                continue
+            old = self.objects.get(oid)
+            if old is None:
+                self.objects[oid] = obj
+            else:
+                # In practice a change batch carries the whole object again, but
+                # merging costs nothing and means a future pw-dump that sends
+                # only a change-mask cannot erase what we already know.
+                merged = dict(old)
+                merged.update(obj)
+                if isinstance(old.get("info"), dict) \
+                        and isinstance(obj.get("info"), dict):
+                    info = dict(old["info"])
+                    info.update(obj["info"])
+                    merged["info"] = info
+                self.objects[oid] = merged
+            changed.append(oid)
+        return changed, removed
+
+    # ---- reading ---------------------------------------------------------
+
+    @staticmethod
+    def _props(obj):
+        """Props live under info for most types and at top level for some.
+
+        Metadata and SecurityContext put `props` at the top level of the object
+        rather than inside `info`; Node, Port, Link, Client and Device put it
+        inside. Both were measured on this host, so both are checked rather than
+        assumed.
+        """
+        info = obj.get("info")
+        if isinstance(info, dict) and isinstance(info.get("props"), dict):
+            return info["props"]
+        if isinstance(obj.get("props"), dict):
+            return obj["props"]
+        return {}
+
+    @staticmethod
+    def _params(obj, name):
+        info = obj.get("info")
+        if not isinstance(info, dict):
+            return []
+        params = info.get("params")
+        if not isinstance(params, dict):
+            return []
+        value = params.get(name)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def _param(self, obj, name):
+        items = self._params(obj, name)
+        return items[0] if items else None
+
+    def kind(self, oid):
+        obj = self.objects.get(oid)
+        return TYPES.get(obj.get("type")) if obj else None
+
+    def project(self, oid):
+        obj = self.objects.get(oid)
+        if obj is None:
+            return None
+        kind = TYPES.get(obj.get("type"))
+        if kind is None:
+            return None
+        out = getattr(self, "_project_" + kind)(obj)
+        out["id"] = oid
+        out["kind"] = kind
+        return out
+
+    def snapshot(self):
+        out = []
+        for oid in sorted(self.objects):
+            projected = self.project(oid)
+            if projected is not None:
+                out.append(projected)
+        return out
+
+    # Explicit allow-lists, per docs/50's rule. PipeWire 1.6.8 carries plenty of
+    # props that exist only on some transports or some device APIs, and a
+    # "forward whatever is there" projection makes the wire change shape the
+    # next time the host is updated.
+
+    def _project_node(self, obj):
+        info = obj.get("info") or {}
+        props = self._props(obj)
+        out = {
+            "name": props.get("node.name"),
+            "description": props.get("node.description"),
+            "nick": props.get("node.nick"),
+            "media_class": props.get("media.class"),
+            "media_role": props.get("media.role"),
+            "serial": props.get("object.serial"),
+            "state": info.get("state"),
+            "in_ports": info.get("n-input-ports"),
+            "out_ports": info.get("n-output-ports"),
+            "device": as_int(props.get("device.id")),
+            "client": as_int(props.get("client.id")),
+            # Display only. application.* is whatever the client said about
+            # itself -- for the container's audio client it reads
+            # application.process.host=waydroid -- so it labels and filters and
+            # must never authorise anything.
+            "app_name": props.get("application.name"),
+            "app_host": props.get("application.process.host"),
+        }
+        params = self._param(obj, "Props")
+        if params:
+            out["mute"] = params.get("mute")
+            volumes = params.get("channelVolumes")
+            if isinstance(volumes, list) and volumes:
+                out["channel_volumes"] = volumes
+                # channelVolumes are linear amplitude; wpctl both prints and
+                # accepts the cubic value. Report cubic so the app's slider
+                # agrees with `wpctl get-volume`, and keep the raw list for
+                # anyone who wants per-channel detail.
+                out["volume"] = round(max(volumes) ** (1.0 / 3.0), 4)
+        return out
+
+    def _project_port(self, obj):
+        props = self._props(obj)
+        name = props.get("port.name")
+        return {
+            "node": as_int(props.get("node.id")),
+            "direction": props.get("port.direction"),
+            "name": name,
+            "alias": props.get("port.alias"),
+            "channel": props.get("audio.channel"),
+            "dsp": props.get("format.dsp"),
+            "physical": as_bool(props.get("port.physical")),
+            "terminal": as_bool(props.get("port.terminal")),
+            # port.monitor is set on a sink's monitor ports; the name check is
+            # belt and braces for nodes that predate the prop.
+            "monitor": as_bool(props.get("port.monitor"))
+            or bool(isinstance(name, str) and name.startswith("monitor_")),
+        }
+
+    def _project_link(self, obj):
+        info = obj.get("info") or {}
+        props = self._props(obj)
+        return {
+            "output_node": as_int(props.get("link.output.node")),
+            "output_port": as_int(props.get("link.output.port")),
+            "input_node": as_int(props.get("link.input.node")),
+            "input_port": as_int(props.get("link.input.port")),
+            "state": info.get("state"),
+        }
+
+    def _project_client(self, obj):
+        props = self._props(obj)
+        return {
+            "app_name": props.get("application.name"),
+            "app_binary": props.get("application.process.binary"),
+            "app_host": props.get("application.process.host"),
+            "app_user": props.get("application.process.user"),
+            "api": props.get("client.api"),
+            "access": props.get("pipewire.access"),
+        }
+
+    def _project_device(self, obj):
+        props = self._props(obj)
+        out = {
+            "name": props.get("device.name"),
+            "description": props.get("device.description"),
+            "nick": props.get("device.nick"),
+            "api": props.get("device.api"),
+        }
+        for param, key in (("Profile", "profile"), ("Route", "route")):
+            current = self._param(obj, param)
+            if current:
+                out[key] = {
+                    "index": current.get("index"),
+                    "name": current.get("name"),
+                    "description": current.get("description"),
+                }
+        for param, key in (("EnumProfile", "profiles"), ("EnumRoute", "routes")):
+            items = self._params(obj, param)
+            if items:
+                out[key] = [{
+                    "index": item.get("index"),
+                    "name": item.get("name"),
+                    "description": item.get("description"),
+                    "available": item.get("available"),
+                } for item in items]
+        return out
+
+    def _project_metadata(self, obj):
+        entries = {}
+        for item in obj.get("metadata") or []:
+            if isinstance(item, dict) and isinstance(item.get("key"), str):
+                entries[item["key"]] = item.get("value")
+        return {"name": self._props(obj).get("metadata.name"), "entries": entries}
+
+    # ---- questions the policy asks --------------------------------------
+
+    def port(self, port_id):
+        return self.project(port_id) if self.kind(port_id) == "port" else None
+
+    def node(self, node_id):
+        return self.project(node_id) if self.kind(node_id) == "node" else None
+
+    def is_capture_source(self, port_id):
+        """Is reading this port a tap on something somebody is entitled to?
+
+        Two cases, and they are different: a capture device's own output port
+        (the microphone), and a sink's monitor port (everything the desktop is
+        playing). Both are output ports that carry audio nobody asked to share.
+        """
+        port = self.port(port_id)
+        if port is None:
+            return False
+        if port.get("monitor"):
+            return True
+        if port.get("direction") != "out":
+            return False
+        node = self.node(port.get("node"))
+        if node is None:
+            # An output port whose node we cannot see is treated as a tap. The
+            # gate is allowed to be wrong in this direction and not the other.
+            return True
+        return (node.get("media_class") or "").startswith("Audio/Source")
+
+
+class Monitor(threading.Thread):
+    """Reads `pw-dump -m` and posts batches onto the daemon's event queue.
+
+    The framing is the measured one: pw-dump writes a complete JSON array per
+    change batch with `[` and `]` in column 0 and everything nested indented by
+    at least two spaces. So a top-level array is exactly the lines from a `[` at
+    column 0 up to and including the next `]` at column 0, and no incremental
+    JSON parser is needed. Nothing else in the output starts in column 0.
+
+    The first batch after every (re)start is the full snapshot, so it is posted
+    as a reset rather than a delta -- that is what makes a PipeWire restart heal
+    by itself instead of leaving stale ids in the store forever.
+    """
+
+    def __init__(self, events, remote=None):
+        threading.Thread.__init__(self, name="pw-monitor", daemon=True)
+        self.events = events
+        self.remote = remote
+        self.running = True
+        self.proc = None
+        self._missing_reported = False
+
+    def argv(self):
+        argv = ["pw-dump", "-m"]
+        if self.remote:
+            argv[1:1] = ["-r", self.remote]
+        return argv
+
+    def run(self):
+        backoff = MONITOR_BACKOFF_MIN
+        while self.running:
+            started = time.monotonic()
+            try:
+                self._session()
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    if not self._missing_reported:
+                        log("pw-dump is not installed -- install pipewire-utils")
+                        self._missing_reported = True
+                else:
+                    log("pw-dump failed: %s" % exc)
+            if not self.running:
+                break
+            # A session that lasted a while was healthy, so do not punish the
+            # next one for it: only a fast failure loop needs backing off.
+            if time.monotonic() - started > 5:
+                backoff = MONITOR_BACKOFF_MIN
+            self.events.put(("monitor-down", None))
+            time.sleep(backoff)
+            backoff = min(backoff * 2, MONITOR_BACKOFF_MAX)
+
+    def _session(self):
+        proc = subprocess.Popen(self.argv(), stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+        self.proc = proc
+        buffer = None
+        first = True
+        try:
+            for line in proc.stdout:
+                if not self.running:
+                    break
+                if line.startswith("["):
+                    buffer = [line]
+                    continue
+                if buffer is None:
+                    continue
+                buffer.append(line)
+                if not line.startswith("]"):
+                    continue
+                text = "".join(buffer)
+                buffer = None
+                try:
+                    batch = json.loads(text)
+                except ValueError as exc:
+                    log("unparseable pw-dump batch (%s); resyncing" % exc)
+                    continue
+                if not isinstance(batch, list):
+                    continue
+                self.events.put(("reset" if first else "delta", batch))
+                first = False
+        finally:
+            self.proc = None
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+
+    def stop(self):
+        self.running = False
+        proc = self.proc
+        if proc is not None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
+
+class Children(object):
+    """Supervised PipeWire client processes -- pw-loopback and friends.
+
+    This is the answer to "create a node", and it is deliberately not
+    `pw-cli load-module`. pw-cli loads a module into its own pw_context and
+    exits, taking the module with it, which is almost certainly why pw-loopback
+    is a standalone binary rather than a documented pw-cli incantation.
+
+    Child processes are also the better shape for something a tablet can ask
+    for: a node goes away when its process is killed, a crash takes out one node
+    instead of the graph, and nothing survives a daemon restart to be puzzled
+    over later. Handles are ours, not PipeWire's, because PipeWire ids churn.
+    """
+
+    def __init__(self, events):
+        self.events = events
+        self.procs = {}
+        self.sequence = 0
+        self.lock = threading.Lock()
+
+    def spawn(self, kind, argv, label):
+        with self.lock:
+            self.sequence += 1
+            handle = "%s-%d" % (kind, self.sequence)
+        try:
+            proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, text=True)
+        except OSError as exc:
+            raise RuntimeError("cannot start %s: %s" % (argv[0], exc.strerror))
+        with self.lock:
+            self.procs[handle] = {"proc": proc, "kind": kind, "label": label,
+                                  "argv": argv, "started": int(time.time())}
+        log("spawned %s (pid %d): %s" % (handle, proc.pid,
+                                         " ".join(shlex.quote(a) for a in argv)))
+        return handle
+
+    def kill(self, handle):
+        with self.lock:
+            entry = self.procs.pop(handle, None)
+        if entry is None:
+            raise RuntimeError("no such node handle: %s" % handle)
+        proc = entry["proc"]
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        except OSError:
+            pass
+        log("stopped %s" % handle)
+        return True
+
+    def reap(self):
+        """Notice children that died on their own. Returns the handles lost."""
+        lost = []
+        with self.lock:
+            for handle, entry in list(self.procs.items()):
+                proc = entry["proc"]
+                if proc.poll() is None:
+                    continue
+                self.procs.pop(handle, None)
+                stderr = ""
+                try:
+                    stderr = (proc.stderr.read() or "").strip() if proc.stderr \
+                        else ""
+                except (OSError, ValueError):
+                    pass
+                lost.append((handle, entry, proc.returncode, stderr))
+        for handle, _entry, code, stderr in lost:
+            log("%s exited (%s)%s" % (handle, code,
+                                      ": " + stderr if stderr else ""))
+        return [item[0] for item in lost]
+
+    def as_json(self):
+        with self.lock:
+            return [{"handle": handle, "kind": entry["kind"],
+                     "label": entry["label"], "pid": entry["proc"].pid,
+                     "started": entry["started"]}
+                    for handle, entry in sorted(self.procs.items())]
+
+    def shutdown(self):
+        for handle in list(self.procs):
+            try:
+                self.kill(handle)
+            except RuntimeError:
+                pass
+
+
+# The module preamble a client-side PipeWire instance needs, copied from
+# /usr/share/pipewire/filter-chain.conf on this host (1.6.8). That file's own
+# header documents the invocation -- "Run the filters with pipewire -c
+# filter-chain.conf" -- which is what makes a module instance here a supervised
+# child process rather than something loaded into a pw-cli that is about to exit.
+MODULE_HOST_CONFIG = """# Generated by waydroid-pwd. Do not edit; it is rewritten per request.
+context.properties = {
+    log.level = 0
+}
+context.spa-libs = {
+    audio.convert.* = audioconvert/libspa-audioconvert
+    support.*       = support/libspa-support
+}
+context.modules = [
+    { name = libpipewire-module-rt
+        args = { }
+        flags = [ ifexists nofail ]
+    }
+    { name = libpipewire-module-protocol-native }
+    { name = libpipewire-module-client-node }
+    { name = libpipewire-module-adapter }
+    { name = libpipewire-module-%(module)s
+        args = %(args)s
+    }
+]
+"""
+
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$")
+SAFE_MODULE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+SAFE_KEY = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+class Client(object):
+    """One app connection: a reader thread, a writer thread and a mailbox.
+
+    Reads are posted onto the daemon's single event queue rather than handled on
+    the reading thread, so every command handler and every graph mutation runs on
+    one thread and needs no locking -- the same property btd gets from
+    GLib.idle_add, without needing GLib.
+
+    Writes go through a bounded queue instead of sendall() on the main thread,
+    because a client that has stopped reading must not be able to stall graph
+    event delivery for everybody else. It gets dropped instead.
+    """
+
+    def __init__(self, server, conn, peer):
+        self.server = server
+        self.conn = conn
+        self.peer = "%s:%d" % peer[:2]
+        self.authed = not server.require_auth
+        self.alive = True
+        self.connected_at = time.monotonic()
+        self.outbox = queue.Queue(maxsize=OUTBOX_LIMIT)
+        self._close_lock = threading.Lock()
+
+    def start(self):
+        threading.Thread(target=self._writer, name="tx", daemon=True).start()
+        threading.Thread(target=self._reader, name="rx", daemon=True).start()
+
+    def send(self, obj):
+        if not self.alive:
+            return
+        try:
+            self.outbox.put_nowait(json.dumps(obj, separators=(",", ":")))
+        except queue.Full:
+            log("%s is not draining; dropping it" % self.peer)
+            self.close()
+
+    def reply(self, msg, **fields):
+        out = {"ok": True}
+        out.update(fields)
+        if msg.get("id") is not None:
+            out["id"] = msg["id"]
+        self.send(out)
+
+    def fail(self, msg, error):
+        out = {"ok": False, "error": str(error)}
+        if msg.get("id") is not None:
+            out["id"] = msg["id"]
+        self.send(out)
+
+    def _writer(self):
+        while True:
+            line = self.outbox.get()
+            if line is None:
+                break
+            try:
+                self.conn.sendall(line.encode("utf-8") + b"\n")
+            except OSError:
+                break
+        self.close()
+
+    def _reader(self):
+        try:
+            stream = self.conn.makefile("rb")
+        except OSError:
+            self.close()
+            return
+        while self.alive:
+            try:
+                raw = stream.readline(65536)
+            except OSError:
+                break
+            if not raw:
+                break
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                msg = json.loads(raw.decode("utf-8", "replace"))
+            except ValueError:
+                self.send({"ok": False, "error": "malformed JSON"})
+                continue
+            if not isinstance(msg, dict):
+                self.send({"ok": False, "error": "expected a JSON object"})
+                continue
+            self.server.events.put(("cmd", (self, msg)))
+        self.close()
+
+    def close(self):
+        with self._close_lock:
+            if not self.alive:
+                return
+            self.alive = False
+        try:
+            self.outbox.put_nowait(None)
+        except queue.Full:
+            pass
+        try:
+            self.conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.conn.close()
+        except OSError:
+            pass
+        self.server.drop(self)
+
+
+class Server(object):
+
+    def __init__(self, args, policy, token, tls_context, profile_pin):
+        self.args = args
+        self.policy = policy
+        self.token = token
+        self.tls_context = tls_context
+        self.profile_pin = profile_pin
+        self.require_auth = token is not None
+        self.host = args.listen
+        self.port = args.port
+        self.remote = args.remote
+
+        self.events = queue.Queue()
+        self.graph = Graph()
+        self.children = Children(self.events)
+        self.monitor = Monitor(self.events, args.remote)
+        # Two flags, not one, and the difference is load-bearing. `ready` is
+        # whether the graph is live RIGHT NOW; `seen_graph` is sticky and records
+        # that there has ever been one. A resync has to be announced to clients
+        # and a first sync must not be, and deciding that from `ready` alone gets
+        # it exactly backwards -- the monitor dying clears `ready` before the
+        # respawn arrives, so every resync looked like a first sync and no client
+        # was ever told its ids had gone stale.
+        self.ready = False
+        self.seen_graph = False
+
+        self.clients = []
+        self.clients_lock = threading.Lock()
+        self.running = True
+        self.sock = None
+        self._bind_warned = False
+
+        self.commands = {
+            "auth": self.cmd_auth,
+            "ping": self.cmd_ping,
+            "graph": self.cmd_graph,
+            "policy": self.cmd_policy,
+            "node-volume": self.cmd_node_volume,
+            "node-mute": self.cmd_node_mute,
+            "default-set": self.cmd_default_set,
+            "default-clear": self.cmd_default_clear,
+            "device-profile": self.cmd_device_profile,
+            "device-route": self.cmd_device_route,
+            "link-create": self.cmd_link_create,
+            "link-destroy": self.cmd_link_destroy,
+            "quantum": self.cmd_quantum,
+            "rate": self.cmd_rate,
+            "wp-setting": self.cmd_wp_setting,
+            "node-create": self.cmd_node_create,
+            "node-destroy": self.cmd_node_destroy,
+            "nodes": self.cmd_nodes,
+        }
+
+    # ---- client bookkeeping ---------------------------------------------
+
+    def snapshot_clients(self):
+        with self.clients_lock:
+            return list(self.clients)
+
+    def add(self, client):
+        with self.clients_lock:
+            self.clients.append(client)
+
+    def drop(self, client):
+        with self.clients_lock:
+            if client in self.clients:
+                self.clients.remove(client)
+
+    def broadcast(self, event):
+        for client in self.snapshot_clients():
+            if client.authed:
+                client.send(event)
+
+    # ---- the listener ----------------------------------------------------
+
+    def _listen(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.host, self.port))
+        sock.listen(8)
+        sock.settimeout(1.0)
+        return sock
+
+    def serve_forever(self):
+        threading.Thread(target=self._accept_loop, name="accept",
+                         daemon=True).start()
+
+    def _accept_loop(self):
+        while self.running:
+            if self.sock is None:
+                try:
+                    self.sock = self._listen()
+                except OSError as exc:
+                    # waydroid0 is created by waydroid-container.service, so this
+                    # daemon can easily be up before the address it wants
+                    # exists. Wait for it rather than failing the unit.
+                    if not self._bind_warned:
+                        log("cannot bind %s:%d yet (%s) -- retrying"
+                            % (self.host, self.port, exc.strerror or exc))
+                        self._bind_warned = True
+                    time.sleep(3)
+                    continue
+                self._bind_warned = False
+                log("listening on %s:%d (%s, %s)"
+                    % (self.host, self.port,
+                       "TLS" if self.tls_context else "plaintext",
+                       "token" if self.require_auth else "NO AUTH"))
+            try:
+                conn, peer = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                if self.running:
+                    log("accept failed: %s" % exc)
+                    try:
+                        self.sock.close()
+                    except OSError:
+                        pass
+                    self.sock = None
+                    time.sleep(1)
+                continue
+            self._accepted(conn, peer)
+
+    def _accepted(self, conn, peer):
+        conn.settimeout(None)
+        if self.tls_context is not None:
+            try:
+                conn = self.tls_context.wrap_socket(conn, server_side=True)
+            except (ssl.SSLError, OSError) as exc:
+                log("TLS handshake from %s failed: %s" % (peer[0], exc))
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                return
+        if len(self.snapshot_clients()) >= MAX_CLIENTS:
+            log("refusing %s: %d clients already" % (peer[0], MAX_CLIENTS))
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
+        client = Client(self, conn, peer)
+        self.add(client)
+        log("client %s connected" % client.peer)
+        client.start()
+
+    def shutdown(self):
+        self.running = False
+        self.monitor.stop()
+        # Killing the children is not tidiness: each one owns a node in the
+        # host's graph, and leaving them behind would mean a restarted daemon
+        # reporting nodes it cannot destroy.
+        self.children.shutdown()
+        for client in self.snapshot_clients():
+            client.close()
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        self.events.put(("stop", None))
+
+    # ---- the one thread that touches state -------------------------------
+
+    def pump(self, publisher=None):
+        """The main loop. Everything that mutates the graph store runs here."""
+        last_tick = 0.0
+        while self.running:
+            try:
+                kind, payload = self.events.get(timeout=1.0)
+            except queue.Empty:
+                kind, payload = "tick", None
+            if kind == "stop":
+                break
+            try:
+                if kind == "cmd":
+                    client, msg = payload
+                    self.handle(client, msg)
+                elif kind == "reset":
+                    self._on_reset(payload)
+                elif kind == "delta":
+                    self._on_delta(payload)
+                elif kind == "monitor-down":
+                    self._on_monitor_down()
+            except Exception as exc:                   # noqa: BLE001
+                log("%s while handling %s: %s" % (type(exc).__name__, kind, exc))
+            now = time.monotonic()
+            if now - last_tick >= 1.0:
+                last_tick = now
+                self._periodic(publisher)
+
+    def _periodic(self, publisher):
+        for handle in self.children.reap():
+            self.broadcast({"ev": "node-gone", "handle": handle})
+        for client in self.snapshot_clients():
+            if not client.authed and self.require_auth and \
+                    time.monotonic() - client.connected_at > AUTH_TIMEOUT:
+                log("%s never authenticated; closing" % client.peer)
+                client.close()
+        if publisher is not None:
+            publisher.tick()
+
+    def _on_reset(self, batch):
+        self.graph.reset()
+        self.graph.apply(batch)
+        resync = self.seen_graph
+        self.ready = True
+        self.seen_graph = True
+        snapshot = self.graph.snapshot()
+        # Both counts, because they differ by a lot and the difference is not a
+        # loss: pw-dump reports 63 objects on this host and only 33 of them are
+        # types this protocol carries -- the other 30 are Modules and Factories,
+        # which a patchbay has no use for. Logging just the first number makes
+        # the app's own "33 objects" look like something went missing.
+        counted = "%d of %d objects" % (len(snapshot), len(self.graph.objects))
+        if resync:
+            # A PipeWire restart. Every id the app is holding is now stale, so
+            # tell it to throw the lot away rather than trying to reconcile.
+            log("PipeWire resynced; %s" % counted)
+            self.broadcast({"ev": "reset"})
+            self.broadcast({"ev": "graph", "objects": snapshot})
+        else:
+            log("graph up: %s" % counted)
+
+    def _on_delta(self, batch):
+        changed, removed = self.graph.apply(batch)
+        projected = [self.graph.project(oid) for oid in changed]
+        projected = [item for item in projected if item is not None]
+        if not projected and not removed:
+            return
+        event = {"ev": "update"}
+        if projected:
+            event["changed"] = projected
+        if removed:
+            event["removed"] = removed
+        self.broadcast(event)
+
+    def _on_monitor_down(self):
+        # Only report a loss if there was something to lose. Without this, a host
+        # with no pw-dump at all sends a client one error per respawn attempt
+        # forever, which reads as a flapping graph rather than a missing tool.
+        if self.ready:
+            log("lost the pw-dump monitor; graph is stale until it returns")
+            self.broadcast({"ev": "error", "error": "pipewire monitor lost"})
+        self.ready = False
+
+    # ---- dispatch --------------------------------------------------------
+
+    def handle(self, client, msg):
+        command = msg.get("cmd")
+        if not isinstance(command, str):
+            client.fail(msg, "missing cmd")
+            return
+        handler = self.commands.get(command)
+        if handler is None:
+            client.fail(msg, "unknown cmd: %s" % command)
+            return
+        if not client.authed and command != "auth":
+            client.fail(msg, "not authenticated")
+            return
+        try:
+            handler(client, msg)
+        except Denied as exc:
+            log("%s asked for %s: refused (%s)" % (client.peer, command, exc))
+            client.fail(msg, str(exc))
+        except (RuntimeError, ValueError) as exc:
+            client.fail(msg, str(exc))
+        except Exception as exc:                       # noqa: BLE001
+            log("%s while handling %s: %s" % (type(exc).__name__, command, exc))
+            client.fail(msg, "%s: %s" % (type(exc).__name__, exc))
+
+    # ---- helpers the verbs share -----------------------------------------
+
+    def _gate(self, cap):
+        if not self.policy.allows(cap):
+            raise Denied("the %s capability is disabled in this daemon's policy"
+                         % cap)
+
+    def _tool(self, argv, what):
+        if self.remote:
+            argv = [argv[0], "-r", self.remote] + argv[1:]
+        try:
+            proc = run(argv)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise RuntimeError("%s is not installed" % argv[0])
+            raise RuntimeError("%s: %s" % (what, exc.strerror or exc))
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("%s timed out" % what)
+        if proc.returncode != 0:
+            detail = [line for line in
+                      ((proc.stderr or "") + (proc.stdout or "")).splitlines()
+                      if line.strip()]
+            raise RuntimeError("%s: %s" % (
+                what, detail[-1].strip() if detail
+                else "exited %d" % proc.returncode))
+        return proc.stdout or ""
+
+    def _object(self, msg, key, kinds):
+        """Resolve a verb's target object id.
+
+        Targets are named by type -- "node", "device", "link", "output",
+        "input" -- and never "id", because "id" is the request id every reply is
+        correlated on. A verb that used "id" for both would make the two
+        uncarryable in one message.
+        """
+        value = as_int(msg.get(key))
+        if value is None:
+            raise ValueError("%s must be an object id" % key)
+        if not self.ready:
+            raise RuntimeError("the graph is not up yet")
+        actual = self.graph.kind(value)
+        if actual not in kinds:
+            raise ValueError("%d is a %s, not a %s"
+                             % (value, actual or "missing object",
+                                " or ".join(kinds)))
+        return value
+
+    def settings(self):
+        for oid, obj in self.graph.objects.items():
+            if TYPES.get(obj.get("type")) != "metadata":
+                continue
+            projected = self.graph.project(oid)
+            if projected and projected.get("name") == "settings":
+                return projected.get("entries") or {}
+        return {}
+
+    # ---- verbs: always available ----------------------------------------
+
+    def cmd_auth(self, client, msg):
+        supplied = msg.get("token")
+        if not self.require_auth:
+            client.authed = True
+        elif isinstance(supplied, str) and self.token and \
+                secrets.compare_digest(supplied, self.token):
+            client.authed = True
+        else:
+            client.fail(msg, "bad token")
+            log("%s presented a bad token" % client.peer)
+            client.close()
+            return
+        client.reply(msg, version=PROTOCOL_VERSION,
+                     policy=self.policy.as_json())
+        client.send({"ev": "ready", "version": PROTOCOL_VERSION,
+                     "policy": self.policy.as_json(),
+                     "ready": self.ready,
+                     "objects": self.graph.snapshot(),
+                     "spawned": self.children.as_json()})
+
+    def cmd_ping(self, client, msg):
+        client.reply(msg, time=int(time.time()), ready=self.ready)
+
+    def cmd_graph(self, client, msg):
+        client.reply(msg, objects=self.graph.snapshot(), ready=self.ready)
+
+    def cmd_policy(self, client, msg):
+        client.reply(msg, policy=self.policy.as_json())
+
+    # ---- verbs: mixer ----------------------------------------------------
+
+    def cmd_node_volume(self, client, msg):
+        self._gate("mixer")
+        node = self._object(msg, "node", ("node",))
+        if msg.get("delta") is not None:
+            step = float(msg["delta"])
+            if not -1.0 <= step <= 1.0:
+                raise ValueError("delta must be between -1.0 and 1.0")
+            # wpctl's own relative form, so the clamping is its business and not
+            # something this daemon has to reimplement from the current value.
+            spec = "%.4f%s" % (abs(step), "+" if step >= 0 else "-")
+        else:
+            volume = float(msg.get("volume"))
+            if not 0.0 <= volume <= 1.5:
+                raise ValueError("volume must be between 0.0 and 1.5")
+            spec = "%.4f" % volume
+        self._tool(["wpctl", "set-volume", str(node), spec], "set-volume")
+        client.reply(msg)
+
+    def cmd_node_mute(self, client, msg):
+        self._gate("mixer")
+        node = self._object(msg, "node", ("node",))
+        wanted = msg.get("mute")
+        if wanted == "toggle":
+            spec = "toggle"
+        elif isinstance(wanted, bool):
+            spec = "1" if wanted else "0"
+        else:
+            raise ValueError("mute must be true, false or \"toggle\"")
+        self._tool(["wpctl", "set-mute", str(node), spec], "set-mute")
+        client.reply(msg)
+
+    def cmd_default_set(self, client, msg):
+        self._gate("mixer")
+        node = self._object(msg, "node", ("node",))
+        self._tool(["wpctl", "set-default", str(node)], "set-default")
+        client.reply(msg)
+
+    def cmd_default_clear(self, client, msg):
+        self._gate("mixer")
+        argv = ["wpctl", "clear-default"]
+        if msg.get("node") is not None:
+            argv.append(str(self._object(msg, "node", ("node",))))
+        self._tool(argv, "clear-default")
+        client.reply(msg)
+
+    def cmd_device_profile(self, client, msg):
+        self._gate("mixer")
+        device = self._object(msg, "device", ("device",))
+        index = as_int(msg.get("index"))
+        if index is None or index < 0:
+            raise ValueError("index must be a profile index")
+        self._tool(["wpctl", "set-profile", str(device), str(index)],
+                   "set-profile")
+        client.reply(msg)
+
+    def cmd_device_route(self, client, msg):
+        self._gate("mixer")
+        device = self._object(msg, "device", ("device",))
+        index = as_int(msg.get("index"))
+        if index is None or index < 0:
+            raise ValueError("index must be a route index")
+        self._tool(["wpctl", "set-route", str(device), str(index)], "set-route")
+        client.reply(msg)
+
+    # ---- verbs: links ----------------------------------------------------
+
+    def cmd_link_create(self, client, msg):
+        self._gate("links")
+        source = self._object(msg, "output", ("port",))
+        sink = self._object(msg, "input", ("port",))
+        out_port = self.graph.port(source)
+        in_port = self.graph.port(sink)
+        if out_port.get("direction") != "out":
+            raise ValueError("%d is not an output port" % source)
+        if in_port.get("direction") != "in":
+            raise ValueError("%d is not an input port" % sink)
+        if self.graph.is_capture_source(source):
+            # Making this link is mechanically identical to making any other, so
+            # the gate has to be on the ports rather than on the verb. See the
+            # note on CAPABILITIES.
+            self._gate("links.capture")
+        argv = ["pw-link", "--linger", "--wait", str(source), str(sink)]
+        if as_bool(msg.get("passive")):
+            argv.insert(1, "--passive")
+        self._tool(argv, "pw-link")
+        client.reply(msg)
+
+    def cmd_link_destroy(self, client, msg):
+        self._gate("links")
+        link = self._object(msg, "link", ("link",))
+        self._tool(["pw-link", "-d", str(link)], "pw-link -d")
+        client.reply(msg)
+
+    # ---- verbs: graph settings ------------------------------------------
+
+    def _force_setting(self, client, msg, key, bounds):
+        self._gate("graph")
+        value = as_int(msg.get("value"))
+        if value is None or value < 0:
+            raise ValueError("value must be a non-negative integer (0 unforces)")
+        if value:
+            settings = self.settings()
+            low = as_int(settings.get(bounds[0]))
+            high = as_int(settings.get(bounds[1]))
+            if low is not None and high is not None and not low <= value <= high:
+                raise ValueError("%s must be 0 or between %d and %d"
+                                 % (key, low, high))
+        self._tool(["pw-metadata", "-n", "settings", "0", key, str(value)],
+                   "pw-metadata")
+        client.reply(msg)
+
+    def cmd_quantum(self, client, msg):
+        # The host graph runs clock.quantum 1024 with min-quantum 32, which
+        # docs/44 measured and called a default nobody had a reason to lower.
+        # This is that reason: it is the one control here that moves the latency
+        # floor the DAW goal cares about.
+        self._force_setting(client, msg, "clock.force-quantum",
+                            ("clock.min-quantum", "clock.max-quantum"))
+
+    def cmd_rate(self, client, msg):
+        self._gate("graph")
+        value = as_int(msg.get("value"))
+        if value is None or value < 0:
+            raise ValueError("value must be a non-negative integer (0 unforces)")
+        allowed = self.settings().get("clock.allowed-rates")
+        if value and isinstance(allowed, list) and allowed and \
+                value not in [as_int(item) for item in allowed]:
+            raise ValueError("clock.allowed-rates is %s" % (allowed,))
+        self._tool(["pw-metadata", "-n", "settings", "0", "clock.force-rate",
+                    str(value)], "pw-metadata")
+        client.reply(msg)
+
+    def cmd_wp_setting(self, client, msg):
+        self._gate("graph")
+        key = msg.get("key")
+        if not isinstance(key, str) or not SAFE_KEY.match(key):
+            raise ValueError("key must be a WirePlumber setting name")
+        value = msg.get("value")
+        if not isinstance(value, str) or len(value) > 256:
+            raise ValueError("value must be a short string")
+        self._tool(["wpctl", "settings", key, value], "wpctl settings")
+        client.reply(msg)
+
+    # ---- verbs: supervised nodes ----------------------------------------
+
+    def cmd_nodes(self, client, msg):
+        client.reply(msg, spawned=self.children.as_json())
+
+    def cmd_node_create(self, client, msg):
+        self._gate("nodes")
+        kind = msg.get("kind", "loopback")
+        if kind == "loopback":
+            argv, label = self._loopback_argv(msg)
+        elif kind == "module":
+            self._gate("modules")
+            argv, label = self._module_argv(msg)
+        else:
+            raise ValueError("kind must be \"loopback\" or \"module\"")
+        handle = self.children.spawn(kind, argv, label)
+        client.reply(msg, handle=handle, label=label)
+        self.broadcast({"ev": "node-spawned", "handle": handle, "kind": kind,
+                        "label": label})
+
+    def cmd_node_destroy(self, client, msg):
+        self._gate("nodes")
+        handle = msg.get("handle")
+        if not isinstance(handle, str) or not SAFE_NAME.match(handle):
+            raise ValueError("handle must be one this daemon issued")
+        self.children.kill(handle)
+        client.reply(msg)
+        self.broadcast({"ev": "node-gone", "handle": handle})
+
+    def _name(self, msg, key, default):
+        value = msg.get(key, default)
+        if value is None:
+            return None
+        if not isinstance(value, str) or not SAFE_NAME.match(value):
+            raise ValueError("%s must match %s" % (key, SAFE_NAME.pattern))
+        return value
+
+    def _loopback_argv(self, msg):
+        name = self._name(msg, "name", "patchbay-loopback")
+        argv = ["pw-loopback", "-n", name]
+        channels = as_int(msg.get("channels"))
+        if channels is not None:
+            if not 1 <= channels <= 64:
+                raise ValueError("channels must be between 1 and 64")
+            argv += ["-c", str(channels)]
+        latency = as_int(msg.get("latency"))
+        if latency is not None:
+            if not 1 <= latency <= 2000:
+                raise ValueError("latency is in ms, between 1 and 2000")
+            argv += ["-l", str(latency)]
+        capture = self._name(msg, "capture", None)
+        if capture:
+            argv += ["-C", capture]
+        playback = self._name(msg, "playback", None)
+        if playback:
+            argv += ["-P", playback]
+        return argv, name
+
+    def _module_argv(self, msg):
+        """A module instance as a client-side PipeWire process.
+
+        `pw-cli load-module` is not used and is not offered: it loads into
+        pw-cli's own context and then exits, taking the module with it. The
+        mechanism that actually persists is the one filter-chain.conf documents
+        in its own header -- pipewire -c <config> -- so the config is generated
+        here and the process is supervised like any other child.
+        """
+        module = msg.get("module")
+        if not isinstance(module, str) or not SAFE_MODULE.match(module):
+            raise ValueError("module must be a bare module name, e.g. loopback")
+        args = msg.get("args", {})
+        if not isinstance(args, dict):
+            raise ValueError("args must be a JSON object")
+        # SPA-JSON is a superset of JSON, so the args object goes in as plain
+        # JSON rather than being rendered into SPA-JSON by hand.
+        rendered = json.dumps(args) if args else "{ }"
+        # A fresh filename per spawn: two requests for the same module must not
+        # race over one config, and `pipewire -c` only reads it at startup so
+        # there is nothing to keep stable afterwards.
+        path = os.path.join(self.args.state_dir,
+                            "module-%s-%s.conf" % (module, secrets.token_hex(4)))
+        os.makedirs(self.args.state_dir, exist_ok=True)
+        with open(path, "w") as handle:
+            handle.write(MODULE_HOST_CONFIG % {"module": module,
+                                               "args": rendered})
+        return ["pipewire", "-c", path], "module-%s" % module
+
+
+# ---- credential delivery -------------------------------------------------
+#
+# This daemon does NOT write into the Android app's private directory, and that
+# is the one place it differs from btd on purpose. That directory is mode 0700
+# owned by the app's uid, so writing it needs root -- and the daemon's actual
+# job needs no privilege at all, because PipeWire is a user service. So the
+# profile is written here, user-owned, and waydroid-pwd-publish (a root unit,
+# forty lines) copies it the rest of the way.
+#
+# The alternative was a broadcast, as artifacts/media uses. It is worse here for
+# docs/50's reason: a broadcast only lands if the app is running when it is sent,
+# where a file is still there after a reboot, an app restart or a daemon restart.
+
+
+class ProfileWriter(object):
+
+    def __init__(self, path, payload):
+        self.path = path
+        self.payload = payload
+        self.written = False
+
+    def tick(self):
+        if self.written:
+            return True
+        wanted = json.dumps(self.payload, sort_keys=True)
+        try:
+            with open(self.path) as handle:
+                if handle.read().strip() == wanted:
+                    self.written = True
+                    return True
+        except OSError:
+            pass
+        try:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            tmp = self.path + ".tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                handle.write(wanted)
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            log("cannot write %s: %s" % (self.path, exc.strerror or exc))
+            return True
+        log("wrote the connection profile to %s" % self.path)
+        self.written = True
+        return True
+
+
+def ensure_token(path):
+    try:
+        with open(path) as handle:
+            token = handle.read().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    token = secrets.token_hex(32)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(token + "\n")
+    log("generated a new token in %s" % path)
+    return token
+
+
+def ensure_tls_material(state_dir, cert, key, host):
+    if cert and key:
+        return cert, key
+    cert = os.path.join(state_dir, "cert.pem")
+    key = os.path.join(state_dir, "key.pem")
+    if os.path.exists(cert) and os.path.exists(key):
+        return cert, key
+    os.makedirs(state_dir, exist_ok=True)
+    # Self-signed on purpose. There is no CA here and no name to verify on a
+    # bridge address, so the app pins this certificate's SHA-256 instead, which
+    # is strictly stronger than trusting a CA that would sign anything.
+    proc = run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", key, "-out", cert, "-days", "3650",
+                "-subj", "/CN=waydroid-pwd",
+                "-addext", "subjectAltName=IP:%s" % host], timeout=60)
+    if proc.returncode != 0:
+        raise SystemExit("openssl failed: %s" % (proc.stderr or "").strip())
+    os.chmod(key, 0o600)
+    log("generated a self-signed certificate in %s" % state_dir)
+    return cert, key
+
+
+def cert_fingerprint(cert_path):
+    with open(cert_path) as handle:
+        der = ssl.PEM_cert_to_DER_cert(handle.read())
+    return hashlib.sha256(der).hexdigest()
+
+
+def waydroid_bridge_address(iface):
+    try:
+        proc = run(["ip", "-4", "-o", "addr", "show", iface])
+    except OSError:
+        return None
+    match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)/", proc.stdout or "")
+    return match.group(1) if match else None
+
+
+def default_state_dir():
+    # systemd sets STATE_DIRECTORY from the unit's StateDirectory=, which for a
+    # --user unit lands in ~/.local/state. Honour it rather than recomputing it.
+    from_systemd = os.environ.get("STATE_DIRECTORY")
+    if from_systemd:
+        return from_systemd.split(":")[0]
+    base = os.environ.get("XDG_STATE_HOME") \
+        or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "waydroid-pwd")
+
+
+def default_policy_path(state_dir):
+    for path in ("/etc/waydroid-pwd/policy.conf",
+                 os.path.join(state_dir, "policy.conf")):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--listen", metavar="ADDR",
+                        help="address to bind (default: the bridge's address)")
+    parser.add_argument("--bridge", default="waydroid0",
+                        help="interface to take the default address from")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--state-dir", default=None)
+    parser.add_argument("--policy", metavar="FILE",
+                        help="capability policy (default: /etc/waydroid-pwd/"
+                             "policy.conf, then <state-dir>/policy.conf)")
+    parser.add_argument("--package", default=DEFAULT_PACKAGE,
+                        help="Android package the profile is meant for")
+    parser.add_argument("--remote", metavar="NAME",
+                        help="PipeWire remote to drive (default: the session's)")
+    parser.add_argument("--no-auth", action="store_true",
+                        help="accept unauthenticated clients (testing only)")
+    parser.add_argument("--no-profile", action="store_true",
+                        help="do not write the connection profile")
+    parser.add_argument("--tls", action="store_true",
+                        help="wrap the listener in TLS; generates and pins a "
+                             "self-signed certificate unless one is given")
+    parser.add_argument("--tls-cert", metavar="PEM")
+    parser.add_argument("--tls-key", metavar="PEM")
+    args = parser.parse_args()
+
+    if args.state_dir is None:
+        args.state_dir = default_state_dir()
+    os.makedirs(args.state_dir, exist_ok=True)
+
+    if not args.listen:
+        args.listen = waydroid_bridge_address(args.bridge)
+        if not args.listen:
+            log("%s has no address yet; assuming 192.168.240.1" % args.bridge)
+            args.listen = "192.168.240.1"
+
+    policy = Policy.load(args.policy or default_policy_path(args.state_dir))
+
+    token = None
+    if not args.no_auth:
+        token = ensure_token(os.path.join(args.state_dir, "token"))
+
+    tls_context = None
+    pin = None
+    if args.tls:
+        cert, key = ensure_tls_material(args.state_dir, args.tls_cert,
+                                        args.tls_key, args.listen)
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        tls_context.load_cert_chain(cert, key)
+        pin = cert_fingerprint(cert)
+        log("TLS enabled; pin sha256:%s" % pin)
+    elif args.tls_cert or args.tls_key:
+        raise SystemExit("--tls-cert/--tls-key mean nothing without --tls")
+
+    server = Server(args, policy, token, tls_context, pin)
+
+    publisher = None
+    if not args.no_profile:
+        publisher = ProfileWriter(
+            os.path.join(args.state_dir, PROFILE_NAME),
+            {
+                "version": PROTOCOL_VERSION,
+                "host": args.listen,
+                "port": args.port,
+                "tls": bool(args.tls),
+                "pin": pin,
+                "token": token or "",
+                "package": args.package,
+            })
+        publisher.tick()
+
+    def stop(*_unused):
+        log("shutting down")
+        server.shutdown()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    server.monitor.start()
+    server.serve_forever()
+    server.pump(publisher)
+
+
+if __name__ == "__main__":
+    main()

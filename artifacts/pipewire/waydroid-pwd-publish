@@ -1,0 +1,182 @@
+#!/usr/bin/python3
+"""waydroid-pwd-publish -- hand waydroid-pwd's connection profile to the app.
+
+See docs/56-pipewire-control.md. This exists because of a split that is worth
+stating plainly: waydroid-pwd needs no privilege at all -- PipeWire is a user
+service, so the daemon runs as the session's user -- but the Android app's
+private directory is mode 0700 owned by the app's uid, and only root can put a
+file there.
+
+btd solved that by running the whole daemon as root and noting in its unit that
+it would otherwise be a user unit (artifacts/bluetooth/waydroid-btd.service says
+so). This is that note taken up: the daemon stays unprivileged and forty lines of
+root does the one privileged thing.
+
+WHAT MAKES A FILE WORK HERE AT ALL
+
+Measured, and docs/50 records it: SELinux is Disabled *inside* the container, and
+the host labels the whole Waydroid data tree data_home_t uniformly, so a file
+written here needs no labelling, no content provider and no URI. What it does
+need is the right uid, because Android uids are real uids and the kernel
+enforces the 0700 on the app's directory whether SELinux is looking or not --
+which is also the property that makes the token meaningful in the first place.
+
+WHY IT RETRIES INSTEAD OF RUNNING ONCE
+
+So that installing the app after the daemon is already running works without
+restarting anything, and so a `waydroid init` that recreates the data tree is
+repaired on its own. bt-app/build.sh --install waits for exactly this, and
+pw-app/build.sh does the same.
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+DEFAULT_PACKAGE = "com.systemhalted.patchbay"
+PROFILE_NAME = "profile.json"
+DEFAULT_INTERVAL = 30
+
+
+def log(message):
+    sys.stderr.write("waydroid-pwd-publish: %s\n" % message)
+    sys.stderr.flush()
+
+
+def session_user():
+    """The user Waydroid is running as. Same resolution as waydroid-btd."""
+    try:
+        proc = subprocess.run(["waydroid", "status"], stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, text=True,
+                              check=False, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"Session user:\s*(\S+?)\(", proc.stdout or "")
+    return match.group(1) if match else None
+
+
+def candidate_sources(user):
+    """Where the daemon's profile may be, most specific first."""
+    if user:
+        home = os.path.expanduser("~%s" % user)
+        yield os.path.join(home, ".local/state/waydroid-pwd", PROFILE_NAME)
+    for path in sorted(glob.glob("/home/*/.local/state/waydroid-pwd/"
+                                 + PROFILE_NAME)):
+        yield path
+
+
+def data_dir_for(user):
+    if user:
+        path = os.path.expanduser("~%s/.local/share/waydroid/data" % user)
+        if os.path.isdir(path):
+            return path
+    for path in sorted(glob.glob("/home/*/.local/share/waydroid/data")):
+        return path
+    return None
+
+
+def publish(source, data_dir, package):
+    """Copy the profile into the app's private directory. True if it landed."""
+    with open(source) as handle:
+        payload = handle.read().strip()
+    # The daemon records which package it minted the token for, so the two
+    # cannot drift apart when one of them is reconfigured.
+    try:
+        package = json.loads(payload).get("package") or package
+    except ValueError:
+        log("%s is not JSON; refusing to publish it" % source)
+        return False
+
+    base = os.path.join(data_dir, "data", package)
+    if not os.path.isdir(base):
+        return False
+    stat = os.stat(base)
+    files = os.path.join(base, "files")
+    if not os.path.isdir(files):
+        # Android creates this lazily on the first getFilesDir(). Creating it
+        # here is safe only because it is handed straight back to the app --
+        # docs/46 paid for the version of this bug where a root-owned directory
+        # left the app unable to write its own files.
+        os.mkdir(files, 0o771)
+        os.chown(files, stat.st_uid, stat.st_gid)
+    target = os.path.join(files, PROFILE_NAME)
+    try:
+        with open(target) as handle:
+            if handle.read().strip() == payload:
+                return True
+    except OSError:
+        pass
+    tmp = target + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(payload)
+    os.chown(tmp, stat.st_uid, stat.st_gid)
+    os.replace(tmp, target)
+    log("published %s to %s (uid %d)" % (source, target, stat.st_uid))
+    return True
+
+
+def once(args, state):
+    user = args.user or session_user()
+    source = args.source
+    if not source:
+        for candidate in candidate_sources(user):
+            if os.path.exists(candidate):
+                source = candidate
+                break
+    if not source or not os.path.exists(source):
+        if state.get("said") != "no-source":
+            log("no profile from waydroid-pwd yet; waiting")
+            state["said"] = "no-source"
+        return False
+    data_dir = args.data_dir or data_dir_for(user)
+    if not data_dir:
+        if state.get("said") != "no-data":
+            log("no Waydroid data directory found; waiting")
+            state["said"] = "no-data"
+        return False
+    try:
+        landed = publish(source, data_dir, args.package)
+    except OSError as exc:
+        log("could not publish: %s" % (exc.strerror or exc))
+        return False
+    if not landed and state.get("said") != "no-app":
+        log("%s is not installed yet; will keep offering the profile"
+            % args.package)
+        state["said"] = "no-app"
+    if landed:
+        state["said"] = None
+    return landed
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--source", metavar="FILE",
+                        help="the daemon's profile (autodetected)")
+    parser.add_argument("--data-dir", help="Waydroid data dir (autodetected)")
+    parser.add_argument("--user", help="session user (autodetected)")
+    parser.add_argument("--package", default=DEFAULT_PACKAGE)
+    parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL)
+    parser.add_argument("--once", action="store_true",
+                        help="publish once and exit (for tests)")
+    args = parser.parse_args()
+
+    if os.geteuid() != 0 and not args.once:
+        log("not running as root; the app's private directory is mode 0700 so "
+            "this will not be able to write it")
+
+    state = {}
+    if args.once:
+        raise SystemExit(0 if once(args, state) else 1)
+    while True:
+        once(args, state)
+        time.sleep(max(5, args.interval))
+
+
+if __name__ == "__main__":
+    main()

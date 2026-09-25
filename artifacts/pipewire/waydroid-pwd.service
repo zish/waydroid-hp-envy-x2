@@ -1,0 +1,42 @@
+[Unit]
+# PipeWire graph control for Waydroid. See docs/56-pipewire-control.md.
+#
+# A USER unit, and unlike waydroid-btd that is not a compromise -- it is the
+# point. PipeWire is a user service: the socket this daemon drives is
+# $XDG_RUNTIME_DIR/pipewire-0, owned by the session's user, and every tool it
+# runs (pw-dump, pw-link, wpctl, pw-metadata) is an ordinary client. There is
+# nothing here that root would be able to do and the user would not.
+#
+# waydroid-btd's unit records the one thing that DOES need root -- writing the
+# connection profile into the Android app's 0700 private directory -- and notes
+# that with --no-profile it could be a user unit. That note is taken up here:
+# waydroid-pwd-publish.service is the privileged forty lines, and this is not.
+#
+# No SELinuxContext= is needed, for the same reason waydroid-btd needs none:
+# docs/35's binder-transfer trap applies to a unit that speaks binder to the
+# Android framework, and this one speaks TCP and spawns CLI tools.
+Description=PipeWire graph control for Waydroid's Android
+Documentation=https://github.com/zish/waydroid-hp-envy-x2/blob/HEAD/docs/56-pipewire-control.md
+Wants=pipewire.service
+After=pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/waydroid-pwd
+Restart=on-failure
+RestartSec=5
+
+# The daemon binds the waydroid0 bridge address, which does not exist until the
+# SYSTEM unit waydroid-container.service has run -- and a user unit cannot order
+# itself after a system unit. It does not need to: the bind is retried rather
+# than fatal, so starting early costs a few "cannot bind ... retrying" lines.
+#
+# It also does not need to be ordered after pipewire.service for correctness,
+# for the same reason: a missing pw-dump is respawned with backoff, and the
+# first batch after it returns is treated as a full resync. The ordering above
+# just avoids the noise on a normal login.
+StateDirectory=waydroid-pwd
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=default.target

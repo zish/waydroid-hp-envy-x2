@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Patchbay — the Android half of the PipeWire control work
+  (docs/56-pipewire-control.md). The host half is artifacts/pipewire/.
+
+  Note what is NOT here: RECORD_AUDIO, MODIFY_AUDIO_SETTINGS, and any of the
+  media permissions. This app carries no audio and touches none of Android's
+  audio APIs — it edits the *host's* graph over a TCP socket, and the samples
+  never enter the container. INTERNET is the whole permission set, and it is an
+  install-time grant, so a kiosk with nobody to tap Allow is fine.
+
+  It is worth being explicit about the asymmetry that makes that true: the app
+  can route the host's microphone into a host recorder if the daemon's policy
+  lets it, and it still needs no Android permission to do so, because nothing
+  it does happens on this side of the bridge. The gate for that lives in
+  waydroid-pwd's policy.conf, where links.capture is off by default.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.systemhalted.patchbay"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      Theme.Material.NoActionBar, for bt-app's two reasons: the screen draws its
+      own header, and AlertDialog inherits the application theme so a light
+      dialog over this dark screen would be jarring.
+    -->
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_patchbay"
+        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:allowBackup="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

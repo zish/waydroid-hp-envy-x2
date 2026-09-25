@@ -1,0 +1,28 @@
+[Unit]
+# Hands waydroid-pwd's connection profile to the Android app.
+# See docs/56-pipewire-control.md.
+#
+# This is the whole reason the pair is split in two. The app's private directory
+# is mode 0700 owned by the app's uid (measured: btd's own profile sits in one,
+# uid 10213 mode 0600 inside a 0751 directory), so putting a file there needs
+# root. Nothing else about driving PipeWire does.
+#
+# It is a system unit because it is the root half; it reads a user-owned file and
+# writes a uid-owned one, and holds no PipeWire connection at all.
+Description=Publish waydroid-pwd's connection profile to the Android app
+Documentation=https://github.com/zish/waydroid-hp-envy-x2/blob/HEAD/docs/56-pipewire-control.md
+Wants=waydroid-container.service
+After=waydroid-container.service
+
+[Service]
+Type=simple
+# The script loops on its own --interval rather than being restarted on a timer,
+# so an app installed after the daemon, or a `waydroid init` that recreates the
+# data tree, is picked up without anything being restarted. pw-app/build.sh
+# --install waits for exactly this, as bt-app/build.sh does for btd.
+ExecStart=@BINDIR@/waydroid-pwd-publish
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
