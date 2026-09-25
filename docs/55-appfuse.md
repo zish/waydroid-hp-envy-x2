@@ -1,9 +1,9 @@
 # 55 — AppFuse: every `openDocument` failed, and the host's SELinux policy is why
 
 **Date:** 2026-09-24 (diagnosed), 2026-09-25 (fixed and verified)
-**Status:** **Fixed, packaged and verified**, on the probe and on a real third-party app.
-`waydroid-ext-appfuse` 1.0.0 builds clean; not yet layered on bigtab01 — see
-[What is left](#what-is-left).
+**Status:** **Fixed, packaged, deployed and verified**, on the probe and on a real
+third-party app. `waydroid-ext-appfuse` 1.0.0 is layered and live on bigtab01 as of
+2026-09-25. Remaining gaps are in [What is left](#what-is-left).
 
 Goal 9. `StorageManager.openProxyFileDescriptor()` did not work in this container, and
 nothing that depends on it could work either.
@@ -353,9 +353,9 @@ from a differently-versioned one of the same name, and `semodule -i` rebuilds th
 policy store, so a name check would skip a real upgrade and a blind reload would cost
 seconds on every boot.
 
-### What was tested, and the one thing that could not be
+### What was tested
 
-Verified on bigtab01 on 2026-09-25, by hand rather than through `rpm-ostree`:
+Verified on bigtab01 on 2026-09-25, first by hand and then as a layered package:
 
 | | result |
 |---|---|
@@ -366,24 +366,81 @@ Verified on bigtab01 on 2026-09-25, by hand rather than through `rpm-ostree`:
 | `--unload` | module gone, and crippy's `openDocument` fails again |
 | loader with no CIL present | `no policy to load`, exit 1 |
 | `systemd-analyze verify` on the unit | silent |
-| unit enabled via the shipped symlink | `enabled` |
 | `systemctl restart` | `Result=success`, `ExecMainStatus=0` |
+| `--verify` exit status, measured without a pipe | **0** clean, **3** on drift |
 
-**The shadow-detection path could not be tested on this host.** The loader prefers a
-`/usr/local` CIL over the packaged one — deliberately, so a hand-staged policy beats a
-packaged one on an immutable host — and warns when the two differ, because that precedence
-silently defeated `waydroid-ext-backlight` 1.0.2 after a migration. Exercising it needs a
-file in `/usr/share/waydroid-appfuse`, and `/usr` is read-only here: only `rpm-ostree` can
-put one there. The code path is carried over from the module it was learned on, and it is
-untested in this package.
+And after layering, on the packaged copies specifically:
+
+| | result |
+|---|---|
+| `rpm-ostree install --apply-live` | `Diff` 4 added → 5 added; this package and nothing else |
+| `LiveCommit` vs pending `Commit` | `b0adde8d…` both — nothing owed |
+| `rpm -qf` on all three payload files | `waydroid-ext-appfuse-1.0.0-1.noarch` |
+| unit in force | `/usr/lib/systemd/system/waydroid-appfuse-policy.service` |
+| `systemctl is-enabled` | **`disabled`** — expected, see below |
+| `multi-user.target` `Wants` | lists `waydroid-appfuse-policy.service` |
+| `bin/appfuse-test.sh` end to end | 8/8 correctness, 8/8 fds, 128 KiB max `onRead` |
+| crippy's real `openDocument` | 4096 bytes, through the packaged policy |
+| `systemctl --failed` | only `systemd-remount-fs`, failing since 2026-09-12 |
+
+**`is-enabled` reporting `disabled` is correct and must not be "fixed".** The package ships its
+enable symlink inside `/usr/lib/systemd/system/multi-user.target.wants/` rather than running
+`systemctl enable` from a scriptlet, for the same rpm-ostree reason the load moved out of
+`%post`. systemd honours it for activation — `multi-user.target` lists the unit in `Wants` —
+but `is-enabled` defines "enabled" as a symlink under `/etc`, which is deliberately not where
+this lives. `packaging/README.md` records the same artefact for three earlier packages.
+
+Note one measurement flaw caught while doing this: `$?` taken after a pipeline reports the last
+stage, so `loader --verify | sed` had been reporting `sed`'s status, not the loader's. The exit
+codes above were re-measured without the pipe. It is the same class of mistake as the stdin trap
+in [Traps recorded](#traps-recorded) — the shell quietly answering a different question.
+
+### The shadow path, now tested
+
+It could not be exercised before the package existed: the loader prefers a `/usr/local` CIL
+over the packaged one — deliberately, so a hand-staged policy beats a packaged one on an
+immutable host — and testing that needs a file in `/usr/share/waydroid-appfuse`, which on a
+read-only `/usr` only `rpm-ostree` can put there.
+
+Layering the package supplied it, and because the fix had been developed by hand into
+`/usr/local` first, the machine went into the transaction **already shadowed**. Both branches
+fired:
+
+| | |
+|---|---|
+| copies byte-identical | warns `… shadows the packaged …` and stops there |
+| one deliberately altered | adds `and they DIFFER — the packaged policy is not the one in force`, and `--verify` exits **3**, naming both hashes |
+
+That is the precedence that silently defeated `waydroid-ext-backlight` 1.0.2 after a
+migration. It now has a test behind it rather than an argument.
+
+**The shadowing was measured before anything was removed**, which is what shows the trap is
+real rather than theoretical:
+
+| | before removal | after removal |
+|---|---|---|
+| `FragmentPath` | `/etc/systemd/system/…` | `/usr/lib/systemd/system/…` |
+| loader on `PATH` | `/usr/local/bin/waydroid-appfuse-policy` | `/usr/sbin/…`, owned by the package |
+
+Only the *files* were removed, after confirming both were byte-identical to the packaged ones
+and backing them up — **not** `install.sh --uninstall`, which would have run `semodule -r` and
+broken AppFuse for the gap. The module stayed loaded throughout, so nothing failed during the
+migration. `packaging/README.md` has the full migration record.
+
+**One wording nit, found and deliberately not fixed.** On a drift report the loader calls the
+CIL it would load "packaged" even when the selected file is a `/usr/local` shadow, so the
+DIFFER case reads `loaded <a>, packaged <b>` with `<b>` being the hand-staged file. The warning
+immediately above it already names which file is in use, so it is confusing rather than wrong.
+It is inherited verbatim from `waydroid-backlight-policy`, which has the same line, and fixing
+one and not the other would be worse than leaving both.
 
 ## What is left
 
-- **Layer the package on bigtab01.** It has only ever been installed by hand, into
-  `/usr/local` with the unit in `/etc/systemd/system`. `rpm-ostree install` plus
-  `--apply-live` is the real test, and it is also what would exercise the shadow warning
-  above — the hand-staged `/usr/local` CIL now on that machine is exactly the situation the
-  warning exists for, so expect it to fire and mean it.
+- **A reboot has not happened yet.** `LiveCommit b0adde8d…` equals the pending deployment's
+  `Commit`, so the running system is already what the next boot lands on and nothing is owed —
+  but the boot-time unit itself has only been exercised by `systemctl restart`, not by an
+  actual boot. Worth taking opportunistically; it costs the LUKS passphrase at the console
+  ([02](02-ssh-access.md)).
 - **Write access is untested.** Everything here opened `MODE_READ_ONLY`, because that is
   what `openProxyFileDescriptor`'s read path needs and what crippy uses. `onWrite` and
   `onFsync` have never been exercised in this container.

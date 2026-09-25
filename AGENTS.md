@@ -476,8 +476,9 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [docs/50-bluetooth.md](docs/50-bluetooth.md).
 
 9. **AppFuse — `openProxyFileDescriptor` for apps that synthesise their bytes.** **Added
-   2026-09-24 at the owner's request; diagnosed the same day, fixed, packaged and verified
-   2026-09-25. `waydroid-ext-appfuse` 1.0.0 builds clean; not yet layered on bigtab01.**
+   2026-09-24 at the owner's request; diagnosed the same day, fixed, packaged, deployed and
+   verified 2026-09-25. `waydroid-ext-appfuse` 1.0.0 is layered and live on bigtab01 — the
+   tenth `waydroid-ext-*` package on that machine.**
    AppFuse is how an app serves a *real* file descriptor for content it has no file for:
    `vold` mounts a FUSE filesystem at `/mnt/appfuse/<uid>_<mountId>` and the **app itself**
    answers the protocol through a `ProxyFileDescriptorCallback`. Every `DocumentsProvider`
@@ -543,10 +544,19 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    trusting `semodule`'s exit status: it writes each context vold needs to
    `/sys/fs/selinux/context`, which needs no privilege and no setools, and `seinfo` is
    installed on neither machine.
-   **Still open**: the package has only been installed **by hand** into `/usr/local` — layering
-   it with `rpm-ostree` is the real test, and is also what would exercise the loader's
-   shadow-detection warning, which could not be tested here because `/usr` is read-only and only
-   `rpm-ostree` can stage a packaged CIL. **Write access is untested**, everything so far being
+   **Layered on 2026-09-25**, and the migration is the first where the shadow trap was set
+   deliberately and watched to fire: the policy had been installed by hand into `/usr/local`
+   first, so the machine entered the transaction already shadowed, and `FragmentPath` really was
+   `/etc/systemd/system/…` with `PATH` resolving to `/usr/local/bin` until the hand-placed files
+   were removed. Both warning branches fired — identical copies warn and stop, a differing one
+   adds *they DIFFER* and `--verify` exits 3. Only the files were removed, byte-compared and
+   backed up first, **not** `install.sh --uninstall`, which would have run `semodule -r` and
+   broken AppFuse for the gap; the module stayed loaded throughout. `LiveCommit b0adde8d…`
+   equals the pending `Commit`. Note `systemctl is-enabled` says **`disabled`** and that is
+   correct — the enable symlink ships under `/usr/lib`, not `/etc`, and `multi-user.target`
+   `Wants` the unit. Full record in [packaging/README.md](packaging/README.md).
+   **Still open**: the boot unit has only been exercised by `systemctl restart`, never by an
+   actual boot. **Write access is untested**, everything so far being
    `MODE_READ_ONLY`, so `onWrite` and `onFsync` have never run here; crippy's own instrumented
    suite has not been watched turning green, which needs adb-over-TCP enabled in the container;
    and only this one image has been tested (LineageOS 20 / API 33 / x86_64 / MAINLINE). Also
