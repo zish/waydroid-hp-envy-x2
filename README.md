@@ -59,6 +59,11 @@ Useful mainly on a machine running Waydroid as its whole session, where there is
 Bluetooth UI to reach. It can also take the place of Android's own Bluetooth tile in the
 pull-down shade, which is dead weight in these images — there is no Bluetooth stack behind it.
 
+**AppFuse** — apps whose files are generated rather than stored — cloud storage clients,
+archive browsers, encrypted vaults — can open their documents. Android asks the kernel to
+label that mount with SELinux names only Android's own policy has, so on a Linux host every
+such open failed; the host policy learns the three names it was missing.
+
 **Session and power integration** — Android suspends and locks with the machine, shuts down
 cleanly instead of being killed at logout, and can run full-screen as a kiosk session.
 

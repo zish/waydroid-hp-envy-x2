@@ -1,0 +1,125 @@
+;; waydroid_appfuse -- let vold's AppFuse mount succeed on a Fedora host.
+;;
+;; WHY THIS EXISTS
+;;
+;; StorageManager.openProxyFileDescriptor() is how an Android app serves a real
+;; file descriptor for bytes it has no file for. vold does the work: it mounts a
+;; FUSE filesystem at /mnt/appfuse/<uid>_<mountId> and the app answers the
+;; protocol. Every openDocument in a synthesising DocumentsProvider -- cloud
+;; clients, archive browsers, encrypted vaults -- goes through it. Without this
+;; module every one of them fails, on every call:
+;;
+;;   app :  IllegalStateException: Failed to mount
+;;   vold:  Failed to mount /mnt/appfuse/<uid>_<id>: Invalid argument
+;;
+;; FUSE is not the problem. /dev/fuse is present, vold runs, persist.sys.fuse is
+;; true, and three FUSE mounts are already live for emulated storage. The problem
+;; is the mount options, read out of this host's own copy of the image at
+;; /var/lib/waydroid/rootfs/system/bin/vold:
+;;
+;;   fd=%i,rootmode=40000,default_permissions,allow_other,user_id=0,group_id=0,
+;;   context="u:object_r:app_fuse_file:s0",fscontext=u:object_r:app_fusefs:s0
+;;
+;; A MAINLINE Waydroid runs against the HOST's SELinux policy, not Android's.
+;; Fedora's policy cannot parse either context, so mount(2) returns EINVAL before
+;; FUSE is ever reached.
+;;
+;; WHERE THE KERNEL SAYS SO -- AND WHERE IT DOES NOT
+;;
+;; `ausearch` is COMPLETELY CLEAN for this. A context that cannot be parsed never
+;; becomes an AVC, so the audit subsystem has nothing to report and the obvious
+;; first move gives the wrong answer. The kernel does say it, in dmesg:
+;;
+;;   SELinux: security_context_str_to_sid (u:object_r:app_fuse_file:s0)
+;;            failed with errno=-22
+;;
+;; -22 is EINVAL. Look in dmesg, not ausearch.
+;;
+;; THREE IDENTIFIERS ARE MISSING, NOT ONE
+;;
+;; Measured on bigtab01 2026-09-24 with security_check_context():
+;;
+;;   u:object_r:app_fuse_file:s0         INVALID   <- what vold asks for
+;;   system_u:object_r:app_fuse_file:s0  INVALID   <- so the TYPE is unknown
+;;   u:object_r:fusefs_t:s0              INVALID   <- and so is the USER `u`,
+;;                                                    with a type Fedora has
+;;   system_u:object_r:fusefs_t:s0       VALID     <- control: the probe is sound
+;;
+;; Declaring the two types alone would still have returned EINVAL. The SELinux
+;; *user* `u` has to exist too. Fedora ships system_u, unconfined_u, staff_u,
+;; sysadm_u, guest_u and root; Android's entire policy uses the single letter `u`,
+;; and nothing on a Fedora host has ever needed it.
+;;
+;; WHY DECLARING AN SELINUX USER IS SAFE
+;;
+;; A user in an object context is only ever a name to be looked up. The kernel's
+;; policydb_context_isvalid() special-cases the object_r role: for object contexts
+;; it checks that user, role and type all *exist* and that the MLS level is valid,
+;; and it does NOT check that the user is authorised for the role. So `u` needs no
+;; roles, no privileges and no login mapping, and no process will ever run as it --
+;; only inodes on this one mount carry it. It grants nothing by existing.
+;;
+;; EVERY LINE BELOW IS LOAD-BEARING, PROVEN BY REMOVAL
+;;
+;; Verified on bigtab01 2026-09-24 with appfuse-probe against this container.
+;; Each variant was loaded with `semodule -i` and the probe re-run:
+;;
+;;   this module, as it stands          AppFuse works, 7/7 correctness, 8/8 fds
+;;   minus (typeattributeset file_type) IOException: FuseUnavailableMountException
+;;                                        -- a DIFFERENT symptom; the mount now
+;;                                        succeeds and the app cannot use it
+;;   minus the (associate) rule         back to IllegalStateException: Failed to mount
+;;   minus nothing else                 -- see the next note
+;;
+;; AND WHAT WAS TRIED AND PROVED UNNECESSARY, so nobody adds it back:
+;;
+;;   allow container_runtime_t app_fusefs (filesystem (mount unmount remount
+;;                                        getattr relabelto associate))
+;;   allow container_runtime_t app_fuse_file (file (relabelto))
+;;   allow container_runtime_t unlabeled_t (filesystem (relabelfrom))
+;;   allow container_runtime_t fusefs_t (filesystem (relabelfrom))
+;;   ...plus a wide dir/file access set for container_runtime_t and unconfined_t
+;;
+;; All of it is redundant. container_runtime_t already holds those permissions
+;; through the base policy's attribute-based rules, which is exactly why the two
+;; typeattributeset lines matter so much: assigning `file_type` and
+;; `filesystem_type` is what makes the existing rules apply to these new types.
+;; Declaring the types WITHOUT the attributes gets a mount nothing can read.
+;; That is the whole trick -- the attribute does the work an explicit rule set
+;; would only have duplicated, less safely.
+;;
+;; WHY PRIVATE TYPES AND NOT AN ALIAS OF fusefs_t
+;;
+;; Aliasing app_fuse_file to fusefs_t would also have worked and would have been
+;; two lines. It would also have inherited every fusefs_t rule in the base policy,
+;; host-wide, for a mount the container controls. Private types keep the grant
+;; where it belongs -- the same argument waydroid_backlight.cil makes at length.
+;;
+;; Written in CIL rather than .te for the same reason as that module: semodule
+;; compiles CIL directly, so this needs no selinux-policy-devel, which on an
+;; rpm-ostree host would cost a layered install and a reboot.
+;;
+;; See docs/55-appfuse.md. Verify with bin/appfuse-test.sh.
+
+;; The SELinux user Android uses and Fedora does not have. A name, not a
+;; privilege -- see above. s0 is the only level vold ever asks for.
+(user u)
+(userrole u object_r)
+(userlevel u (s0))
+(userrange u ((s0)(s0)))
+
+;; The label vold puts on every inode of the mount, via context=.
+;; The file_type line is what lets the container read its own mount.
+(type app_fuse_file)
+(roletype object_r app_fuse_file)
+(typeattributeset file_type (app_fuse_file))
+
+;; The label vold puts on the superblock, via fscontext=.
+(type app_fusefs)
+(roletype object_r app_fusefs)
+(typeattributeset filesystem_type (app_fusefs))
+
+;; The inode label has to be allowed to live on that filesystem or the mount is
+;; refused outright -- the same associate permission waydroid_backlight_t needs
+;; on sysfs_t. This is the only allow rule the module needs.
+(allow app_fuse_file app_fusefs (filesystem (associate)))
