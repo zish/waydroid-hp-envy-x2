@@ -426,7 +426,10 @@ Three things about it are worth keeping:
   and nothing has to be edited to recover.
 - **`min-quantum` is not a safety floor.** It is what PipeWire will accept. The daemon's range check
   against it was working correctly and still admitted a value that made the machine unusable.
-  32 is now known bad and 1024 known good; nothing in between has been measured. The app therefore
+  32 is now known bad and 1024 known good; nothing in between has been measured, and
+  `bin/pw-quantum-bisect.sh` is what measures it -- it walks 512, 256, 128, 64, 32 with audio
+  playing, samples the xrun delta at each step, asks how each one sounds before going lower, and
+  restores the original `force-quantum` on any exit including an interrupt. The app therefore
   labels any choice below the graph's configured quantum and takes a second tap to send it
   (`confirmQuantum`), which is a confirmation and not a floor — a real floor would need the policy
   file to parse numbers, and it parses yes/no only.
@@ -480,4 +483,13 @@ no metadata, no profile — and wants audio playing in Android before it can mea
 
 ```bash
 ssh 10.42.0.137 'sudo sh -s' < bin/pw-audio-diag.sh
+```
+
+And the one that is *not* read-only: it forces the quantum down a step at a time to find where this
+host stops coping. Copied over rather than piped, because it asks how each step sounds and a `read`
+against a piped stdin would eat its own source. `--auto` judges on xrun counters alone.
+
+```bash
+scp bin/pw-quantum-bisect.sh 10.42.0.137:/tmp/
+ssh -t 10.42.0.137 'sudo sh /tmp/pw-quantum-bisect.sh'
 ```
