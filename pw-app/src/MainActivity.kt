@@ -662,14 +662,30 @@ class MainActivity : Activity(), PwClient.Listener {
         val max = graph.setting("clock.max-quantum")?.toIntOrNull() ?: 8192
         val rate = graph.setting("clock.rate") ?: "?"
 
+        val hz = rate.toIntOrNull() ?: 48000
+        val running = quantum.toIntOrNull() ?: 1024
+
         val choices = ArrayList<Int>()
         choices.add(0)
         for (value in intArrayOf(32, 64, 128, 256, 512, 1024, 2048)) {
             if (value in min..max) choices.add(value)
         }
+        // min-quantum says what PipeWire will ACCEPT, not what this host survives.
+        // Forcing 32 -- 0.7 ms, the first non-zero choice here, and legal because
+        // this host advertises min-quantum 32 -- made Android's audio scratchy and
+        // then robotic on bigtab01, and left it that way for two days: a forced
+        // quantum lives in PipeWire's own settings metadata, so it outlives both
+        // this app and the daemon and only a reboot or an unforce clears it.
+        // docs/56 records the measurement. So a value below the quantum the graph
+        // is configured for is labelled as such and takes a second tap, rather
+        // than being one tap away from the top of the list.
         val labels = choices.map {
-            if (it == 0) "Unforce (follow the graph)"
-            else "$it frames  ·  ${"%.1f".format(it * 1000.0 / (rate.toIntOrNull() ?: 48000))} ms"
+            val ms = "%.1f".format(it * 1000.0 / hz)
+            when {
+                it == 0 -> "Unforce (follow the graph)"
+                it < running -> "$it frames  ·  $ms ms  ·  below $running"
+                else -> "$it frames  ·  $ms ms"
+            }
         }
 
         if (!allowed("graph")) {
@@ -685,7 +701,36 @@ class MainActivity : Activity(), PwClient.Listener {
         AlertDialog.Builder(this)
             .setTitle("Quantum (now $quantum, forced $forced, rate $rate)")
             .setItems(labels.toTypedArray()) { _, which ->
-                send("set quantum", "quantum") { it.put("value", choices[which]) }
+                val chosen = choices[which]
+                if (chosen != 0 && chosen < running) confirmQuantum(chosen, running, hz)
+                else send("set quantum", "quantum") { it.put("value", chosen) }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /**
+     * The second tap for a quantum below the one the graph is configured for.
+     *
+     * Deliberately a confirmation and not a hard floor. Lowering the latency
+     * floor is what this control is FOR, and the only floor this app could
+     * defend would be a number nobody has measured -- 32 is known bad and 1024
+     * is known good, and nothing in between has been tried. A real floor belongs
+     * in the daemon's policy file, which today parses yes/no only; see docs/56.
+     */
+    private fun confirmQuantum(frames: Int, running: Int, hz: Int) {
+        AlertDialog.Builder(this)
+            .setTitle("Force $frames frames?")
+            .setMessage(
+                "${"%.1f".format(frames * 1000.0 / hz)} ms, below the $running " +
+                "this graph is configured for. A forced quantum applies to every " +
+                "client on the host, including Android's audio, which reaches " +
+                "PipeWire through an 85 ms HAL buffer.\n\n" +
+                "32 frames was measured on this host to make Android's audio " +
+                "unusable. It will not clear when this app closes or the daemon " +
+                "restarts -- only unforcing it here, or a reboot.")
+            .setPositiveButton("Force it") { _, _ ->
+                send("set quantum", "quantum") { it.put("value", frames) }
             }
             .setNegativeButton("Cancel", null)
             .show()

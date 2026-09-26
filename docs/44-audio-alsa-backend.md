@@ -284,6 +284,13 @@ A native PipeWire client deletes the second row outright, and lets the guest ask
 obstacle**: `clock.min-quantum` is 32 — 0.67 ms — against `max-quantum` 2048. The 1024 sitting
 there is a default nobody has had a reason to lower.
 
+Measured since, and it qualifies that last sentence — see docs/56. `force-quantum` was set to 32 on
+this host and Android's audio became unusable, because the setting is graph-wide and the HAL path
+has no headroom for a 0.67 ms deadline. `min-quantum` is what PipeWire will *accept*, not what the
+machine will hold. So the graph is not the obstacle, but it is load-bearing: the reason to lower it
+does not come from this path, where 1024 costs 21.3 ms of the ~106 ms budget above and none of it
+audible on playback. Lower it for host-side clients with short paths of their own, not for Android.
+
 But the HAL's own 85 ms dwarfs everything downstream. Rewriting the period constants alone, over
 today's unchanged pulse transport, captures most of the available win.
 

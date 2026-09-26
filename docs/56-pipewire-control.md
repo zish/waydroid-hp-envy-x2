@@ -15,7 +15,8 @@ Two pieces, and a third that is deliberately absent:
 | [pw-app/](../pw-app) | "Patchbay", a dependency-free Kotlin app. No AndroidX, no Compose, no coroutines |
 | *no overlay component* | nothing changes inside the image: no vendor `.so`, no HAL, no feature XML, no SELinux policy, no mount |
 
-Verify with `bin/pipewire-test.sh`.
+Verify with `bin/pipewire-test.sh`. If the audio itself sounds wrong, `bin/pw-audio-diag.sh` is the
+read-only companion that looks for an accumulating fault rather than a broken link.
 
 ## This is the control plane. docs/44 is the data plane
 
@@ -401,14 +402,56 @@ both through, which is the check the code comment calls "not a rounding error". 
 reported no literal nulls because it tested Python `None`, so it was vacuous for exactly this case.
 Every projected string now goes through `Graph.text`.
 
+**Measured on bigtab01, 2026-09-26 — `force-quantum` takes, and the host does not survive it.**
+This was two items on the hypothesis list below, and it is worth separating what each one did.
+
+*It takes.* The verb works exactly as designed: the app's dialog sent `32`, `cmd_quantum`
+range-checked it against the live `clock.min-quantum` of 32, accepted it, and `pw-metadata` wrote it.
+Nothing in the chain misbehaved.
+
+*The host does not survive it.* 32 frames is 0.667 ms against a configured `clock.quantum` of 1024,
+a 32× cut, and `force-quantum` is graph-wide — so it applies to Waydroid's `pipewire-pulse` path,
+which reaches PipeWire through an ~85 ms HAL buffer and has nothing like that timing headroom.
+Android's audio went scratchy and then progressively robotic: deadline misses at block rate, which
+is dense artefacts rather than occasional clicks. Host load average was 0.06 throughout, so this is
+wakeup latency and scheduling granularity and NOT CPU exhaustion — a low load average does not
+exonerate a small quantum.
+
+Three things about it are worth keeping:
+
+- **It outlived everything that set it.** `force-quantum` lives in PipeWire's own `settings`
+  metadata, not in this daemon, so killing the transient `/tmp` daemon did not revert it and neither
+  would uninstalling the package. It stayed in force for two days across the whole diagnosis,
+  because the host had not rebooted. It is not persisted, though: a reboot or an unforce clears it,
+  and nothing has to be edited to recover.
+- **`min-quantum` is not a safety floor.** It is what PipeWire will accept. The daemon's range check
+  against it was working correctly and still admitted a value that made the machine unusable.
+  32 is now known bad and 1024 known good; nothing in between has been measured. The app therefore
+  labels any choice below the graph's configured quantum and takes a second tap to send it
+  (`confirmQuantum`), which is a confirmation and not a floor — a real floor would need the policy
+  file to parse numbers, and it parses yes/no only.
+- **It is not a quality control, and it is not aimed at Android.** Quantum trades latency against
+  timing headroom and nothing else: at any quantum the graph can actually meet, the samples are
+  bit-identical at 32 and at 1024. What went wrong was missed deadlines, not a quantum that "sounds
+  worse". docs/44's budget has the numbers — 1024 @ 48 kHz is 21.3 ms, 32 is 0.67 ms, and Android's
+  HAL buffer is 85 ms on top of either — so the path is ~106 ms and forcing 32 would have bought
+  about 19% of it, off the term that is not the dominant one. That 21.3 ms is inaudible here anyway:
+  uniform playback delay has no reference to compare against, and latency only becomes audible when
+  there is one, such as monitoring a mic or playing a software instrument. Which settles who the
+  control is for — host-side clients with a short path of their own, not audio arriving through the
+  HAL.
+- **The diagnosis was nearly vacuous.** xruns only accumulate on a graph that is carrying audio, so
+  the first `pw-audio-diag.sh` run skipped its own decisive leg and said so rather than reporting a
+  clean zero it had not earned. That is the same failure shape as the `optString` probe recorded
+  above, caught this time by the script refusing to answer.
+
 **Still hypothesis:** that two-tap linking works under a finger on the panel; that `pw-link` by id
 creates a link the daemon then sees via the monitor; that `wpctl set-volume` against a node id
-behaves as expected (mute is verified, the slider is not); that `clock.force-quantum` takes and that
-the host survives it; that a real `systemctl --user restart pipewire` produces the `reset` → `graph`
-sequence (the daemon's side is verified above against a fake monitor, but PipeWire's own restart
-behaviour is not); that a `--user` unit starts under the cage session's user manager at boot rather
-than only after a login; and whether `pipewire -c` with a generated config really does host a module
-instance the way `filter-chain.conf` implies.
+behaves as expected (mute is verified, the slider is not); that a real `systemctl --user restart
+pipewire` produces the `reset` → `graph` sequence (the daemon's side is verified above against a
+fake monitor, but PipeWire's own restart behaviour is not); that a `--user` unit starts under the
+cage session's user manager at boot rather than only after a login; and whether `pipewire -c` with a
+generated config really does host a module instance the way `filter-chain.conf` implies.
 
 ## First commands
 
@@ -430,4 +473,11 @@ for o in json.load(sys.stdin):
 
 # then the whole thing
 bin/pipewire-test.sh
+```
+
+If the complaint is the SOUND rather than the plumbing, this one is read-only — no link, no volume,
+no metadata, no profile — and wants audio playing in Android before it can measure anything:
+
+```bash
+ssh 10.42.0.137 'sudo sh -s' < bin/pw-audio-diag.sh
 ```
