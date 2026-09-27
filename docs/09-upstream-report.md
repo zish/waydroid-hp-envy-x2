@@ -7,10 +7,17 @@ The text of each, exactly as sent:
 |---|---|---|
 | **B** | [android_external_minigbm#3](https://github.com/waydroid/android_external_minigbm/issues/3) | [artifacts/upstream/minigbm-issue.md](../artifacts/upstream/minigbm-issue.md) |
 | **A** | [waydroid#2339 (comment)](https://github.com/waydroid/waydroid/issues/2339#issuecomment-5554520688) | [artifacts/upstream/2339-comment.md](../artifacts/upstream/2339-comment.md) |
+| **C** | [#3 (comment)](https://github.com/waydroid/android_external_minigbm/issues/3#issuecomment-5859257287) 2026-09-27 | [artifacts/upstream/minigbm-3-reply.md](../artifacts/upstream/minigbm-3-reply.md) |
 
-Both posted by the user on 2026-09-05, B first so A could link to it. Verified after the fact via
-the public API: the comment body carries the real issue URL, not the `<LINK TO ISSUE B>`
+A and B were posted by the user on 2026-09-05, B first so A could link to it. Verified after the fact
+via the public API: the comment body carries the real issue URL, not the `<LINK TO ISSUE B>`
 placeholder.
+
+C is the 2026-09-27 reply to the first outside report of the same bug, posted from this box once
+`gh auth login --web` made that possible — see
+[the corroboration section](#2026-09-21-independent-corroboration-on-3-from-outside-this-project) and
+[the token section](#what-this-box-can-and-cannot-do-on-github--re-measured-2026-09-27). It was
+fetched back and diffed against the file: byte identical.
 
 ## Why #2339 is the same bug, and where its diagnosis stops short
 
@@ -73,6 +80,42 @@ curl -O https://raw.githubusercontent.com/waydroid/android_external_minigbm/a936
 curl -O https://raw.githubusercontent.com/waydroid/android_external_minigbm/a9367e8/gbm_mesa_driver/gbm_mesa_internals.cpp
 ```
 
+## 2026-09-21: independent corroboration on #3, from outside this project
+
+[tomleejumah](https://github.com/waydroid/android_external_minigbm/issues/3#issuecomment-5754450757)
+(`author_association: NONE` — a fellow user, **not a maintainer**) reports the identical failure and
+asks for the wrapper diff, the prebuilt 32-bit `.so`, or both. Our reply is **C** in the table above —
+[artifacts/upstream/minigbm-3-reply.md](../artifacts/upstream/minigbm-3-reply.md), posted
+2026-09-27.
+
+Still no maintainer engagement: issue open, unlabelled, one comment, 22 days after filing.
+
+**Their line number corroborates the diagnosis to the line.** They cite
+`gbm_mesa_wrapper.cpp:228`. Our patch's last hunk is `@@ -221,8 +282,41 @@`, eight lines of the
+unpatched file starting at 221, which puts line 228 exactly on
+
+```c
+ALOGE("Failed to map the buffer at %s:%d", __FILE__, __LINE__);
+```
+
+— inside the one function the patch modifies. Their tree is byte-identical to ours in that region,
+so the patch applies cleanly to it.
+
+**What it settles, and what it does not.** Their camera source is `v4l2loopback`, a virtual device,
+on different hardware; ours is a UVC webcam. Identical failure at an identical line across both
+kills "it is something about the HP TrueVision webcam" for good, which is the independent
+confirmation the report needed. But **both of us are on LineageOS 20 / Android 13 / SDK 33**, so this
+is cross-hardware evidence, not cross-version evidence. Do not cite it as the latter.
+
+**Why the reply sends the patch and not the binary**, which is a different argument from the one in
+[54-no-vendored-binaries.md](54-no-vendored-binaries.md) and worth keeping distinct: the wrapper is
+*our own* build, so distributing it breaks no policy. The reason to decline is that
+[phase2/build.sh](../phase2/build.sh) pins minigbm `a9367e8` and the gralloc modules that `dlopen`
+the wrapper are not rebuilt, so the `gbm_ops`/`alloc_args` ABI has to match. On a LineageOS 20 build
+that differs, our prebuilt fails in a way that reads as *the fix* not working — a false negative on
+the only external test this issue has. The reply offers the binary anyway if the NDK build defeats
+them, with that caveat attached, and gives the two `libgbm_mesa.so` hashes to compare first.
+
 ## Still open: is the map clamp actually needed?
 
 [08-camera-fixed.md](08-camera-fixed.md) says the `gbm_map()` clamp is needed because "asking Mesa
@@ -96,16 +139,57 @@ Settling it means building a clamp-free 32-bit wrapper, deploying it to the over
 restarting the Waydroid session — roughly the phase 2 cycle, and it briefly puts the working
 camera at risk. Deferred pending a decision.
 
-## Posting had to be done by hand
+**There may now be a way to settle it without paying that.** The 2026-09-21 reporter above offered
+to test and report back, so the 2026-09-27 reply asks them to apply the patch and then drop just the
+clamp block from the map op. If their camera still works, the clamp is confirmed unnecessary and the
+diff that belongs upstream shrinks to the import fix alone — measured on somebody else's hardware,
+with our working camera untouched. A negative result is equally informative: it would mean two
+independent problems rather than one. Either way the answer arrives from a second machine, which is
+worth more than the same answer from this one.
 
-This dev box has no way to reach GitHub as the user: no `gh` CLI, no `~/.config/gh`, no
-`~/.git-credentials`, no GitHub MCP tool, and this repo has no remote configured. Unauthenticated
-HTTPS works — that is how the upstream sources were fetched and how the posted text was verified —
-but it is read-only.
+## What this box can and cannot do on GitHub — re-measured 2026-09-27
 
-So both were pasted by hand from `artifacts/upstream/`. If more upstream traffic is expected
-(maintainer replies, a PR against minigbm), installing and authenticating `gh` here would let it
-be handled directly: `gh issue comment`, `gh issue view`, `gh pr create`.
+The original text here said there was no `gh`, no `~/.config/gh` and no remote. **All three have
+since changed, and the conclusion still holds for the case that matters.** Measured rather than
+assumed, because "authenticated" and "allowed to comment" are not the same thing and the
+difference is the whole point:
+
+| | |
+|---|---|
+| `gh` CLI | **installed**, authenticated as `zish` from `~/.config/gh/hosts.yml` |
+| `origin` | **configured** — `git@zish-github:zish/waydroid-hp-envy-x2.git` |
+| the repo | **public** — `raw.githubusercontent.com/zish/waydroid-hp-envy-x2/HEAD/...` returns 200 |
+| the credential | a **fine-grained** PAT (no `x-oauth-scopes` header), expires 2027-09-16 |
+| on `zish/waydroid-hp-envy-x2` | `{"admin":true,"push":true,...}` |
+| on `waydroid/android_external_minigbm` | `{"pull":true,"push":false,"triage":false}` |
+
+A fine-grained PAT only reaches repositories its owner granted, so `gh issue comment` on anything
+under `waydroid/` failed with `GraphQL: Resource not accessible by personal access token
+(addComment)`. Authenticated *reads* of upstream worked throughout — that is how the inbound comment
+below was fetched and how issue state is checked.
+
+**Resolved the same day.** `gh auth login --web` replaces the fine-grained PAT with an OAuth token
+(`gho_…`) carrying `repo` scope, and the 2026-09-27 reply posted on the first attempt afterwards. So
+this box can now hold upstream conversations directly; `artifacts/upstream/` remains the record of
+what was said, not a staging area for hand-pasting.
+
+**One trap, recorded because it nearly caused the wrong conclusion twice.** A repository's
+`permissions` object is *collaborator* status, not comment capability:
+
+```
+$ gh api repos/waydroid/android_external_minigbm --jq '.permissions'
+{"admin":false,"maintain":false,"pull":true,"push":false,"triage":false}
+```
+
+That output is **identical before and after** re-authenticating, and it reads like "you cannot write
+here" in both cases. It is not the thing that gates `addComment` — commenting on a public issue needs
+the token's `repo`/`public_repo` **scope**, which nobody is a collaborator to obtain. Check
+`gh auth status` or the `X-Oauth-Scopes` response header, not the repo permissions, and if in doubt
+just attempt the post: the refusal is explicit and harmless.
+
+One thing genuinely improved regardless of the token: because the repo is public, a reply can
+**link** the patch and the build script instead of pasting a diff into a comment body. Both were
+offered that way in the 2026-09-27 reply, and all three URLs were confirmed to return 200 first.
 
 ## Checklist
 
@@ -113,7 +197,16 @@ be handled directly: `gh issue comment`, `gh issue view`, `gh pr create`.
 - [x] Post B, paste its URL into A, post A.
 - [x] Record both URLs here and in [08-camera-fixed.md](08-camera-fixed.md).
 - [ ] Optional: settle the map-clamp question with a clamp-free build on the device. Neither post
-      asserts the clamp is needed, so this is a sharpening, not a correction.
-- [ ] Watch for a maintainer reply. Offered in the issue: the wrapper diff
-      ([phase2/0001-gbm_import-geometry.patch](../phase2/0001-gbm_import-geometry.patch)), the
-      phase-1 probe sources, and the full traces — none attached yet, so they may be asked for.
+      asserts the clamp is needed, so this is a sharpening, not a correction. **Possibly answerable
+      on the 2026-09-21 reporter's machine instead** — see the section above.
+- [x] Watch for a maintainer reply. Still none after 22 days. What arrived instead was a second
+      user with the same bug, which is more useful for the merge case than a maintainer ack would
+      have been on its own.
+- [x] Send the 2026-09-27 reply —
+      [posted](https://github.com/waydroid/android_external_minigbm/issues/3#issuecomment-5859257287),
+      4082 bytes, fetched back and diffed against
+      [artifacts/upstream/minigbm-3-reply.md](../artifacts/upstream/minigbm-3-reply.md): byte
+      identical, so what is on GitHub is exactly what this repo records.
+- [ ] If they reply with their two `libgbm_mesa.so` hashes, record whether they match ours. Matching
+      hashes would mean the ABI caution was unnecessary and a prebuilt could be offered freely next
+      time; differing ones would justify it.
