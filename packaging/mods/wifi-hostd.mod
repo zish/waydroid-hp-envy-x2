@@ -49,7 +49,7 @@
 # manifest if it does, and a rejected manifest declares nothing, which looks
 # exactly like the file not being deployed.
 
-VERSION=1.0.0
+VERSION=1.0.1
 RELEASE=1
 KIND=overlay
 ARCH=noarch
@@ -68,7 +68,7 @@ LICENSE="Apache-2.0 AND GPL-3.0-or-later"
 # waydroid-ext-wifid Recommends this package in the other direction, so the pair
 # is not a dependency cycle -- deliberate, because the daemon has to stay
 # testable against an image that has never had an overlay file.
-REQUIRES="waydroid-ext-overlay-sync
+REQUIRES="waydroid-ext-overlay-sync >= 1.1.0
 waydroid-ext-wifid"
 
 # Without the feature declaration there is no WifiService to take either path.
@@ -100,6 +100,6 @@ so it is a hard requirement."
 # wificond.rc replaces a stock file and records its upstream hash; the
 # supplicant manifest adds a path the image does not ship.
 FILES="
-0644 system/etc/init/wificond.rc artifacts/overlay/system/etc/init/wificond.rc artifacts/overlay/system/etc/init/wificond.rc.orig
+0644 system/etc/init/wificond.rc artifacts/overlay/system/etc/init/wificond.rc 7ec3ef548e88bcd13577b59239ca88b594454622818e4a9190ad274b1aadee38
 0644 vendor/etc/vintf/manifest/manifest_android.hardware.wifi.supplicant.xml artifacts/overlay/vendor/etc/vintf/manifest/manifest_android.hardware.wifi.supplicant.xml
 "

@@ -122,20 +122,20 @@ plain — and asserts the harness reaches the right verdict on each.
 
 | Modification | Spec renders | `rpmbuild -bs` | `rpmbuild -ba` | rpmlint clean |
 |---|---|---|---|---|
-| `camera-gbm` | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
+| `camera-gbm` 1.0.1 | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
 | `camera` (group) | yes | yes | **yes** | same, plus `no-%check-section` — a metapackage has nothing to check |
 | `wifid` | yes | **yes** | no | same |
 | `pidguard` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
 | `restartd` | yes | yes | **yes** | same |
 | `btd` | yes | yes | **yes** | same |
 | `backlight` | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
-| `overlay-sync` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
+| `overlay-sync` 1.1.0 | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
 | `sensord` | yes | yes | **yes**, `--prebuilt` only | same, plus `no-manual-page-for-binary` and `unstripped-binary-or-object` |
-| `camera-hal` | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
-| `battery` | yes | yes | **yes** | same |
-| `brightness-overlay` | yes | yes | **yes** | same |
+| `camera-hal` 2.0.0 | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
+| `battery` 2.0.0 | yes | yes | **yes** | same |
+| `brightness-overlay` 1.0.1 | yes | yes | **yes** | same |
 | `wifi-framework` | yes | yes | **yes** | same |
-| `wifi-hostd` | yes | yes | **yes** | same |
+| `wifi-hostd` 1.0.1 | yes | yes | **yes** | same |
 
 ### The five overlay components added 2026-09-24
 
@@ -231,6 +231,62 @@ compile against those headers, and the wrong one inside `rpmbuild`.
 `no-signature` and `invalid-url Source0` are deliberately not filtered: both are real and both
 are release-time work. Everything else rpmlint said is filtered with a written reason in
 [waydroid-ext.rpmlintrc](waydroid-ext.rpmlintrc).
+
+## The keystone bump — manifest format v2, 2026-09-26
+
+`waydroid-ext-overlay-sync` 1.1.0. Three new manifest row types, and the reason it is a version
+bump of the keystone rather than five edits to five `.mod` files: every overlay component
+hard-requires this package, so the format it reads is the one contract they all share.
+
+| Row | Written as | What the reconciler does |
+|---|---|---|
+| plain | `<mode> <sha256> <path>` | unchanged — copy the staged payload out of `/usr` |
+| `derive` | `derive <mode> <image> <path in image> <stock sha> <result sha> <patches> <path>` | extract from the user's own image with `debugfs`, refuse unless the stock hash matches, apply the byte edits, refuse unless the result hash matches, install |
+| `link` | `link <target> <path>` | `ln -sfn`; recorded in `deployed.list` as `link:<target>` |
+
+Plus two smaller changes with the same origin: a `FILES` row's fourth column may now be a bare
+sha256 instead of naming a copy of the stock file it watches, and `--check-upstream` finally exists
+— it asks the derive question of every row that records an upstream hash and changes nothing,
+which is what those hashes have been recorded for since the format was written.
+
+**Why the new row types are keyword-led and not hidden behind a `#`.** Comment-prefixing them
+would make an old reconciler skip them silently, which for a derive-only component means it finds
+no rows it recognises, deploys nothing, and reports success. Keyword-led means it errors instead.
+Both are then made unreachable by `Requires: waydroid-ext-overlay-sync >= 1.1.0` on every component
+that uses one, so the loud failure is a backstop and not the plan.
+
+**What the derive row is for.** `camera-hal` and `battery` were a one-byte and a five-byte patch of
+a Waydroid vendor binary, and patching somebody else's binary does not make it ours to
+redistribute ([docs/54](../docs/54-no-vendored-binaries.md)). Both now ship the patch. The
+measurable effect:
+
+| | before | after |
+|---|---|---|
+| `camera-hal` tarball | ~600 KB | **36 KB** |
+| `battery` tarball | ~170 KB | **36 KB** |
+| Android ELF in either RPM | yes | **none** — `rpm -qlp` shows a manifest, one XML, and docs |
+
+`battery`'s RPM is now a manifest and a doc directory and nothing else, which trips rpmlint's
+`no-binary` on an `ExclusiveArch` package. That is filtered with the reason: a derive row's patch
+offsets are valid only against the x86_64 Android build, so the package is architecture-specific
+even though its payload is text, and `ExclusiveArch` still makes an aarch64 host refuse it on the
+shelf rather than at boot.
+
+**Verified, not asserted.** [bin/overlay-sync-test.sh](../bin/overlay-sync-test.sh) — 37 checks, no
+privilege, bigtab01 untouched. It builds a real ext2 image with `mke2fs -d` holding the stock
+files, runs the reconciler against it, and asserts the derived results are **byte-identical to the
+patched binaries this repository already carries**. That oracle matters most for `battery`: five
+bytes across three unrelated sites is where a wrong offset would hide, and this turns it into a
+failed result hash instead of a HAL that looks fine. The suite also covers the refusal path (a
+deliberately altered image, where the reconciler installs nothing and says which two hashes
+disagree, while the *other* row in the same run still installs), `--check-upstream` in both
+directions, symlink removal, and seven malformed rows that must fail our build rather than the
+user's boot. `packaging/test-install.sh --all`: 148 passed, 0 failed.
+
+**Not deployed.** bigtab01 runs `overlay-sync` 1.0.0. Since `camera-hal` 2.0.0 and `battery` 2.0.0
+hard-require 1.1.0, the keystone has to migrate first; until it does, rpm will correctly refuse
+them. The bytes that land in the overlay do not change, so the migration is a package-metadata
+change and not a behaviour change for the two files already live.
 
 ## The superseded four-spec layout
 

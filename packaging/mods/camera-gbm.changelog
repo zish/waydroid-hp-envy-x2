@@ -1,3 +1,13 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
+- Records the two stock hashes directly instead of naming a copy of each stock
+  library, so the tripwire no longer costs this repository 53 KB of somebody
+  else's binaries and the source package stops carrying them (docs/54). The
+  payload, the effect and the deployed bytes are unchanged.
+- Requires waydroid-ext-overlay-sync >= 1.1.0 for the hash-only stock column.
+- The shipped payload is still this project's own NDK build and still shipped as
+  bytes, which the policy permits: we produced it, from sources in this tree, on
+  a signed commit.
+
 * Wed Sep 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - Split out of waydroid-overlay as its own source package (docs/47).
 - Manifest now records the stock hash of both files this component replaces.

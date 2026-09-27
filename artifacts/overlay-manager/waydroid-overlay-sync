@@ -36,6 +36,28 @@
 # anything by itself, because on a kiosk host that drops the session back to the
 # greeter and needs someone at the machine. --apply opts into that.
 #
+# THREE KINDS OF MANIFEST ROW
+#
+#   <mode> <sha256> <path>                       a file, staged in /usr
+#   derive <mode> <image> <path in image> <stock sha256> <result sha256> <patches> <path>
+#   link <target> <path>                         a symlink
+#
+# A DERIVE ROW CARRIES NO BYTES. It says: take this file out of the user's own
+# Waydroid image, check it is the file we were built against, apply these byte
+# edits, check the result, install that. The reason is that a one-byte patch of
+# a vendor binary is still a redistribution of that vendor binary, and it is not
+# ours to redistribute -- while every user who can run these packages already
+# has the input sitting in their own images directory
+# (docs/54-no-vendored-binaries.md). The stock-hash check is not a formality: a
+# hash that has stopped matching means an image upgrade has moved under a file a
+# package silently replaces, which is exactly the alarm docs/47 specified and
+# never built. Refusing is the correct answer and `--check-upstream` asks the
+# same question for every row without changing anything.
+#
+# Extraction is `debugfs dump` on the image, read-only and unprivileged -- the
+# images are 0644 and ext2/4, so no loop mount and no root is needed for the
+# read itself (only writing into /var/lib/waydroid needs privilege, as before).
+#
 # LAYOUT
 #
 #   /usr/lib/waydroid-overlay/<component>/{system,vendor}/...     payload
@@ -55,10 +77,11 @@
 # Usage:
 #   waydroid-overlay-sync              reconcile the overlay
 #   waydroid-overlay-sync --verify     report drift, change nothing (exit 3 if any)
+#   waydroid-overlay-sync --check-upstream   has an image update moved under us?
 #   waydroid-overlay-sync --apply      reconcile, then restart the container
 #   waydroid-overlay-sync --quiet      only speak when something changed or broke
 #
-# Env: STAGE_DIRS, OVERLAY_DIR, STATE_DIR, RW_DIR
+# Env: STAGE_DIRS, OVERLAY_DIR, STATE_DIR, RW_DIR, IMAGES_DIR
 set -eu
 
 STAGE_DIRS=${STAGE_DIRS:-"/usr/lib/waydroid-overlay /usr/share/waydroid-overlay \
@@ -69,27 +92,33 @@ WAYDROID_CFG=${WAYDROID_CFG:-/var/lib/waydroid/waydroid.cfg}
 # The overlayfs upperdir, which outranks everything we place. Not ours, not
 # written by us -- read only to notice when it is hiding our work.
 RW_DIR=${RW_DIR:-$(dirname "$OVERLAY_DIR")/overlay_rw}
+# Where system.img and vendor.img live, for derive rows. Empty means "ask
+# waydroid.cfg, then try the usual two places".
+IMAGES_DIR=${IMAGES_DIR:-}
 
 VERIFY=0
 APPLY=0
 FORCE=0
 QUIET=0
+CHECK_UPSTREAM=0
 stage_override=""
 
 usage() {
-	sed -n '4,8p;56,62p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '5p;77,84p' "$0" | sed 's/^# \{0,1\}//'
 	exit "${1:-0}"
 }
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--verify|-n|--dry-run) VERIFY=1; shift ;;
+	--check-upstream)      CHECK_UPSTREAM=1; shift ;;
 	--apply)               APPLY=1; shift ;;
 	--force)               FORCE=1; shift ;;
 	--quiet|-q)            QUIET=1; shift ;;
 	--stage-dir)           stage_override="$stage_override $2"; shift 2 ;;
 	--overlay-dir)         OVERLAY_DIR="$2"; shift 2 ;;
 	--state-dir)           STATE_DIR="$2"; shift 2 ;;
+	--images-dir)          IMAGES_DIR="$2"; shift 2 ;;
 	-h|--help)             usage 0 ;;
 	*) echo "unknown argument: $1" >&2; usage 2 ;;
 	esac
@@ -122,21 +151,116 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
+# ------------------------------------------------------- reading the images
+#
+# Only derive rows and --check-upstream need this, and both need it read-only.
+
+images_dir() {
+	if [ -n "$IMAGES_DIR" ]; then printf '%s\n' "$IMAGES_DIR"; return 0; fi
+	if [ -r "$WAYDROID_CFG" ]; then
+		p=$(sed -n 's/^[[:space:]]*images_path[[:space:]]*=[[:space:]]*//p' "$WAYDROID_CFG" |
+			head -1 | sed 's/[[:space:]]*$//')
+		if [ -n "$p" ] && [ -d "$p" ]; then printf '%s\n' "$p"; return 0; fi
+	fi
+	for p in /etc/waydroid-extra/images /usr/share/waydroid-extra/images; do
+		[ -d "$p" ] && { printf '%s\n' "$p"; return 0; }
+	done
+	return 1
+}
+
+# $1 image (system|vendor), $2 absolute path inside it, $3 destination file.
+extract_from_image() {
+	_id=$(images_dir) || { warn "  cannot find the Waydroid images directory"; return 1; }
+	_img="$_id/$1.img"
+	[ -f "$_img" ] || { warn "  $_img does not exist"; return 1; }
+	command -v debugfs >/dev/null 2>&1 || { warn "  debugfs not found (install e2fsprogs)"; return 1; }
+	rm -f "$3"
+	# debugfs reports a failed dump on stderr and still exits 0, so the only
+	# trustworthy evidence that it worked is the file it was supposed to write.
+	debugfs -R "dump $2 $3" "$_img" >/dev/null 2>&1 || true
+	[ -s "$3" ] || { warn "  could not read $2 out of $_img"; return 1; }
+	return 0
+}
+
+# An overlay path maps to an image and a path inside it: overlay/vendor/X is
+# Android /vendor/X, which is /X inside vendor.img, and likewise for system.
+image_for_rel() {
+	case "$1" in
+	vendor/*) printf '%s %s\n' vendor "${1#vendor}" ;;
+	system/*) printf '%s %s\n' system "${1#system}" ;;
+	*) return 1 ;;
+	esac
+}
+
+# $1 file to patch, $2 comma-separated <hex offset>:<old>:<new> list.
+apply_patches() {
+	_f=$1
+	_oldifs=$IFS
+	IFS=,
+	for _p in $2; do
+		IFS=$_oldifs
+		[ -n "$_p" ] || continue
+		_off=${_p%%:*}
+		_rest=${_p#*:}
+		_new=${_rest#*:}
+		_oct=$(printf '%03o' "$((0x$_new))")
+		# shellcheck disable=SC2059
+		printf "\\$_oct" | dd of="$_f" bs=1 seek="$((0x$_off))" conv=notrunc 2>/dev/null || {
+			IFS=$_oldifs
+			return 1
+		}
+		IFS=,
+	done
+	IFS=$_oldifs
+	return 0
+}
+
 # ------------------------------------------------------- what should be there
 #
-# One line per file: "stagedir component mode sha relpath". Collected in stage
-# dir order, so a later stage dir overriding an earlier one is just the last
-# line for that path winning. Two components inside the SAME stage dir claiming
-# one path is a packaging bug and is reported rather than silently resolved.
+# One line per row: "stagedir component kind mode spec relpath". The spec column
+# is type-dependent and is packed with '|' so the record keeps a fixed arity and
+# the overlay path stays last, which is what lets a path containing a space
+# still be recovered as the tail of the line:
+#
+#   file    <sha256>
+#   derive  <result sha>|<stock sha>|<image>|<path in image>|<patches>
+#   link    <target>
+#
+# Collected in stage dir order, so a later stage dir overriding an earlier one is
+# just the last line for that path winning. Two components inside the SAME stage
+# dir claiming one path is a packaging bug and is reported rather than silently
+# resolved.
+
+: >"$tmp/stockrows"
 
 for dir in $STAGE_DIRS; do
 	[ -d "$dir/manifests" ] || continue
 	for m in "$dir"/manifests/*.manifest; do
 		[ -e "$m" ] || continue
 		comp=$(basename "$m" .manifest)
-		while read -r mode sha rel; do
-			case "$mode" in ''|\#*) continue ;; esac
-			printf '%s %s %s %s %s\n' "$dir" "$comp" "$mode" "$sha" "$rel"
+		while IFS= read -r row; do
+			case "$row" in '') continue ;; esac
+			# shellcheck disable=SC2086
+			set -- $row
+			case "$1" in
+			'#')
+				# '# stock <sha256> <path>' is recorded metadata, not prose:
+				# it is what --check-upstream compares against.
+				if [ "${2:-}" = stock ] && [ $# -ge 4 ]; then
+					printf '%s %s %s %s\n' "$dir" "$comp" "$3" "$4" >>"$tmp/stockrows"
+				fi
+				continue ;;
+			\#*) continue ;;
+			derive)
+				[ $# -eq 8 ] || { warn "error: $comp has a malformed derive row: $row"; rc=1; continue; }
+				printf '%s %s derive %s %s|%s|%s|%s|%s %s\n' \
+					"$dir" "$comp" "$2" "$6" "$5" "$3" "$4" "$7" "$8" ;;
+			link)
+				[ $# -eq 3 ] || { warn "error: $comp has a malformed link row: $row"; rc=1; continue; }
+				printf '%s %s link - %s %s\n' "$dir" "$comp" "$2" "$3" ;;
+			*)
+				printf '%s %s file %s %s %s\n' "$dir" "$comp" "$1" "$2" "$3" ;;
+			esac
 		done <"$m"
 	done
 done >"$tmp/all"
@@ -150,30 +274,95 @@ fi
 awk '
 {
 	rel = ""
-	for (i = 5; i <= NF; i++) rel = rel (i > 5 ? " " : "") $i
+	for (i = 6; i <= NF; i++) rel = rel (i > 6 ? " " : "") $i
 	if (rel in owner && owner[rel] == $1 && comp[rel] != $2)
 		printf("conflict: %s is claimed by both %s and %s in %s\n",
 		       rel, comp[rel], $2, $1) >"/dev/stderr"
-	owner[rel] = $1; comp[rel] = $2; mode[rel] = $3; sha[rel] = $4
+	owner[rel] = $1; comp[rel] = $2; kind[rel] = $3; mode[rel] = $4; spec[rel] = $5
 }
 END {
 	for (rel in owner)
-		printf("%s %s %s %s %s\n", owner[rel], comp[rel], mode[rel], sha[rel], rel)
-}' "$tmp/all" | sort -k5 >"$tmp/want" || rc=1
+		printf("%s %s %s %s %s %s\n", owner[rel], comp[rel], kind[rel], mode[rel], spec[rel], rel)
+}' "$tmp/all" | sort -k6 >"$tmp/want" || rc=1
+
+# --------------------------------------------------------- --check-upstream
+#
+# Has an image update moved under a file one of these components replaces? Every
+# row that records a stock hash is checked against the bytes actually in the
+# image now. Changes nothing, and is the question docs/47 said the stock hashes
+# were being recorded for.
+
+if [ "$CHECK_UPSTREAM" = 1 ]; then
+	if [ ! -s "$tmp/stockrows" ]; then
+		say "no component records an upstream hash -- nothing to check"
+		exit 0
+	fi
+	n=0
+	bad=0
+	while read -r dir comp sha rel; do
+		set -- $(image_for_rel "$rel" || echo "")
+		if [ $# -ne 2 ]; then
+			warn "skipped: $rel ($comp) -- cannot tell which image it comes from"
+			continue
+		fi
+		if ! extract_from_image "$1" "$2" "$tmp/up"; then
+			warn "skipped: $rel ($comp) -- could not read it from $1.img"
+			continue
+		fi
+		got=$(sha256sum "$tmp/up" | cut -d' ' -f1)
+		n=$((n + 1))
+		if [ "$got" = "$sha" ]; then
+			say "ok:      $rel  ($comp)"
+		else
+			warn "CHANGED: $rel  ($comp)"
+			warn "  built against $sha"
+			warn "  image now has $got"
+			bad=$((bad + 1))
+		fi
+	done <"$tmp/stockrows"
+	say ""
+	say "checked $n upstream file(s), $bad changed"
+	[ "$bad" = 0 ] || exit 3
+	exit "$rc"
+fi
 
 # ------------------------------------------------------------------- install
 
-while read -r dir comp mode sha rel; do
-	src="$dir/$comp/$rel"
+while read -r dir comp kind mode spec rel; do
 	dst="$OVERLAY_DIR/$rel"
 
-	if [ ! -f "$src" ]; then
-		warn "error: $comp lists $rel but $src is missing"
-		rc=1
-		continue
-	fi
+	case "$kind" in
+	link)
+		target=$spec
+		if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$target" ]; then
+			continue
+		fi
+		if [ "$VERIFY" = 1 ]; then
+			if [ -e "$dst" ] || [ -L "$dst" ]; then say "differs: $rel  ($comp)"; else say "missing: $rel  ($comp)"; fi
+			drift=1
+			continue
+		fi
+		mkdir -p "$(dirname "$dst")"
+		ln -sfn "$target" "$dst"
+		say "linked:    $rel -> $target  ($comp)"
+		changed=1
+		continue ;;
+	derive)
+		result=${spec%%|*}
+		_r=${spec#*|}; stock=${_r%%|*}
+		_r=${_r#*|};   image=${_r%%|*}
+		_r=${_r#*|};   inimg=${_r%%|*}
+		patch=${_r#*|}
+		sha=$result ;;
+	*)
+		sha=$spec ;;
+	esac
 
-	if [ -f "$dst" ]; then
+	# The cheap check first, and it is the same question for a staged file and a
+	# derived one: does the destination already hold the bytes we want? On a
+	# converged system this is the only work done, so no image is opened and no
+	# patch is applied at boot.
+	if [ -f "$dst" ] && [ ! -L "$dst" ]; then
 		cur_sha=$(sha256sum "$dst" | cut -d' ' -f1)
 		# Both sides get a leading 0 before the arithmetic, because the manifest
 		# writes 0644 and `stat -c %a` writes 644: compared as strings those are
@@ -182,6 +371,55 @@ while read -r dir comp mode sha rel; do
 		if [ "$cur_sha" = "$sha" ] && [ "$((0$cur_mode))" -eq "$((0$mode))" ]; then
 			continue
 		fi
+	fi
+
+	if [ "$kind" = derive ]; then
+		if [ "$VERIFY" = 1 ]; then
+			if [ -e "$dst" ]; then say "differs: $rel  ($comp, derived)"; else say "missing: $rel  ($comp, derived)"; fi
+			drift=1
+			continue
+		fi
+		if ! extract_from_image "$image" "$inimg" "$tmp/derive"; then
+			warn "error: $comp cannot derive $rel from $image.img"
+			rc=1
+			continue
+		fi
+		got=$(sha256sum "$tmp/derive" | cut -d' ' -f1)
+		if [ "$got" != "$stock" ]; then
+			warn "error: $comp refuses to derive $rel -- $image.img has changed under it"
+			warn "       built against $stock"
+			warn "       image now has $got"
+			warn "       This package patches a file the image ships, so a changed image"
+			warn "       means the patch may no longer mean what it meant. Check for an"
+			warn "       updated package before overriding anything."
+			rc=1
+			continue
+		fi
+		if ! apply_patches "$tmp/derive" "$patch"; then
+			warn "error: $comp failed to apply its patches to $rel"
+			rc=1
+			continue
+		fi
+		got=$(sha256sum "$tmp/derive" | cut -d' ' -f1)
+		if [ "$got" != "$result" ]; then
+			warn "error: $comp derived $rel and got the wrong result -- refusing to install it"
+			warn "       expected $result"
+			warn "       produced $got"
+			rc=1
+			continue
+		fi
+		install -D -m "$mode" "$tmp/derive" "$dst"
+		say "derived:   $rel  ($comp)"
+		changed=1
+		echo "$dst" >>"$tmp/relabel"
+		continue
+	fi
+
+	src="$dir/$comp/$rel"
+	if [ ! -f "$src" ]; then
+		warn "error: $comp lists $rel but $src is missing"
+		rc=1
+		continue
 	fi
 
 	# The staged payload is the authority, so check the authority first: a bad
@@ -225,7 +463,7 @@ done <"$tmp/want"
 #   overlay/X         is Android /X         -> overlay_rw/system/X
 
 if [ -d "$RW_DIR" ]; then
-	while read -r dir comp mode sha rel; do
+	while read -r dir comp kind mode spec rel; do
 		case "$rel" in
 		vendor/*) rw="$RW_DIR/vendor/${rel#vendor/}" ;;
 		*)        rw="$RW_DIR/system/$rel" ;;
@@ -248,27 +486,42 @@ fi
 # Only files this tool placed, recorded in deployed.list, and only while they
 # still hold the bytes it placed. Anything edited since is somebody's work in
 # progress: it is reported and left alone unless --force.
+#
+# A symlink is recorded as "link:<target>" rather than as a hash, because there
+# are no contents to hash and following it would hash whatever it points at.
 
 if [ -f "$STATE_DIR/deployed.list" ]; then
 	while read -r sha rel; do
 		case "$sha" in ''|\#*) continue ;; esac
-		if awk -v r="$rel" '{ x=""; for (i=5;i<=NF;i++) x = x (i>5?" ":"") $i; if (x == r) found=1 }
+		if awk -v r="$rel" '{ x=""; for (i=6;i<=NF;i++) x = x (i>6?" ":"") $i; if (x == r) found=1 }
 		                     END { exit !found }' "$tmp/want"; then
 			continue
 		fi
 		dst="$OVERLAY_DIR/$rel"
-		[ -e "$dst" ] || continue
-		cur_sha=$(sha256sum "$dst" | cut -d' ' -f1)
-		if [ "$cur_sha" != "$sha" ] && [ "$FORCE" != 1 ]; then
-			warn "changed since deployment, NOT removing: $rel"
-			warn "  (its component is gone; remove it yourself, or re-run with --force)"
-			# Carried into the new state file on purpose. Dropping it here would
-			# be the tool forgetting it ever placed the file, which makes the
-			# warning a one-off and leaves --force with nothing to act on.
-			printf '%s %s\n' "$sha" "$rel" >>"$tmp/keep"
-			drift=1
-			continue
-		fi
+		case "$sha" in
+		link:*)
+			[ -L "$dst" ] || continue
+			if [ "$(readlink "$dst")" != "${sha#link:}" ] && [ "$FORCE" != 1 ]; then
+				warn "changed since deployment, NOT removing: $rel"
+				warn "  (its component is gone; remove it yourself, or re-run with --force)"
+				printf '%s %s\n' "$sha" "$rel" >>"$tmp/keep"
+				drift=1
+				continue
+			fi ;;
+		*)
+			[ -e "$dst" ] || continue
+			cur_sha=$(sha256sum "$dst" | cut -d' ' -f1)
+			if [ "$cur_sha" != "$sha" ] && [ "$FORCE" != 1 ]; then
+				warn "changed since deployment, NOT removing: $rel"
+				warn "  (its component is gone; remove it yourself, or re-run with --force)"
+				# Carried into the new state file on purpose. Dropping it here would
+				# be the tool forgetting it ever placed the file, which makes the
+				# warning a one-off and leaves --force with nothing to act on.
+				printf '%s %s\n' "$sha" "$rel" >>"$tmp/keep"
+				drift=1
+				continue
+			fi ;;
+		esac
 		if [ "$VERIFY" = 1 ]; then
 			say "orphan:  $rel"
 			drift=1
@@ -292,9 +545,13 @@ if [ "$VERIFY" != 1 ]; then
 	mkdir -p "$STATE_DIR"
 	{
 		echo "# written by waydroid-overlay-sync -- do not edit"
-		echo "# sha256 <space> path relative to $OVERLAY_DIR"
-		while read -r dir comp mode sha rel; do
-			printf '%s %s\n' "$sha" "$rel"
+		echo "# sha256 (or link:<target>) <space> path relative to $OVERLAY_DIR"
+		while read -r dir comp kind mode spec rel; do
+			case "$kind" in
+			link)   printf 'link:%s %s\n' "$spec" "$rel" ;;
+			derive) printf '%s %s\n' "${spec%%|*}" "$rel" ;;
+			*)      printf '%s %s\n' "$spec" "$rel" ;;
+			esac
 		done <"$tmp/want"
 		# Orphans that were left in place because somebody had edited them.
 		if [ -f "$tmp/keep" ]; then cat "$tmp/keep"; fi

@@ -323,16 +323,25 @@ string Android reports through the sensors HAL, so changing it changes observabl
      reconciler's `RemainAfterExit` unit once it has run, and a write into a mounted lowerdir
      replaces the inode on this host, so Android keeps reading the old bytes until the container
      restarts.
-   - **The four Widevine files**, which are not another `.mod` file. They need a fetched-row and a
-     symlink-row in the manifest format, and therefore a version bump of `waydroid-ext-overlay-sync`
-     — the keystone, already installed on bigtab01. Scoped in
-     [docs/47](47-package-split.md). **Folded into the larger item below**, since the
-     no-vendored-binaries policy needs the same keystone bump.
-   - **Comply with the no-vendored-binaries policy** ([docs/54](54-no-vendored-binaries.md), set
-     2026-09-24). `camera-hal` and `battery` ship patched vendor binaries and must instead ship
-     the patch, deriving the file from the user's own `vendor.img` at reconcile time — verified
-     feasible unprivileged. This supersedes the migration ordering above: **hold `camera-hal` and
-     `battery` out of the third migration**; the other three ship only text and are unaffected.
+   - **The four Widevine files**, which are not another `.mod` file. ~~They need a fetched-row and a
+     symlink-row in the manifest format, and therefore a version bump of
+     `waydroid-ext-overlay-sync`~~ — **the symlink row and the keystone bump landed 2026-09-26 in
+     1.1.0; the fetched row is deliberately deferred with the package.** The reason for deferring
+     it is a finding rather than a lack of time: the only digest the repository records for the
+     Google prebuilt is an **md5 of a GitHub-generated zip**, which is a weaker pin than a file
+     digest and is not a hash of the two binaries at all, and the paths of those binaries *inside*
+     the archive are recorded nowhere. So the fetcher cannot yet verify what it fetched against
+     anything this project has written down. Settling that is its own piece of work.
+   - ~~**Comply with the no-vendored-binaries policy**~~ ([docs/54](54-no-vendored-binaries.md),
+     set 2026-09-24) — **done 2026-09-26.** `camera-hal` 2.0.0 and `battery` 2.0.0 ship the patch
+     rather than the patched binary, deriving the file from the user's own `vendor.img` at reconcile
+     time; every other stock tripwire became a bare hash. No RPM this project builds carries a
+     third-party binary now. The keystone went to 1.1.0 to carry the mechanism, and both derive
+     packages hard-require that version, so **the new ordering constraint is that the keystone
+     migrates to bigtab01 first or rpm refuses them** — which replaces the softer "hold them out
+     of the migration" rule with one the dependency solver enforces. The tree still carries the
+     `.so` and `.orig` files as the test oracle; deleting them is entangled with the
+     history-rewrite decision, which is the owner's.
    - **`mediad`**, the cheapest remaining host package.
    - **`wifi/build.sh --rpm`**, plus the component argument for `artifacts/wifi/install.sh` that
      `artifacts/overlay/install.sh` already has. This unblocks `wifid`'s `-ba` and with it

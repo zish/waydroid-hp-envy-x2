@@ -44,7 +44,7 @@
 # Confirm the fix took by reading /proc/<pid>/fdinfo/<timerfd> inside the
 # container: clockid must be 7 and it_interval must be (60, 0).
 
-VERSION=1.0.0
+VERSION=2.0.0
 RELEASE=1
 KIND=overlay
 
@@ -60,7 +60,7 @@ LICENSE="Apache-2.0"
 # Nothing else. The patched HAL reads the host's power supply through the
 # container's own sysfs and needs no host daemon, which makes this the one
 # overlay component with no companion package at all.
-REQUIRES="waydroid-ext-overlay-sync"
+REQUIRES="waydroid-ext-overlay-sync >= 1.1.0"
 
 DOCS="docs/user/overlay.md docs/user/lxc-config.md docs/10-battery-fixed.md docs/48-battery-frozen-and-netd-stale.md"
 
@@ -83,9 +83,19 @@ Polling uses CLOCK_BOOTTIME rather than CLOCK_BOOTTIME_ALARM. It counts across
 suspend but does not wake the machine, so a suspended laptop is not woken every
 sixty seconds to poll its own battery."
 
+# A DERIVE row, so this package ships no vendor binary: the five bytes are
+# applied to the copy in the user's own vendor.img at reconcile time, between a
+# check of the stock hash and a check of the result. Patching somebody else's
+# binary does not make it ours to redistribute (docs/54-no-vendored-binaries.md),
+# and the input is already on every machine that can run this.
+#
+# The three patch sites, in the order the header above explains them:
+#   6720:48:c3                     healthd_board_init -> ret
+#   6730:50:31,6731:66:c0,6732:c7:c3   healthd_board_battery_update -> xor eax,eax; ret
+#   cbd1:09:07                     CLOCK_BOOTTIME_ALARM -> CLOCK_BOOTTIME
+#
 # 0755, not 0644: init execs this one, unlike the libraries the other overlay
-# components ship. It replaces a stock file, so the manifest records the
-# upstream hash for --check-upstream.
+# components ship.
 FILES="
-0755 vendor/bin/hw/android.hardware.health@2.0-service.waydroid artifacts/health/android.hardware.health@2.0-service.waydroid artifacts/health/android.hardware.health@2.0-service.waydroid.orig
+derive 0755 vendor/bin/hw/android.hardware.health@2.0-service.waydroid vendor /bin/hw/android.hardware.health@2.0-service.waydroid de3cf6bc2565079893dbc3db5c52791c30b168df9c3684e4b4857db4a483a79b a8401c142f4f1f42d854f558fade2207915b2f40ff6df306cb4c02bc3027c40a 6720:48:c3,6730:50:31,6731:66:c0,6732:c7:c3,cbd1:09:07
 "

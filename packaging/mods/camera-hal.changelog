@@ -1,3 +1,19 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 2.0.0-1
+- Ships the patch instead of the patched binary. The single byte at 0x2c061 is
+  now applied to the copy in the user's own vendor.img at reconcile time,
+  between a check of the stock hash and a check of the result, so this package
+  no longer redistributes Waydroid's vendor binary (docs/54). The bytes were
+  always already on any machine that could run this.
+- Major version because the payload shape changed, not the effect: the file that
+  lands in the overlay is byte-identical to what 1.0.0 shipped, which is
+  asserted by bin/overlay-sync-test.sh against the copy in this repository.
+- Requires waydroid-ext-overlay-sync >= 1.1.0, which is where derive rows are
+  understood. An older reconciler would fail loudly rather than deploy nothing,
+  but the dependency means it cannot get that far.
+- The resolution-cap XML stays a plain payload row: it is text produced by
+  deleting lines from the stock file, which is ours to ship. Its stock hash is
+  now recorded as a bare sha256 rather than by naming a copy of the file.
+
 * Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First package. Closes the last unsatisfiable dependency of the camera group
   together with the retirement of waydroid-ext-uvc-autosuspend (docs/12).

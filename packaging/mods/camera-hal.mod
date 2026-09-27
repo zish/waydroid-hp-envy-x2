@@ -38,7 +38,7 @@
 # black, and it is why the cap is named in the package description and not
 # only in a comment.
 
-VERSION=1.0.0
+VERSION=2.0.0
 RELEASE=1
 KIND=overlay
 
@@ -62,7 +62,7 @@ LICENSE="Apache-2.0"
 # effect is to make MORE apps willing to open it -- so installing it alone
 # widens the surface of a bug it does not fix. That is the "worse than stock"
 # test docs/47 puts on individual packages, and it fails it.
-REQUIRES="waydroid-ext-overlay-sync
+REQUIRES="waydroid-ext-overlay-sync >= 1.1.0
 waydroid-ext-camera-gbm"
 
 DOCS="docs/user/overlay.md docs/user/lxc-config.md docs/11-camera-facing.md docs/12-v4l2-frame-errors.md"
@@ -88,12 +88,24 @@ package is installed.
 Neither file is useful without waydroid-ext-camera-gbm, which is what makes
 camera frames arrive at all, so that package is required rather than suggested."
 
-# <mode> <path in the overlay> <payload in this repo> [stock file it replaces]
+# <mode> <path in the overlay> <payload in this repo> [stock sha256 it replaces]
+# derive <mode> <path> <image> <path in image> <stock sha256> <result sha256> <patches>
+#
+# The HAL is a DERIVE row, so this package ships no vendor binary at all: the
+# bytes are taken out of the user's own vendor.img at reconcile time, checked
+# against the stock hash, patched, checked again. A one-byte patch of Waydroid's
+# own binary is still a redistribution of that binary and it is not ours to make
+# (docs/54-no-vendored-binaries.md) -- and every user who can run this package
+# already has the input in their images directory.
+#
+# The XML is different and stays a plain row: it is text produced by deleting
+# lines from the stock file, which is ours to ship. It records the stock hash as
+# a bare sha256 rather than naming a copy of the file, so the tripwire costs the
+# repository nothing to keep.
 #
 # 0644 for the HAL: it is a library loaded by the camera provider, not a service
-# binary that init execs. Both rows REPLACE a stock file, so both record an
-# upstream hash for `waydroid-overlay-sync --check-upstream`.
+# binary that init execs.
 FILES="
-0644 vendor/lib/camera.device@3.4-external-impl.so artifacts/camera/camera.device@3.4-external-impl.so.back artifacts/camera/camera.device@3.4-external-impl.so.orig
-0644 vendor/etc/external_camera_config.xml         artifacts/overlay/vendor/etc/external_camera_config.xml  artifacts/waydroid-vendor-original/external_camera_config.xml
+derive 0644 vendor/lib/camera.device@3.4-external-impl.so vendor /lib/camera.device@3.4-external-impl.so 95b1b3e4ff6d17ce7cd56086626b6cbc0db7c70fd49760b57414f8128c91dd69 7028e057f21fb7b7cbb3e4cfce88a29f7ff35a3304107f4c1d1849193343a017 2c061:02:01
+0644 vendor/etc/external_camera_config.xml artifacts/overlay/vendor/etc/external_camera_config.xml dd6d27649154f485cdc7294f99dd9c97132c4d378900d5ac349ad11693ddea1d
 "

@@ -1,3 +1,8 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
+- Records the light HAL .rc's stock hash directly instead of naming the .orig
+  copy of it (docs/54). Payload and effect unchanged.
+- Requires waydroid-ext-overlay-sync >= 1.1.0 for the hash-only stock column.
+
 * Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First package. Completes the brightness group's overlay half; the daemon and
   the SELinux policy were already packaged.

@@ -98,11 +98,22 @@ for mod in $mods; do
 
 	case "$KIND" in
 	overlay)
+		# Derived and linked rows name no file in this repository -- a derive
+		# row's "payload" is a hash and a patch list, and a link row's is a
+		# target -- so there is nothing to put in the tarball for either. A
+		# plain row's optional stock column may likewise be the bare sha256
+		# rather than a path, which is how a tripwire stops requiring a copy of
+		# the file it watches (docs/54-no-vendored-binaries.md).
 		echo "packaging/stage-overlay.sh" >>"$list"
-		printf '%s\n' "$FILES" | while read -r mode rel from stock; do
-			case "$mode" in '' | \#*) continue ;; esac
-			echo "$from"
-			[ -n "${stock:-}" ] && echo "$stock"
+		printf '%s\n' "$FILES" | while read -r f1 f2 f3 f4; do
+			case "$f1" in '' | \#* | derive | link) continue ;; esac
+			echo "$f3"
+			if [ -n "${f4:-}" ]; then
+				if [ "${#f4}" -eq 64 ] && ! printf '%s' "$f4" | grep -q '[^0-9a-f]'; then
+					continue
+				fi
+				echo "$f4"
+			fi
 		done >>"$list" ;;
 	group)
 		: ;;

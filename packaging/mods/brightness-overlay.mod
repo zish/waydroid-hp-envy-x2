@@ -41,7 +41,7 @@
 # own and can be staged before the daemon exists; this .rc is correct only in
 # the daemon's presence.
 
-VERSION=1.0.0
+VERSION=1.0.1
 RELEASE=1
 KIND=overlay
 
@@ -58,7 +58,7 @@ LICENSE="Apache-2.0"
 # and with no sensord installed there is nothing to lose it to. Contrast
 # waydroid-ext-backlight, which Recommends the daemon because its SELinux
 # policy is correct whether or not anything is using it yet.
-REQUIRES="waydroid-ext-overlay-sync
+REQUIRES="waydroid-ext-overlay-sync >= 1.1.0
 waydroid-ext-sensord"
 
 DOCS="docs/user/overlay.md docs/user/lxc-config.md docs/37-brightness.md"
@@ -84,5 +84,5 @@ brightness slider that moves nothing."
 
 # Replaces a stock file, so the manifest records the upstream hash.
 FILES="
-0644 vendor/etc/init/android.hardware.light@2.0-service.waydroid.rc artifacts/overlay/vendor/etc/init/android.hardware.light@2.0-service.waydroid.rc artifacts/overlay/vendor/etc/init/android.hardware.light@2.0-service.waydroid.rc.orig
+0644 vendor/etc/init/android.hardware.light@2.0-service.waydroid.rc artifacts/overlay/vendor/etc/init/android.hardware.light@2.0-service.waydroid.rc 2047dd088b2bdc51dfda4dbe55ae5b559cf76257a49c7e017e9c7c2ebf0e1e42
 "

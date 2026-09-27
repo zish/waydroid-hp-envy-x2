@@ -51,6 +51,14 @@ addFilter("unstripped-binary-or-object.*waydroid-overlay")
 # not a linkable library, so it must not land in /usr/lib64 on a multilib host.
 # systemd, udev and dracut all stage into %{_prefix}/lib for the same reason.
 addFilter("hardcoded-library-path.*waydroid-overlay")
+# A derive row names the path its input occupies INSIDE the user's own
+# vendor.img -- /lib/camera.device@3.4-external-impl.so is an Android path in an
+# ext2 image that debugfs reads, and it is not a path on the host filesystem at
+# all. It can no more be %{_libdir} than a path inside a tarball could: the image
+# was built by somebody else and the file is where they put it. Named for the one
+# package whose in-image path starts with /lib, so that another one has to be
+# looked at rather than inheriting the exemption.
+addFilter("waydroid-ext-camera-hal.*hardcoded-library-path in /lib/camera")
 
 # ---------------------------------------------------------- obsolete rpm tags
 #
@@ -97,7 +105,29 @@ addFilter("waydroid-ext-backlight.*only-non-binary-in-usr-lib")
 # reconciler reads, not a library directory, and the components that DO ship
 # Android ELF put it in exactly the same place. Named individually rather than
 # by a wildcard, so that a fourth package tripping this has to be looked at.
-addFilter("waydroid-ext-(brightness-overlay|wifi-framework|wifi-hostd).*only-non-binary-in-usr-lib")
+#
+# camera-hal and battery joined them on 2026-09-26 and for a different reason
+# worth keeping distinct: they used to ship Android ELF and deliberately stopped.
+# Both are now derive rows, which carry a stock hash, a result hash and a list of
+# byte offsets instead of the patched vendor binary itself -- so the package that
+# used to be 400 KB of somebody else's ELF is a manifest and nothing else
+# (docs/54-no-vendored-binaries.md). An empty-looking package is exactly right
+# here, and the check has no way to know that.
+addFilter("waydroid-ext-(brightness-overlay|wifi-framework|wifi-hostd|camera-hal|battery).*only-non-binary-in-usr-lib")
+
+# ------------------------------------ a package that is a patch, not a binary
+#
+# Same two packages, same cause, and this one is an E rather than a W. rpmlint
+# reasons that an ExclusiveArch package with no ELF in it should have been
+# noarch, and for an ordinary package that is sound advice. It is wrong here and
+# the arch is deliberate: a derive row's patch offsets are valid only against the
+# x86_64 Android build of that binary, so the package IS architecture-specific
+# even though its payload is text. ExclusiveArch makes an aarch64 host refuse it
+# on the shelf, which is the same reason docs/47-package-split.md gives for the
+# components that do carry ELF. Installing it there would now fail safe anyway --
+# the stock hash would not match and the reconciler would refuse rather than
+# deploy anything -- but failing before installation beats failing at boot.
+addFilter("waydroid-ext-(camera-hal|battery).*no-binary")
 
 # ------------------------------------------- rm of our own state on uninstall
 #

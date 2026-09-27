@@ -6,7 +6,7 @@
 # tree. Nothing about this is HP Envy x2 specific -- it is a bug in Waydroid's
 # own wrapper and it reaches any host with a UVC camera.
 
-VERSION=1.0.0
+VERSION=1.0.1
 RELEASE=1
 KIND=overlay
 
@@ -20,7 +20,7 @@ SUMMARY="Waydroid minigbm wrapper rebuilt so camera buffer imports get a real wi
 # Mesa's gbm, statically linked into the rebuilt wrapper, is MIT.
 LICENSE="Apache-2.0 AND MIT"
 
-REQUIRES="waydroid-ext-overlay-sync"
+REQUIRES="waydroid-ext-overlay-sync >= 1.1.0"
 
 DOCS="docs/user/overlay.md docs/user/lxc-config.md docs/08-camera-fixed.md docs/09-upstream-report.md"
 
@@ -43,6 +43,6 @@ for apps that open the camera through the 32-bit path."
 # so an image upgrade that changes it can be noticed instead of silently
 # reverted. Both rows here REPLACE a stock file. See docs/47-package-split.md.
 FILES="
-0644 vendor/lib64/libgbm_mesa_wrapper.so artifacts/phase2/libgbm_mesa_wrapper-fixed-64.so artifacts/lib/libgbm_mesa_wrapper.so
-0644 vendor/lib/libgbm_mesa_wrapper.so   artifacts/phase2/libgbm_mesa_wrapper-fixed-32.so artifacts/lib/libgbm_mesa_wrapper-32.so
+0644 vendor/lib64/libgbm_mesa_wrapper.so artifacts/phase2/libgbm_mesa_wrapper-fixed-64.so 03dc230bf87ff1a5f59c521e2ddbd6b04bb8ab692d2fe057caf7b57c65d78620
+0644 vendor/lib/libgbm_mesa_wrapper.so artifacts/phase2/libgbm_mesa_wrapper-fixed-32.so 55eee0b43fc4abad29aa746eb734676691357614a5d8f75418baa162faf9422e
 "

@@ -159,17 +159,35 @@ render_one() {
 		# copy a file whose hash does not match -- so a manifest that disagrees
 		# with its own payload produces a package that installs and then quietly
 		# deploys nothing. Catch it here instead.
+		# A derive row is checked for the OPPOSITE of a plain one: it must ship
+		# no bytes at all. Getting that wrong ships somebody else's vendor
+		# binary inside a package whose whole reason for existing is not to
+		# (docs/54-no-vendored-binaries.md), and it would be invisible --
+		# the package would install and work. So it fails the build instead.
 		cat >"$tmp/CHECK" <<-EOC
 		%check
 		fail=0
 		cd %{buildroot}%{overlay_dir}
-		while read -r mode sha rel; do
-		    case "\$mode" in ''|\#*) continue ;; esac
-		    have=\$(sha256sum "$NAME/\$rel" | cut -d' ' -f1)
-		    if [ "\$have" != "\$sha" ]; then
-		        echo "payload does not match manifest: \$rel" >&2
-		        fail=1
-		    fi
+		while read -r f1 f2 f3 f4 f5 f6 f7 f8; do
+		    case "\$f1" in ''|'#'*) continue ;; esac
+		    case "\$f1" in
+		    derive)
+		        if [ -e "$NAME/\$f8" ]; then
+		            echo "derive row shipped payload, which it must never do: \$f8" >&2
+		            fail=1
+		        fi ;;
+		    link)
+		        if [ -e "$NAME/\$f3" ]; then
+		            echo "link row shipped payload, which it must never do: \$f3" >&2
+		            fail=1
+		        fi ;;
+		    *)
+		        have=\$(sha256sum "$NAME/\$f3" | cut -d' ' -f1)
+		        if [ "\$have" != "\$f2" ]; then
+		            echo "payload does not match manifest: \$f3" >&2
+		            fail=1
+		        fi ;;
+		    esac
 		done < manifests/$NAME.manifest
 		[ "\$fail" = 0 ]
 

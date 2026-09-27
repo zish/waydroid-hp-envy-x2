@@ -25,7 +25,7 @@
 # drops the session back to the SDDM greeter and needs someone at the machine, so
 # it prints the restart and lets a human choose. --apply opts in.
 
-VERSION=1.0.0
+VERSION=1.1.0
 RELEASE=1
 KIND=host
 
@@ -46,10 +46,16 @@ BUILDREQUIRES="systemd-rpm-macros"
 # no-ops when a tool is missing is the failure mode this whole tool exists to
 # prevent. systemd for the unit. waydroid because /var/lib/waydroid is the
 # subject -- with no Waydroid there is nothing to reconcile.
+# e2fsprogs for debugfs, which is how a derive row reads its input out of the
+# user's own system.img or vendor.img. Read-only and unprivileged -- the images
+# are 0644 ext2/4, so no loop mount and no root is needed for the read. It is a
+# Requires and not a Recommends because a component that ships a patch instead
+# of a binary deploys NOTHING without it, and would do so quietly.
 REQUIRES="waydroid
 systemd
 coreutils
-gawk"
+gawk
+e2fsprogs"
 
 # restorecon relabels what the tool places, and the tool guards its absence with
 # command -v, so this is a genuine Recommends and not a Requires: on a host built
@@ -75,6 +81,17 @@ changes nothing, exiting 3 if the live overlay no longer matches what the
 installed components say it should be: a wiped overlay, a hand-edit made
 while chasing something and then forgotten, or a restore of /var from a
 backup older than the packages.
+
+Some components ship no payload at all. A component may instead record where
+the file lives inside your own Waydroid image, what it must hash to, and the
+handful of bytes to change -- and the reconciler then extracts it, checks it
+is the file the package was built against, patches it, checks the result and
+installs that. Nothing is downloaded and nothing of somebody else's is
+redistributed; the input was already on your disk. If the image no longer
+matches what the package was built against, it refuses and says so, which is
+the alarm worth having: it means an image update has moved under a file a
+package silently replaces. --check-upstream asks that question for every such
+file without changing anything.
 
 Files edited since deployment are never removed. Each is compared against
 the hash recorded when it was placed, and one that no longer matches is

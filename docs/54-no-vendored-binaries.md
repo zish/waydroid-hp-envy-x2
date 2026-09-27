@@ -5,9 +5,14 @@
 needs one, it is obtained at RPM install time or inside Android, never carried in this
 repository.
 
-This note is the inventory it applies to and the migration out. **None of the third-party
-binaries comply yet.** Build output this project produced is a separate case and was ruled
-compliant the same day — see *What we built is not external*, below.
+This note is the inventory it applies to and the migration out. **The packages comply as of
+2026-09-26; the repository does not yet.** `camera-hal` 2.0.0 and `battery` 2.0.0 ship a patch
+instead of a patched binary, and every stock tripwire is now a bare hash rather than a copy of the
+file it watches — so no RPM this project builds carries a third-party binary any more, and the
+files those packages used to need are referenced by no `.mod`. What remains is Widevine, which is
+genuinely not on the user's disk and needs the fetcher, and the question of deleting the
+now-unreferenced files from the tree and from the history. Build output this project produced is a
+separate case and was ruled compliant the same day — see *What we built is not external*, below.
 
 ## The inventory
 
@@ -76,38 +81,65 @@ keystone package already installed on bigtab01.** That is the real cost of this 
 migration of the thing every other overlay component depends on, not an edit to five `.mod`
 files.
 
-1. **A derived row.** `<mode> derive <source path in the image> <stock sha256> <result sha256>`
-   plus a patch list. The reconciler extracts the source, refuses if its hash is not the recorded
-   stock hash, applies the offsets, refuses if the result hash is wrong, and installs. Covers
-   `camera-hal` and `battery`. The refusal is the feature: a stock hash that stopped matching
-   means the image changed under a file we silently replace, which is precisely the alarm
-   [docs/47](47-package-split.md) specified and never built.
+**Built 2026-09-26 as `waydroid-ext-overlay-sync` 1.1.0: mechanisms 1 and 3 are done, 2 is
+deferred with Widevine.** Every component using a new row type carries
+`Requires: waydroid-ext-overlay-sync >= 1.1.0`, so an older reconciler cannot be handed a manifest
+it would misread — and the new row types are keyword-led rather than hidden behind a `#` for the
+same reason, so that an older one fails loudly instead of finding no rows it recognises and
+reporting success. 37 checks in [bin/overlay-sync-test.sh](../bin/overlay-sync-test.sh) cover it
+against a real ext2 image. **Built here, not deployed there: bigtab01 still runs 1.0.0.**
+
+1. ~~**A derived row.**~~ **Done.** As built it is
+   `derive <mode> <image> <path in image> <stock sha256> <result sha256> <patches> <path>`, the
+   patch list inline as comma-separated `<hex offset>:<old>:<new>` — so a derive row adds no file
+   to the package at all and the manifest stays the single source of truth. The reconciler extracts
+   with `debugfs` (read-only and unprivileged: the images are 0644 ext2), refuses if the hash is
+   not the recorded stock hash, applies the offsets, refuses if the result hash is wrong, and
+   installs. One refused row does not abandon the rest of the overlay, which was verified rather
+   than assumed. The refusal is the feature: a stock hash that stopped matching means the image
+   changed under a file we silently replace, which is precisely the alarm
+   [docs/47](47-package-split.md) specified and never built. `--check-upstream` now asks that same
+   question of every row recording a stock hash, changing nothing, which is its other half.
 2. **A fetched row**, for Widevine only — the one case where the bytes genuinely are not on the
    machine. Download the pinned archive, verify its digest, extract, install. `%ghost` in
    `%files`. Already designed in [docs/47](47-package-split.md).
-3. **A hash-only tripwire.** The fourth column of a `FILES` row currently names a *file* in this
-   repo whose sha256 gets recorded. It should name the sha256 directly. Same manifest output,
-   same `--check-upstream` value, and `artifacts/lib/*.so` and every `….orig` stop existing.
+3. ~~**A hash-only tripwire.**~~ **Done.** The fourth column of a `FILES` row may now be the
+   sha256 itself, and all five overlay components that had one were converted. Same manifest
+   output, same `--check-upstream` value. `artifacts/lib/*.so` and every `….orig` are now
+   referenced by nothing that builds — but **they are still in the tree on purpose**, for one
+   session longer: they are the oracle [bin/overlay-sync-test.sh](../bin/overlay-sync-test.sh)
+   asserts the derived bytes against, and removing them is entangled with the history-rewrite
+   decision below, which is the owner's to make. The policy win is banked either way, because no
+   package carries them.
 
 A symlink row is also outstanding, for Widevine's `libprotobuf-cpp-lite.so`. It is unrelated to
 this policy and is recorded in [docs/47](47-package-split.md).
 
 ## What this does to the five packages built on 2026-09-24
 
-| Package | Payload | Affected |
-|---|---|---|
-| `camera-hal` | vendor `.so` + XML | **yes** — the `.so` must become a derived row |
-| `battery` | vendor binary | **yes** — must become a derived row |
-| `brightness-overlay` | one `.rc` | no — text, written here |
-| `wifi-framework` | one XML | no — text, AOSP-shaped but written here |
-| `wifi-hostd` | one `.rc` + one XML | no — text, written here |
+| Package | Payload | Affected | As of 2026-09-26 |
+|---|---|---|---|
+| `camera-hal` | vendor `.so` + XML | **yes** — the `.so` must become a derived row | **2.0.0**: derive row, plus the XML as a plain row with a bare stock hash. 36 KB tarball, from ~600 KB |
+| `battery` | vendor binary | **yes** — must become a derived row | **2.0.0**: derive row. The RPM is one manifest and a doc directory, nothing else |
+| `brightness-overlay` | one `.rc` | no — text, written here | 1.0.1, stock hash inlined |
+| `wifi-framework` | one XML | no — text, AOSP-shaped but written here | unchanged: it replaces nothing, so it never had a tripwire |
+| `wifi-hostd` | one `.rc` + one XML | no — text, written here | 1.0.1, stock hash inlined |
 
-So three of the five are already compliant and can migrate to bigtab01 whenever the owner wants.
+So three of the five were already compliant and can migrate to bigtab01 whenever the owner wants.
 
-**`camera-hal` and `battery` should be held out of the third migration.** They work and their
-payload is byte-identical to what is live, but installing 1.0.0 puts a package on the machine
-whose whole shape is about to change, and the point of a migration is to stop having two answers
-to "where does this file come from". They go in after the derived row exists.
+~~**`camera-hal` and `battery` should be held out of the third migration.**~~ **The reason for that
+hold is gone**: the shape that was about to change has changed, and both are 2.0.0. What replaces
+it is narrower and firmer — both hard-require `waydroid-ext-overlay-sync >= 1.1.0` and bigtab01
+has 1.0.0, so **the keystone must migrate first or rpm will refuse them.** That is worth having
+caused deliberately: it is the dependency mechanism doing the job the "two answers to where does
+this file come from" argument was standing in for.
+
+**The deployed bytes do not change.** Deriving from the stock file in `vendor.img` reproduces
+exactly what 1.0.0 shipped, asserted for both packages byte for byte by
+[bin/overlay-sync-test.sh](../bin/overlay-sync-test.sh) against the patched copies this repository
+already carries. For `battery` that assertion earns its keep: five bytes across three unrelated
+sites is where an offset error would hide, and the test turns a wrong offset into a failed result
+hash rather than a subtly broken HAL nobody notices for a fortnight.
 
 ## Deleting them from `HEAD` does not remove them from the repository
 

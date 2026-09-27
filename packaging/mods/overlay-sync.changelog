@@ -1,3 +1,30 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
+- Three new manifest row types, and the mechanism the no-vendored-binaries
+  policy needs (docs/54). A DERIVE row carries no bytes: it records where the
+  file lives inside the user's own system.img or vendor.img, the hash it must
+  have, the hash the patched result must have, and the byte edits between them.
+  The reconciler extracts with debugfs -- read-only and unprivileged, because
+  the images are 0644 ext2 -- verifies, patches, verifies again, and installs.
+- The refusal is the feature, not the fallback. A stock hash that has stopped
+  matching means an image update has moved under a file a component silently
+  replaces, so the reconciler installs nothing and says which file and which two
+  hashes. One refused row does not abandon the rest of the overlay.
+- A LINK row, for a symlink that is load-bearing rather than cosmetic. The
+  format could not express one and the tool tested [ -f ] and ran install, so
+  such a link was created by hand and owned by nothing (docs/47). deployed.list
+  records it as link:<target> rather than as a hash, there being no contents to
+  hash and following it hashing whatever it points at instead.
+- --check-upstream, which the stock hashes have been recorded for since the day
+  the format was written and which nothing implemented. It asks the derive
+  question of every row that records an upstream hash, changes nothing, and
+  exits 3 if any image file has moved.
+- e2fsprogs is now a hard Requires. A component that ships a patch instead of a
+  binary deploys nothing without debugfs, and would do so quietly.
+- Proved rather than asserted: bin/overlay-sync-test.sh builds a real ext2 image
+  with mke2fs -d, derives both patched HALs out of it, and asserts the results
+  are byte-identical to the patched binaries this repository already carries.
+  37 checks, no privilege, bigtab01 untouched.
+
 * Wed Sep 23 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First package, and the one every overlay component has been waiting on: until
   now they declared Requires: waydroid-ext-overlay-sync against a package that

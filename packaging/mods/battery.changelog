@@ -1,3 +1,15 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 2.0.0-1
+- Ships the patch instead of the patched binary. All five bytes across the three
+  sites are now applied to the copy in the user's own vendor.img at reconcile
+  time, between a check of the stock hash and a check of the result, so this
+  package no longer redistributes Waydroid's vendor binary (docs/54).
+- Major version because the payload shape changed, not the effect: the file that
+  lands in the overlay is byte-identical to what 1.0.0 shipped, which
+  bin/overlay-sync-test.sh asserts against the copy in this repository -- and
+  that assertion is worth more here than for camera-hal, because five bytes in
+  three unrelated places is where an offset error would hide.
+- Requires waydroid-ext-overlay-sync >= 1.1.0, where derive rows are understood.
+
 * Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First package. Ships all three patches as one file, because patch 2 alone
   produces a timer that is created and never armed, which reads as a working

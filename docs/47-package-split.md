@@ -137,20 +137,27 @@ third migration that day: on bigtab01 the overlay is `camera-gbm`'s 2 files plus
 | `waydroid-ext-brightness-overlay` | stub light-HAL stand-down | [37](37-brightness.md) |
 | `waydroid-ext-widevine` | `.rc` + VINTF manifest + **fetcher**, no blob | [21](21-netflix-widevine.md) |
 
-`waydroid-ext-widevine` is the one overlay component the machinery above cannot express yet, and
-it needs three changes rather than a `.mod` file (noted 2026-09-24):
+`waydroid-ext-widevine` is the one overlay component the machinery above cannot express yet.
+It needed three changes rather than a `.mod` file (noted 2026-09-24); **two of the three landed
+with `waydroid-ext-overlay-sync` 1.1.0 on 2026-09-26, and only the fetched row is still owed.**
 
 - **A fetched row.** Two of its four files are a Google prebuilt this project will not
   redistribute, so they are `%ghost` and arrive at install time. `packaging/stage-overlay.sh`
   writes a manifest row only for a file it has staged, and the generated `%check` verifies every
   row against the buildroot — so a fetched row fails the build of its own package.
-- **A symlink row.** `vendor/lib64/libprotobuf-cpp-lite.so -> libprotobuf-cpp-lite-3.9.1.so` is
-  required, not cosmetic: `libwvaidl.so` needs the unversioned soname and a vendor process cannot
-  reach `/system/lib64`. The manifest format is `<mode> <sha256> <path>` and
-  `waydroid-overlay-sync` tests `[ -f ]` and runs `install -D -m`, so neither can carry a symlink.
-- **A version bump of `waydroid-ext-overlay-sync`**, which is the keystone package and is already
-  installed on bigtab01. That makes Widevine a migration of the thing everything else depends on,
-  not an addition beside them.
+- ~~**A symlink row.**~~ **Done, 1.1.0.** `link <target> <path>` is a manifest row type, the
+  reconciler creates it with `ln -sfn`, and `deployed.list` records it as `link:<target>` rather
+  than as a hash — there being no contents to hash, and following it hashing whatever it points
+  at instead. Absolute targets are refused at staging time: one would resolve against the host's
+  `/` at reconcile time and against Android's `/` at run time, and those are not the same
+  filesystem. Still required rather than cosmetic, for the original reason — `libwvaidl.so` needs
+  the unversioned soname and a vendor process cannot reach `/system/lib64`.
+- ~~**A version bump of `waydroid-ext-overlay-sync`**~~ **Done: 1.1.0, 2026-09-26**, carrying the
+  symlink row, the derived row the no-vendored-binaries policy needed, the hash-only tripwire and
+  `--check-upstream`. It is the keystone and it *is* installed on bigtab01, so deploying it is a
+  migration of the thing everything else depends on rather than an addition beside them — and
+  that migration has not been done. The package is built and tested here; the host still runs
+  1.0.0.
 
 **Host daemons and services.**
 
@@ -277,11 +284,18 @@ uninitialised host and is wired to both a `%post` and an `ExecStartPre`.
 
 ## Gaps this design exposed
 
-- **The manifest format cannot express a symlink.** It is `<mode> <sha256> <path>`, and
-  Widevine needs `vendor/lib64/libprotobuf-cpp-lite.so -> libprotobuf-cpp-lite-3.9.1.so`,
-  without which `libwvaidl.so` does not load. Today that symlink is created by hand and is
-  documented in [artifacts/widevine/README.md](../artifacts/widevine/README.md) but owned by
-  nothing. The format needs a `link` row type.
+- ~~**The manifest format cannot express a symlink.**~~ **Closed 2026-09-26** by the `link` row
+  type in `waydroid-overlay-sync` 1.1.0. Widevine's
+  `vendor/lib64/libprotobuf-cpp-lite.so -> libprotobuf-cpp-lite-3.9.1.so`, without which
+  `libwvaidl.so` does not load, is expressible now — though the component that needs it is still
+  unwritten, so the symlink remains hand-made and owned by nothing on the live host.
+- **The manifest format could not express a file we decline to ship, either**, which is the same
+  shape of gap and was found later, by policy rather than by Widevine:
+  [docs/54](54-no-vendored-binaries.md) rules out committing a third-party binary, and
+  `camera-hal` and `battery` were a one-byte and a five-byte patch OF a third-party binary. Closed
+  the same day by the `derive` row: the manifest carries the stock hash, the result hash and the
+  byte offsets, and the reconciler takes the input out of the user's own image. Both packages now
+  ship a manifest and no ELF at all.
 - **Widevine becomes a fetcher.** The payload is a Google prebuilt extracted from a ChromeOS
   recovery image, pinned by commit and md5. Redistributing it in an RPM is a licence question
   nobody needs; downloading it on the target is how every distro handles this class of blob.
@@ -415,7 +429,8 @@ been through `rpmbuild` rather than only staged and reasoned about.
 | [packaging/mods/](../packaging/mods) | one `.mod` + one `.changelog` per modification. Three written as proof of shape: `camera-gbm` (overlay), `wifid` (compiled host daemon), `camera` (group) |
 | [packaging/templates/rpm.spec.in](../packaging/templates/rpm.spec.in) | the one spec skeleton. `@TOKEN@` alone on a line splices a block; inline it substitutes a value |
 | [packaging/gen-spec.sh](../packaging/gen-spec.sh) | renders a `.mod` into a spec. `--list` shows every known modification |
-| [packaging/stage-overlay.sh](../packaging/stage-overlay.sh) | the generic `%install` for overlay components. Reads the file table on stdin, writes payload plus manifest |
+| [packaging/stage-overlay.sh](../packaging/stage-overlay.sh) | the generic `%install` for overlay components. Reads the file table on stdin, writes payload plus manifest. Since 2026-09-26 it also validates `derive` and `link` rows — a bad patch offset or an absolute link target fails our build rather than the user's boot |
+| [bin/overlay-sync-test.sh](../bin/overlay-sync-test.sh) | **new 2026-09-26.** 37 checks over the manifest format and the reconciler's decisions, including a real ext2 image built with `mke2fs -d` that both derived HALs are extracted from and patched out of. The oracle is the patched binary this repository already carries, so "the derive produces the right bytes" is asserted rather than argued |
 | [packaging/build-mod.sh](../packaging/build-mod.sh) | tarball, spec, `rpmbuild`, `rpmlint`. Overlay components' source file lists are *derived* from the same `FILES` table `%install` consumes, so payload can never be in the spec but missing from the tarball |
 | [packaging/waydroid-ext.rpmlintrc](../packaging/waydroid-ext.rpmlintrc) | every rpmlint filter, each with the reason it is inapplicable rather than merely noisy |
 | [README.md](../README.md) | the repository had no front door at all. Now it has one, aimed at somebody installing the packages rather than at us |
