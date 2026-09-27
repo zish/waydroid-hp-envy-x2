@@ -15,12 +15,48 @@ SUMMARY="Host-side wificond and supplicant for Waydroid, driving NetworkManager"
 
 LICENSE="GPL-3.0-or-later"
 
+# WHY THERE IS A %bcond, AND WHY THE DEFAULT IS THE SOURCE BUILD
+#
+# The same two arms as waydroid-ext-sensord and for the same reason: the daemon
+# compiles against libgbinder-devel and libglibutil-devel, which are Fedora
+# packages, and the dev box is Debian and cannot. The default arm is the real
+# source build, because that is what a distribution builder runs and a source
+# package that cannot be built from source is not one. `--prebuilt` selects the
+# other arm, which packages the binary wifi/build.sh already produced, and is how
+# this box can produce an installable RPM at all. packaging/README.md records
+# which arm each recorded build used.
+GLOBALS='%bcond_with prebuilt
+
+# Both of these apply to the prebuilt arm ONLY; the source build a distribution
+# runs is untouched and still produces a debuginfo package normally.
+#
+# debug_package: there is no source in this build tree for a debuginfo package to
+# point at, and the extraction needs eu-strip, which Fedora has and the Debian dev
+# box does not -- leaving it on makes the one build this box CAN do fail outright.
+#
+# __brp_strip: the point of the prebuilt arm is to ship the exact binary that was
+# built and verified against bigtab01. Stripping it here would package something
+# that is no longer byte-for-byte that file.
+%if %{with prebuilt}
+%global debug_package %{nil}
+%global __brp_strip %{nil}
+%endif'
+
 # Named as packages, not just sonames: libgbinder.so.1 does not tell an operator
 # which source package to watch for security updates, which is the whole reason
 # these are packaged at all. Floors, not pins -- they are what the daemon was
 # built and verified against, and gbinder_* carries no stable-ABI promise.
+#
+# The glib four carry no floor because nothing here needs one: wifi/build.sh
+# --rpm asks pkg-config for them by name, and any version shipping the headers
+# will do. They are named at all because without them the source build fails in
+# %build rather than in the dependency solve, which is the more confusing failure.
 BUILDREQUIRES="pkgconfig(libgbinder) >= 1.1.47
 pkgconfig(libglibutil) >= 1.0.82
+pkgconfig(glib-2.0)
+pkgconfig(gobject-2.0)
+pkgconfig(gio-2.0)
+pkgconfig(gio-unix-2.0)
 systemd-rpm-macros
 gcc-c++"
 
@@ -57,38 +93,75 @@ container_runtime_t to that domain, so every callback-passing call fails with a
 bare DeadObjectException and the rule is dontaudited. On a distribution without
 SELinux the directive is inert, which is correct."
 
-# The daemon binary comes from the RPM's %build on a host that has
-# libgbinder-devel, or from build/ via build-rpms.sh --prebuilt on a dev box
-# that does not. wifi/build.sh is the deploy-over-ssh path and is not used here:
-# it cross-builds against headers fetched from upstream tags and links against
-# .so files copied off bigtab01, which is the right answer for a machine that
-# cannot compile and the wrong one inside rpmbuild.
 # What goes in this modification's source tarball. Named file by file rather
 # than as the whole directory because artifacts/wifi also holds captured logs
 # and the disassembled AIDL surface -- evidence, not payload.
 #
-# KNOWN GAP, found by actually building: artifacts/wifi/install.sh installs the
-# daemon AND waydroid-wifi-sync unconditionally, so it cannot yet serve either
-# modification alone -- an -ba build fails on unpackaged files. It needs the
-# component-argument treatment artifacts/overlay/install.sh already has, with
-# "all" as the default so the superseded waydroid-wifid.spec keeps working.
-# Until then only --srpm is meaningful here. docs/47-package-split.md.
+# artifacts/wifi/install.sh serves two modifications, so it is called below with
+# the component argument it grew for exactly that: `wifid` installs the daemon,
+# its unit and its conf, and none of waydroid-ext-wifi-sync's files. That is what
+# makes an -ba build possible here at all -- while the installer laid down both
+# halves, rpmbuild failed on the half %files did not list. Its default is still
+# `all`, so the superseded packaging/waydroid-wifid.spec keeps building unchanged.
+# docs/47-package-split.md.
+#
+# The reconciler's four files -- waydroid-wifi-sync, its service and timer, and
+# waydroid-wifi-share.conf -- left this list with the modification they belong
+# to. They were only ever here because the installer could not be told to leave
+# them alone, and carrying them would mean a fix to a shell script on a timer
+# changed this daemon's source package, which is the churn the split exists to
+# stop.
 SOURCES="wifi
 artifacts/wifi/install.sh
 artifacts/wifi/waydroid-wifid.conf
 artifacts/wifi/waydroid-wifid.service
-artifacts/wifi/waydroid-wifi-nudge
-artifacts/wifi/waydroid-wifi-share.conf
-artifacts/wifi/waydroid-wifi-sync
-artifacts/wifi/waydroid-wifi-sync.service
-artifacts/wifi/waydroid-wifi-sync.timer"
+artifacts/wifi/waydroid-wifi-nudge"
 
-BUILD='sh wifi/build.sh --rpm'
+# Staged into prebuilt/ by build-mod.sh --prebuilt; ignored otherwise. This is
+# where a plain wifi/build.sh leaves its output, and staging it is the only way
+# this Debian box can produce an installable waydroid-ext-wifid at all.
+PREBUILT_FILES="build/wifi/daemon/waydroid-wifid"
+
+# WHY THE SOURCE ARM DELEGATES WHERE sensord's WRITES THE COMPILE OUT
+#
+# waydroid-ext-sensord spells its g++ line out in its own .mod file. This one
+# calls wifi/build.sh --rpm instead, and the difference is five source files
+# against one: the file list and the link line keep exactly one home, so an rpm
+# build and a by-hand build cannot come to disagree about what the daemon is made
+# of.
+#
+# --rpm is the mode written for this. It locates libgbinder and libglibutil with
+# pkg-config rather than from the upstream checkouts and host .so copies the
+# other modes use, takes its optimisation and hardening flags from the rpm build
+# environment, never clones, never scps, never touches bigtab01, and does not
+# install -- it compiles and stops, because the install section below is where
+# the layout lives. It refuses outright to be combined with the modes that do
+# reach the network, so no future flag ordering can turn a package build into
+# an ssh session.
+#
+# bash and not sh: wifi/build.sh is a bash script and uses arrays, so `sh` is a
+# syntax error wherever /bin/sh is dash rather than bash -- which is where this
+# repository is developed. bash is in rpm's own minimal buildroot, so naming it
+# here costs no BuildRequires.
+BUILD='%if %{with prebuilt}
+# Built by wifi/build.sh and carried in the tarball by
+# packaging/build-mod.sh --prebuilt. Copied to where the source arm leaves its
+# output, so the install section names one path whichever arm ran.
+test -x prebuilt/waydroid-wifid
+mkdir -p build/wifi/daemon
+cp -p prebuilt/waydroid-wifid build/wifi/daemon/waydroid-wifid
+%else
+bash wifi/build.sh --rpm
+%endif'
 
 INSTALL='DESTDIR=%{buildroot} PREFIX=%{_prefix} UNITDIR=%{_unitdir} SYSCONFDIR=%{_sysconfdir} \
     WIFID_BIN=build/wifi/daemon/waydroid-wifid \
-    sh artifacts/wifi/install.sh'
+    sh artifacts/wifi/install.sh wifid'
 
+# Exactly the wifid half of what artifacts/wifi/install.sh lays down, which is
+# what the `wifid` argument above installs and nothing more: waydroid-wifi-sync,
+# its service and timer, its timers.target.wants symlink and
+# /etc/waydroid-wifi-share.conf are waydroid-ext-wifi-sync's files, not these.
 PAYLOAD_FILES='%{_bindir}/waydroid-wifid
 %{_bindir}/waydroid-wifi-nudge
 %{_unitdir}/waydroid-wifid.service

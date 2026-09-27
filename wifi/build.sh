@@ -32,16 +32,26 @@
 # and libgbinder as the only runtime dependencies -- all already on bigtab01 as
 # Waydroid's own dependencies.
 #
+# That is the right answer for a dev box that has to match a host it cannot
+# compile on, and the wrong one inside rpmbuild, which must be offline and must
+# bind against the builder's own libraries.  --rpm is that second build: the same
+# source list and the same link line, but headers and libraries located with
+# pkg-config and the optimisation and hardening flags taken from the rpm build
+# environment.  It compiles and stops -- installing is %install's job and lives
+# in artifacts/wifi/install.sh.  It never reaches the network or $HOST, and it
+# refuses to be combined with the modes that do.
+#
 # Usage:
 #   wifi/build.sh              # build
 #   wifi/build.sh --deps       # fetch/refresh headers and host .so files
+#   wifi/build.sh --rpm        # build inside rpmbuild: pkg-config, no network
 #   wifi/build.sh --check      # build, then report runtime deps vs the host
 #   wifi/build.sh --install    # build, then install to bigtab01 (needs sudo there)
 #   wifi/build.sh --install --unit
 #                              # ... and install/enable the systemd unit, which
 #                              # is what makes the daemon survive a reboot
 #
-# Env: HOST=<ip>  OUT=<dir>
+# Env: HOST=<ip>  OUT=<dir>  CXXFLAGS= LDFLAGS= (honoured by --rpm)
 set -euo pipefail
 
 HOST="${HOST:-10.42.0.137}"
@@ -50,6 +60,18 @@ here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/.." && pwd)"
 OUT="${OUT:-$repo/build/wifi/daemon}"
 
+# Captured here because the CXXFLAGS and LDFLAGS arrays further down take those
+# two names for themselves, and by then the environment's values are gone.  --rpm
+# has to append to them: rpm exports the distribution's optimisation and
+# hardening flags into %build, and a package built with those discarded is built
+# to weaker settings than its distribution asked for.
+#
+# rpm exports CFLAGS alongside these two and it is deliberately not captured:
+# every source file here is C++ and the C compiler is never invoked, so reading
+# CFLAGS would only let us claim to honour flags that reach nothing.
+ENV_CXXFLAGS="${CXXFLAGS:-}"
+ENV_LDFLAGS="${LDFLAGS:-}"
+
 GBINDER_TAG=1.1.47      # must match libgbinder on the host
 GLIBUTIL_TAG=1.0.82     # must match libglibutil on the host
 
@@ -57,81 +79,197 @@ DO_DEPS=0
 DO_CHECK=0
 DO_INSTALL=0
 DO_UNIT=0
+DO_RPM=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--deps) DO_DEPS=1; shift ;;
 	--check) DO_CHECK=1; shift ;;
 	--install) DO_INSTALL=1; DO_CHECK=1; shift ;;
 	--unit) DO_UNIT=1; DO_INSTALL=1; DO_CHECK=1; shift ;;
+	--rpm) DO_RPM=1; shift ;;
 	*) echo "unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
+
+# --rpm is a whole build and not a modifier of one: every other mode fetches
+# headers over the network, copies .so files off $HOST, or ssh's to it, and an
+# rpm build may do none of the three.  Refusing the combination outright beats
+# honouring half of what was asked for.
+if [ "$DO_RPM" = 1 ] && [ $((DO_DEPS + DO_CHECK + DO_INSTALL + DO_UNIT)) -ne 0 ]; then
+	echo "--rpm cannot be combined with --deps, --check, --install or --unit" >&2
+	exit 2
+fi
 
 mkdir -p "$OUT"
 
 # ---------------------------------------------------------------- dependencies
 #
-# Shared with sensors/build.sh when that tree is already populated -- same tags,
-# same host .so files, no reason to fetch twice.
+# Two sources for the same two libraries.  The by-hand build vendors them --
+# headers from the upstream tags that match the host, .so files copied off the
+# host itself, so the ABI cannot drift.  --rpm takes them from the buildroot
+# through pkg-config instead, because those are the libraries the package's own
+# Requires describe, and because rpmbuild may not clone, scp, or know that $HOST
+# exists.
+#
+# The vendored half is shared with sensors/build.sh when that tree is already
+# populated -- same tags, same host .so files, no reason to fetch twice.
 
 SHARED="$repo/build/sensors"
 
-if [ "$DO_DEPS" = 1 ] || [ ! -d "$OUT/libgbinder" ]; then
-	if [ "$DO_DEPS" != 1 ] && [ -d "$SHARED/libgbinder" ] && [ -d "$SHARED/libglibutil" ]; then
-		echo "== reusing libgbinder/libglibutil checkouts from $SHARED"
-		ln -sfn "$SHARED/libgbinder" "$OUT/libgbinder"
-		ln -sfn "$SHARED/libglibutil" "$OUT/libglibutil"
-	else
-		echo "== fetching libgbinder $GBINDER_TAG and libglibutil $GLIBUTIL_TAG"
-		rm -rf "$OUT/libgbinder" "$OUT/libglibutil"
-		git clone -q --depth 1 --branch "$GLIBUTIL_TAG" \
-			https://github.com/sailfishos/libglibutil.git "$OUT/libglibutil"
-		git clone -q --depth 1 --branch "$GBINDER_TAG" \
-			https://github.com/mer-hybris/libgbinder.git "$OUT/libgbinder"
-	fi
-fi
+if [ "$DO_RPM" = 1 ]; then
+	missing=""
+	for p in libgbinder libglibutil glib-2.0 gobject-2.0 gio-2.0 gio-unix-2.0; do
+		if ! pkg-config --exists "$p"; then
+			missing="$missing $p"
+		fi
+	done
+	# Fail here and say what is wrong, rather than falling back to the vendored
+	# headers: they came off a specific host over ssh, and quietly building a
+	# package against them would ship a binary whose ABI matches bigtab01 and
+	# not the machine the RPM is installed on.
+	if [ -n "$missing" ]; then
+		cat >&2 <<-EOM
+			missing build dependencies:$missing
 
-if [ "$DO_DEPS" = 1 ] || [ ! -e "$OUT/sysroot/lib/libgbinder.so" ]; then
-	mkdir -p "$OUT/sysroot/lib"
-	if [ "$DO_DEPS" != 1 ] && [ -e "$SHARED/sysroot/lib/libgbinder.so.$GBINDER_TAG" ]; then
-		echo "== reusing host .so files from $SHARED"
-		cp -a "$SHARED/sysroot/lib/." "$OUT/sysroot/lib/"
-	else
-		echo "== copying libgbinder/libglibutil .so off $HOST (guarantees ABI match)"
-		scp -q "$HOST:/usr/lib64/libgbinder.so.$GBINDER_TAG" \
-		       "$HOST:/usr/lib64/libglibutil.so.$GLIBUTIL_TAG" "$OUT/sysroot/lib/"
+			--rpm compiles against the buildroot's own headers and pkg-config
+			cannot find these, so there is nothing to compile against.  On
+			Fedora:
+			    dnf install libgbinder-devel libglibutil-devel glib2-devel
+			Debian and Ubuntu package neither libgbinder nor libglibutil at
+			all, so on a Debian dev box this is not a flag problem and no flag
+			fixes it.  Two ways forward there:
+			    packaging/build-mod.sh --prebuilt wifid
+			        packages the binary a plain wifi/build.sh already produced
+			    wifi/build.sh --deps && wifi/build.sh
+			        produces that binary -- headers from the upstream tags and
+			        .so files copied off $HOST, which is exactly what --rpm is
+			        not allowed to do
+		EOM
+		exit 1
 	fi
-	ln -sf "libgbinder.so.$GBINDER_TAG"   "$OUT/sysroot/lib/libgbinder.so"
-	ln -sf "libglibutil.so.$GLIBUTIL_TAG" "$OUT/sysroot/lib/libglibutil.so"
-fi
+else
+	if [ "$DO_DEPS" = 1 ] || [ ! -d "$OUT/libgbinder" ]; then
+		if [ "$DO_DEPS" != 1 ] && [ -d "$SHARED/libgbinder" ] && [ -d "$SHARED/libglibutil" ]; then
+			echo "== reusing libgbinder/libglibutil checkouts from $SHARED"
+			ln -sfn "$SHARED/libgbinder" "$OUT/libgbinder"
+			ln -sfn "$SHARED/libglibutil" "$OUT/libglibutil"
+		else
+			echo "== fetching libgbinder $GBINDER_TAG and libglibutil $GLIBUTIL_TAG"
+			rm -rf "$OUT/libgbinder" "$OUT/libglibutil"
+			git clone -q --depth 1 --branch "$GLIBUTIL_TAG" \
+				https://github.com/sailfishos/libglibutil.git "$OUT/libglibutil"
+			git clone -q --depth 1 --branch "$GBINDER_TAG" \
+				https://github.com/mer-hybris/libgbinder.git "$OUT/libgbinder"
+		fi
+	fi
 
-for f in "$OUT/libgbinder/include/gbinder.h" \
-         "$OUT/libglibutil/include/gutil_log.h" \
-         "$OUT/sysroot/lib/libgbinder.so"; do
-	[ -e "$f" ] || { echo "missing $f -- run with --deps" >&2; exit 1; }
-done
+	if [ "$DO_DEPS" = 1 ] || [ ! -e "$OUT/sysroot/lib/libgbinder.so" ]; then
+		mkdir -p "$OUT/sysroot/lib"
+		if [ "$DO_DEPS" != 1 ] && [ -e "$SHARED/sysroot/lib/libgbinder.so.$GBINDER_TAG" ]; then
+			echo "== reusing host .so files from $SHARED"
+			cp -a "$SHARED/sysroot/lib/." "$OUT/sysroot/lib/"
+		else
+			echo "== copying libgbinder/libglibutil .so off $HOST (guarantees ABI match)"
+			scp -q "$HOST:/usr/lib64/libgbinder.so.$GBINDER_TAG" \
+			       "$HOST:/usr/lib64/libglibutil.so.$GLIBUTIL_TAG" "$OUT/sysroot/lib/"
+		fi
+		ln -sf "libgbinder.so.$GBINDER_TAG"   "$OUT/sysroot/lib/libgbinder.so"
+		ln -sf "libglibutil.so.$GLIBUTIL_TAG" "$OUT/sysroot/lib/libglibutil.so"
+	fi
+
+	for f in "$OUT/libgbinder/include/gbinder.h" \
+	         "$OUT/libglibutil/include/gutil_log.h" \
+	         "$OUT/sysroot/lib/libgbinder.so"; do
+		[ -e "$f" ] || { echo "missing $f -- run with --deps" >&2; exit 1; }
+	done
+fi
 
 # --------------------------------------------------------------------- compile
+#
+# Two flag sets, then one compile loop and one link line for both of them.  The
+# source list and the libraries are the same build either way, and writing them
+# out twice is how an rpm build and a by-hand build come to disagree about which
+# files the daemon is made of.
 
-GLIB_CFLAGS="$(pkg-config --cflags glib-2.0 gobject-2.0 gio-2.0 gio-unix-2.0)"
-GLIB_LIBS="$(pkg-config --libs glib-2.0 gobject-2.0 gio-2.0 gio-unix-2.0)"
+if [ "$DO_RPM" = 1 ]; then
+	PKGS="libgbinder libglibutil glib-2.0 gobject-2.0 gio-2.0 gio-unix-2.0"
+	# shellcheck disable=SC2086
+	PKG_CFLAGS="$(pkg-config --cflags $PKGS)"
+	# shellcheck disable=SC2086
+	PKG_LIBS="$(pkg-config --libs $PKGS)"
 
-CXXFLAGS=(
-	-O2 -g -Wall -Wextra -Wno-unused-parameter
-	-std=gnu++17 -pthread
-	-ffunction-sections -fdata-sections
-	-I"$here"
-	-I"$OUT/libgbinder/include"
-	-I"$OUT/libglibutil/include"
-)
-# shellcheck disable=SC2206
-CXXFLAGS+=($GLIB_CFLAGS)
+	# The builder's flags first and ours after, so -std=gnu++17 and the warnings
+	# this code is kept clean against cannot be dropped by somebody else's flag
+	# set, while the builder's -O and -D_FORTIFY_SOURCE survive wherever we do
+	# not contradict them.  An empty $CXXFLAGS means nobody exported any -- a
+	# bare rpmbuild rather than a Fedora %build, which does it via
+	# %set_build_flags -- so fall back to the same -O2 -g the by-hand build uses
+	# rather than to nothing at all.
+	# shellcheck disable=SC2206
+	CXXFLAGS=(${ENV_CXXFLAGS:--O2 -g})
+	CXXFLAGS+=(
+		-Wall -Wextra -Wno-unused-parameter
+		-std=gnu++17 -pthread
+		-ffunction-sections -fdata-sections
+		-I"$here"
+	)
+	# No vendored -I: pkg-config names the buildroot's headers, and those are the
+	# ones the package's libgbinder/libglibutil Requires actually describe.
+	# shellcheck disable=SC2206
+	CXXFLAGS+=($PKG_CFLAGS)
 
-LDFLAGS=(
-	-L"$OUT/sysroot/lib"
-	-Wl,--gc-sections
-	-static-libstdc++ -static-libgcc
-)
+	# No -L either, for the same reason -- a sysroot of .so files copied off
+	# $HOST has no business on an rpm link line.
+	#
+	# The builder's CXXFLAGS go on the link line as well as the compile line.
+	# That is what `$(CXX) $(CXXFLAGS) $(LDFLAGS)` does in every autotools
+	# package and what rpm's exported flags assume, and leaving them off is a real
+	# loss rather than a tidiness question: Fedora's optflags carry -flto=auto,
+	# and link-time optimisation asked for at compile and withheld at link buys
+	# nothing beyond what -ffat-lto-objects already gave -- the distribution asks
+	# for an optimisation and silently does not get it.  The annobin -specs=
+	# flags want both phases too, or annocheck reports the binary as only partly
+	# annotated.  Flags that are compile-time only, -fstack-protector-strong and
+	# -fcf-protection among them, cost nothing here: g++ accepts them when
+	# linking and has nothing to apply them to.
+	# shellcheck disable=SC2206
+	LDFLAGS=(${ENV_CXXFLAGS:-} ${ENV_LDFLAGS:-})
+	LDFLAGS+=(
+		-Wl,--gc-sections
+		-static-libstdc++ -static-libgcc
+	)
+	# shellcheck disable=SC2206
+	LIBS=($PKG_LIBS -lpthread)
+else
+	GLIB_CFLAGS="$(pkg-config --cflags glib-2.0 gobject-2.0 gio-2.0 gio-unix-2.0)"
+	GLIB_LIBS="$(pkg-config --libs glib-2.0 gobject-2.0 gio-2.0 gio-unix-2.0)"
+
+	CXXFLAGS=(
+		-O2 -g -Wall -Wextra -Wno-unused-parameter
+		-std=gnu++17 -pthread
+		-ffunction-sections -fdata-sections
+		-I"$here"
+		-I"$OUT/libgbinder/include"
+		-I"$OUT/libglibutil/include"
+	)
+	# shellcheck disable=SC2206
+	CXXFLAGS+=($GLIB_CFLAGS)
+
+	LDFLAGS=(
+		-L"$OUT/sysroot/lib"
+		-Wl,--gc-sections
+		-static-libstdc++ -static-libgcc
+	)
+	# shellcheck disable=SC2206
+	LIBS=(-lgbinder -lglibutil $GLIB_LIBS -lpthread)
+fi
+
+# -static-libstdc++/-static-libgcc are in both arms on purpose.  The by-hand
+# build needs them, because that binary is copied to a host whose gcc is not the
+# builder's, and keeping the rpm build the same kind of binary is worth more than
+# letting the two differ.  The cost, stated rather than buried: a libstdc++
+# security fix reaches this daemon only by rebuilding the package, not by
+# upgrading libstdc++.
 
 SRCS=(NativeScanResult.cpp NmBackend.cpp Supplicant.cpp Wificond.cpp service.cpp)
 OBJS=()
@@ -145,12 +283,25 @@ for s in "${SRCS[@]}"; do
 done
 
 echo "== linking"
-# shellcheck disable=SC2206
-g++ "${OBJS[@]}" -o "$OUT/waydroid-wifid" "${LDFLAGS[@]}" \
-	-lgbinder -lglibutil $GLIB_LIBS -lpthread
+g++ "${OBJS[@]}" -o "$OUT/waydroid-wifid" "${LDFLAGS[@]}" "${LIBS[@]}"
 
 echo "== built $OUT/waydroid-wifid"
 ls -l "$OUT/waydroid-wifid"
+
+if [ "$DO_RPM" = 1 ]; then
+	# Build only, and deliberately so: %install is a separate rpm step that runs
+	# artifacts/wifi/install.sh, which is the one place the file layout and the
+	# DESTDIR handling live.  Everything written above is inside $OUT, so this
+	# mode touches nothing but the build tree it was handed.
+	#
+	# DESTDIR is therefore not read here at all, which is the honest answer for a
+	# mode that installs nothing: there is no file for it to relocate, and a
+	# build step that half-honoured it would be worse than one that ignores it.
+	# %build and %install agree on a path instead -- $OUT defaults to
+	# $repo/build/wifi/daemon, and packaging/mods/wifid.mod hands the installer
+	# exactly that as WIFID_BIN.
+	exit 0
+fi
 
 # ----------------------------------------------------------------- ABI check
 

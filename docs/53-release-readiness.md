@@ -343,9 +343,28 @@ string Android reports through the sensors HAL, so changing it changes observabl
      `.so` and `.orig` files as the test oracle; deleting them is entangled with the
      history-rewrite decision, which is the owner's.
    - **`mediad`**, the cheapest remaining host package.
-   - **`wifi/build.sh --rpm`**, plus the component argument for `artifacts/wifi/install.sh` that
-     `artifacts/overlay/install.sh` already has. This unblocks `wifid`'s `-ba` and with it
-     `wifi-hostd`, which is built but not installable for exactly that reason.
+   - ~~**`wifi/build.sh --rpm`**, plus the component argument for `artifacts/wifi/install.sh` that
+     `artifacts/overlay/install.sh` already has~~ — **both done 2026-09-26.** `--rpm` locates
+     libgbinder and libglibutil with `pkg-config`, puts the rpm build environment's `CXXFLAGS` on
+     both the compile *and* the link line and its `LDFLAGS` on the link, compiles, and stops. It
+     refuses to be combined with `--deps`, `--check`, `--install` or `--unit`, so no future flag
+     ordering can turn a package build into an ssh session. `artifacts/wifi/install.sh` now takes
+     `wifid` or `wifi-sync` with `all` as the default; the partition was proved by running all
+     three into separate `DESTDIR`s — the union of the halves is exactly the `all` tree, no file
+     is in both, and a no-argument run is byte-identical to the pre-change script including
+     symlink targets, so the superseded `waydroid-wifid.spec` is unaffected. `wifid.mod` gained
+     the `%bcond_with prebuilt` two-arm build `sensord.mod` has.
+     **The payoff, measured: `waydroid-ext-wifid-1.0.0-1.x86_64.rpm` exists for the first time**,
+     via `build-mod.sh --prebuilt wifid`, and `wifi-hostd` is installable —
+     `rpm --test -i` on it alone still reports `waydroid-ext-wifid is needed by`, and with both
+     plus `overlay-sync` in one transaction that line is gone, leaving only base-OS dependencies
+     an empty test root cannot have.
+     **What this does not prove: the source arm has never been compiled anywhere.** This box is
+     Debian 13, which packages neither library, so `--rpm` exits 1 with a message naming the
+     missing pkg-config modules and the `dnf install` line. A Fedora builder is the first thing
+     that will compile it, and the LDFLAGS defect found during review — the builder's `CXXFLAGS`
+     were on the compile line only, silently discarding `-flto=auto` and half of annobin's
+     instrumentation — is the kind of thing only that build will confirm is now right.
 2. **Move the APKs into their own GitHub repositories**, one per app, each with its own CI/CD.
    Added at the owner's request, 2026-09-22. There are six — [media-app/](../media-app)
    (`lan.syshlt.removablemedia`), [sensor-app/](../sensor-app) (`…sensorinfo`),

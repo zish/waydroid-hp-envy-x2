@@ -46,14 +46,18 @@ the `waydroid-sensord` it grants a permission to is now a package, so its `Recom
 resolves for the first time — and, as of 2026-09-24, `camera-hal`, `battery`,
 `brightness-overlay`, `wifi-framework` and the `camera` group.
 
-**The two that are not installable are `wifid` and `wifi-hostd`, and it is one cause.** `wifid`
-is SRPM-only on this box because its source build needs Fedora's `libgbinder-devel` and it
-declares no `PREBUILT=`, so `build-mod.sh --prebuilt` has nothing to stage; `wifi-hostd`
-hard-requires it, correctly — standing wificond down with no daemon behind it is worse than
-stock. So `rpm --test -i wifi-hostd.rpm` reports `waydroid-ext-wifid is needed by
-waydroid-ext-wifi-hostd` and will keep reporting it until `wifi/build.sh` can produce a
-binary here. That is the same item as
-[docs/53](../docs/53-release-readiness.md)'s `wifi/build.sh --rpm`.
+~~**The two that are not installable are `wifid` and `wifi-hostd`, and it is one cause.**~~
+**Both became installable on 2026-09-26.** `wifid` was SRPM-only because its source build needs
+Fedora's `libgbinder-devel` and it declared no `PREBUILT=`, so `build-mod.sh --prebuilt` had
+nothing to stage. It now declares one, and
+**`waydroid-ext-wifid-1.0.0-1.x86_64.rpm` exists for the first time.** With it, `wifi-hostd` —
+which hard-requires it, correctly, because standing wificond down with no daemon behind it is
+worse than stock — resolves. Proved the way `camera-gbm` was: `rpm --test -i` on `wifi-hostd`
+alone still reports `waydroid-ext-wifid is needed by waydroid-ext-wifi-hostd`, and the same
+command with `wifid` and `overlay-sync` in one transaction no longer does, leaving only base-OS
+dependencies an empty test root cannot have (`/bin/sh`, `libc.so.6`, `NetworkManager`). The
+same test confirms the new `waydroid-ext-overlay-sync >= 1.1.0` requirement is both enforced and
+satisfied.
 
 Next cheapest, for the reason `overlay-sync` and `sensord` were: `mediad`, then `wifi-sync`.
 
@@ -213,20 +217,41 @@ modification:
 uninstall. Both are wrapped in `selinuxenabled` so they are inert rather than wrong on a host
 built without SELinux, and every line ends `|| :` because no scriptlet may fail a transaction.
 
-`wifid` cannot do a full `-ba` here for **three** separate reasons, and only the first is about
-this box: `libgbinder-devel` is a Fedora package, and `artifacts/wifi/install.sh` installs the daemon
-*and* `waydroid-wifi-sync` unconditionally, so it cannot yet serve either modification alone —
-an `-ba` build would fail on unpackaged files. That installer needs the component-argument
-treatment `artifacts/overlay/install.sh` already has, with `all` as the default so the
-superseded `waydroid-wifid.spec` keeps working. Recorded in `packaging/mods/wifid.mod`.
+`wifid` could not do a full `-ba` here for **three** separate reasons. Two were fixed on
+2026-09-26; the third is this box, and it is not fixable here at all.
 
-The third reason was found on 2026-09-22 and fails before either of the others:
-`wifid.mod` sets `BUILD='sh wifi/build.sh --rpm'`, and **`wifi/build.sh` has no `--rpm` mode**.
-It accepts `--deps`, `--check`, `--install` and `--unit`, and its parser ends with
-`*) echo "unknown argument: $1" >&2; exit 2`. Implementing it means a native build against
-Fedora's `libgbinder-devel`, as opposed to the `--deps` path that copies `.so` files off
-bigtab01 to guarantee an ABI match — which is the right answer for a dev box that cannot
-compile against those headers, and the wrong one inside `rpmbuild`.
+- ~~`artifacts/wifi/install.sh` installs the daemon *and* `waydroid-wifi-sync` unconditionally, so
+  it cannot serve either modification alone~~ — **fixed.** It takes a component argument, `wifid`
+  or `wifi-sync`, with `all` as the default: the treatment `artifacts/overlay/install.sh` already
+  had. Proved by running all three into separate `DESTDIR`s — the union of the two halves is
+  exactly the `all` tree, no file appears in both, and a no-argument run is byte-identical,
+  symlink targets included, to the pre-change script, so the superseded `waydroid-wifid.spec`
+  keeps building unchanged.
+- ~~`wifid.mod` sets `BUILD='sh wifi/build.sh --rpm'` and **`wifi/build.sh` has no `--rpm`
+  mode**~~ — **fixed.** `--rpm` finds libgbinder and libglibutil through `pkg-config` rather than
+  from the upstream checkouts and the `.so` files the other modes copy off bigtab01, puts the
+  build environment's `CXXFLAGS` on both the compile and the link line and its `LDFLAGS` on the
+  link, and compiles and stops — the install section is where the layout lives. It refuses
+  outright to combine with `--deps`, `--check`, `--install` or `--unit`. Verified with `git`,
+  `scp` and `ssh` replaced by tripwires: the mode completes without touching any of them and
+  writes only inside `$OUT`. `BUILD` invokes it as `bash` and not `sh`, because the script uses
+  arrays and `sh` is a syntax error wherever `/bin/sh` is dash — which is where this repository
+  is developed, so `sh -n wifi/build.sh` has never been a valid check on it.
+- `libgbinder-devel` is a Fedora package and this box is Debian 13, which packages neither
+  libgbinder nor libglibutil. **So the source arm has still never been compiled anywhere.**
+  `--rpm` exits 1 with a message naming the missing pkg-config modules, the `dnf install` line,
+  and the two routes that do work here. `wifid.mod` now carries the `%bcond_with prebuilt`
+  two-arm build that `sensord.mod` has, with `PREBUILT_FILES="build/wifi/daemon/waydroid-wifid"`,
+  so `build-mod.sh --prebuilt wifid` is the route to an installable RPM on this box.
+
+One defect was found in review rather than by running anything, and it is the kind a Fedora
+builder would have shipped silently: `--rpm` originally put the build environment's `CXXFLAGS` on
+the compile line only. Audited with a recording `g++` stub against a real Fedora
+`%set_build_flags` export, all 18 flags were present at compile and absent at link — which
+discards `-flto=auto` (LTO asked for at compile and withheld at link buys nothing past
+`-ffat-lto-objects`) and gives annobin's `-specs=` only half its phases, so `annocheck` would
+report the binary as partly annotated. The fix is what `$(CXX) $(CXXFLAGS) $(LDFLAGS)` does in
+every autotools package.
 
 `no-signature` and `invalid-url Source0` are deliberately not filtered: both are real and both
 are release-time work. Everything else rpmlint said is filtered with a written reason in
