@@ -5,8 +5,8 @@
 #     ssh 10.42.0.137 'sudo sh -s' < bin/pipewire-test.sh
 #
 # Walks the whole chain -- PipeWire, the daemon, the protocol, the policy, the
-# profile delivery, the app -- and names the link that is broken rather than just
-# failing. Root is not needed for most of it, but is for two legs: the token is
+# filter controls, the profile delivery, the app -- and names the link that is
+# broken rather than just failing. Root is not needed for most of it, but is for two legs: the token is
 # 0600 in the session user's state directory, and the app's private directory is
 # mode 0700 owned by the app's uid.
 #
@@ -299,6 +299,31 @@ send({"id": 11, "cmd": "node-create", "kind": "loopback", "name": "pwtest-probe"
 reply = await_reply(11)
 print("NODES %s" % ("REFUSED" if reply and not reply.get("ok") else "ALLOWED"))
 
+# Filter-graph controls, read-only. This does NOT create a chain to look at:
+# one has to exist already, which on a host with no effects loaded means there
+# is nothing here, and that is a SKIP rather than a pass. A clean zero would be
+# a zero this test had not earned -- the same rule pw-audio-diag.sh follows
+# about xruns on a silent graph.
+chains = [o for o in objects if o.get("kind") == "node" and o.get("controls")]
+if not chains:
+    print("CONTROLS NONE")
+else:
+    COEFFS = ("b0", "b1", "b2", "a0", "a1", "a2")
+    bad = []
+    for node in chains:
+        for control in node["controls"]:
+            key = control.get("key") or "?"
+            if ":" not in key:
+                bad.append("%s has no colon" % key)
+            if control.get("port") in COEFFS and not control.get("readonly"):
+                bad.append("%s is not flagged read-only" % key)
+            if isinstance(control.get("value"), bool) \
+                    or not isinstance(control.get("value"), (int, float)):
+                bad.append("%s is not numeric" % key)
+    total = sum(len(n["controls"]) for n in chains)
+    print("CONTROLS %s %d %d %s" % ("BAD" if bad else "OK", len(chains),
+                                    total, "; ".join(bad[:2])))
+
 # The one mutation: a MIDI link, created and destroyed.
 if out_port is not None and in_port is not None:
     send({"id": 20, "cmd": "link-create", "output": out_port, "input": in_port})
@@ -379,6 +404,15 @@ PY
     *"NODES REFUSED"*) ok "node creation is refused by the policy" ;;
     *"NODES ALLOWED"*) na "the nodes capability is enabled on this host" ;;
     *)                 no "node-create did not answer" ;;
+    esac
+    case "$RESULT" in
+    *"CONTROLS OK"*)
+        ok "$(echo "$RESULT" | sed -n 's/^CONTROLS OK \([0-9]*\) \([0-9]*\).*/\1 filter chain(s) projecting \2 controls, all well formed/p')" ;;
+    *"CONTROLS BAD"*)
+        no "$(echo "$RESULT" | sed -n 's/^CONTROLS BAD [0-9]* [0-9]* /malformed filter control: /p')" ;;
+    *"CONTROLS NONE"*)
+        na "no filter chain in the graph, so node-param has nothing to address" ;;
+    *)  no "the filter-control projection did not answer" ;;
     esac
 else
     no "skipping the protocol: no bridge address"

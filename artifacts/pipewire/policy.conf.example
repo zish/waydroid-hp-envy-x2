@@ -6,7 +6,7 @@
 #
 # `key = value`, one per line, yes/no. Not INI and not YAML: this repository has
 # no YAML parser and does not want one (packaging/gen-spec.sh says why about .mod
-# files), and six keys do not need sections.
+# files), and seven keys do not need sections.
 #
 # WHAT THE GATES ARE ACTUALLY PROTECTING
 #
@@ -46,3 +46,20 @@ nodes = no
 # Needs `nodes` as well. The most powerful verb here by some distance: a filter
 # chain can do anything to anything it is linked to.
 modules = no
+
+# Moving a filter graph's control ports -- an EQ band's Freq/Q/Gain, a delay
+# time, a noise gate's threshold. On by default, because it is the same kind of
+# thing as `mixer`: audible, reversible, and useless to gate if the point is an
+# effects UI that can move a slider.
+#
+# What keeps it that small is that node-param will only set a control the node
+# ALREADY advertises on its filter graph. A filter-chain node's Props param has
+# a second entry belonging to audioconvert, and `debug.wav-path` lives in it --
+# that key writes the node's audio to a file, so it is a recording tap by
+# another name, and the same concern `links.capture` exists for. Filter control
+# names always carry a colon and audioconvert's never do, which is the line the
+# verb refuses to cross.
+#
+# This gate does NOT create effects. A chain has to exist first, which means
+# either `nodes` + `modules`, or a conf.d drop-in the owner wrote by hand.
+params = yes

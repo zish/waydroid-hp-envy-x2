@@ -227,7 +227,7 @@ Newline-delimited JSON, one long-lived connection, commands up and events down.
 
 Commands: `auth`, `ping`, `graph`, `policy`, `node-volume`, `node-mute`, `default-set`,
 `default-clear`, `device-profile`, `device-route`, `link-create`, `link-destroy`, `quantum`, `rate`,
-`wp-setting`, `node-create`, `node-destroy`, `nodes`. Events: `ready`, `graph`, `update`, `reset`,
+`wp-setting`, `node-param`, `node-create`, `node-destroy`, `nodes`. Events: `ready`, `graph`, `update`, `reset`,
 `error`, `node-spawned`, `node-gone`.
 
 **A verb names its target by type — `node`, `device`, `link`, `output`, `input` — and never `id`.**
@@ -257,6 +257,7 @@ links.capture = no    # ... where the SOURCE is a capture device or a monitor po
 graph = yes           # clock.force-quantum, clock.force-rate, wpctl settings
 nodes = no            # supervised pw-loopback instances
 modules = no          # module instances hosted in their own pipewire process
+params = yes          # filter-graph control ports the node already advertises
 ```
 
 `links.capture` is split out because **making that link is mechanically identical to making any
@@ -272,10 +273,18 @@ the Patchbay app and anything running as its uid. These gates decide what that i
 
 ### Supervised child processes, not `load-module`
 
-`pw-cli` does offer `load-module`, and using it would have been a mistake: **`pw-cli` loads the
-module into its own `pw_context` and then exits**, taking the module with it. That is almost
-certainly why `pw-loopback` exists as a standalone binary rather than as a documented `pw-cli`
-incantation.
+`pw-cli` does offer `load-module`, and the one-shot form is a trap: **`pw-cli load-module <name>`
+loads the module into its own `pw_context` and then exits**, taking the module with it. That is
+almost certainly why `pw-loopback` exists as a standalone binary rather than as a documented
+`pw-cli` incantation.
+
+**Corrected 2026-09-27.** That holds for the one-shot form only. `pw-cli` invoked with no command
+is a **REPL that reads commands from stdin**, and it holds one `pw_context` for as long as stdin
+stays open — so a module loaded in a stdin-fed session persists for the life of that session, and
+`load-module` hands back a variable (`1 = @module:22`) that `unload-module` takes. Measured: a
+`pw-loopback` and a `filter-chain` loaded into one session coexisted for minutes, and closing stdin
+removed all four of their nodes. The sentence above still explains why `pw-loopback` is a
+standalone binary; it does not rule `pw-cli` out as a module host.
 
 The mechanism that actually persists is the one `/usr/share/pipewire/filter-chain.conf` documents in
 its own header — *"Run the filters with `pipewire -c filter-chain.conf`"*. So `node-create` spawns
@@ -330,7 +339,7 @@ now even though nothing saves patches yet, so that when something does it is not
 | | why |
 |---|---|
 | bind-mount `pipewire-0` into the container | findings 3 and 4: every app in the container would get the whole API, and PipeWire cannot tell them apart |
-| use PipeWire's `SecurityContext` to mint a restricted socket | the global is there (id 3, permissions `rwx`, from `module-protocol-native`) but there is no CLI for it, `pw-cli` cannot even introspect the type, it needs `access.socket` turned on **host-wide**, and it still cannot distinguish apps inside the container |
+| use PipeWire's `SecurityContext` to mint a restricted socket | the global is there (id 3, permissions `rwx`, from `module-protocol-native`). **Corrected 2026-09-27: the "there is no CLI for it" reason was wrong** — `pw-container`(1) ships in `pipewire-utils` and is exactly that CLI, minting a socket whose clients carry `pipewire.access = restricted`. The row stands on the reasons either side of it: it needs `access.socket` turned on **host-wide**, and by finding 4 it still cannot distinguish apps inside the container, so it would restrict Waydroid as a whole and never one app in it. The owner's 2026-09-27 constraint rules it out a third time — a mounted socket is an audio *data* plane into the container, which is the thing being avoided |
 | enable `access.socket` | changes access for every client on the machine to fix one container |
 | port libpipewire to bionic | both ABIs, the version coupling docs/44 objects to, and docs/54's no-vendored-binaries policy. A pure-Kotlin native-protocol client is possible in principle — `LocalSocket` does support `SCM_RIGHTS` — but is thousands of lines of POD marshalling against a protocol that is not a stable contract |
 | use binder | docs/50 settled it |
@@ -448,13 +457,68 @@ Three things about it are worth keeping:
   clean zero it had not earned. That is the same failure shape as the `optString` probe recorded
   above, caught this time by the script refusing to answer.
 
+**Measured on bigtab01, 2026-09-27 — the effects gate: hosting a filter chain, reading its
+controls, and writing them.** Six probes, each torn down before the next; `pw-dump` reported zero
+`probe` objects and the default sink was unmoved after every one. This was run to decide whether an
+effects UI in the app is reachable at all. It settles the last item on the hypothesis list above and
+forces the two corrections recorded earlier.
+
+*Hosting works, by both routes.* `pipewire -c <generated config>` — the mechanism `node-create`
+already implements — spawned a child that stayed alive, produced an `Audio/Sink` carrying the filter
+graph, and took every one of its nodes with it when killed. A stdin-fed `pw-cli` session does the
+same, which is the correction under
+[Supervised child processes](#supervised-child-processes-not-load-module). Neither route leaves
+anything behind. **The daemon therefore needs no new hosting mechanism**, and the `pw-cli` session
+is an option rather than a dependency.
+
+*The controls are in `pw-dump`, but not where the projection looks.* A filter-chain node carries
+**two** `Props` entries. The first is audioconvert's — `channelVolumes`, `mute`, `channelmix.*` —
+and is the one `_project_node` reads today, which is why volume and mute already work. The second is
+the filter graph's, keyed `<filter-node>:<port>` as a flat alternating list:
+
+```
+['band:Freq', 1000.0, 'band:Q', 1.0, 'band:Gain', 0.0,
+ 'band:b0', 1.0, 'band:b1', 0.0, 'band:b2', 0.0, 'band:a0', 1.0, ...]
+```
+
+So the read path is a projection change, not a new query. Note the biquad coefficients `b0`–`a2`
+arrive in the same list and are **read-only** except on `bq_raw`: a UI that renders every key as a
+slider renders six meaningless ones.
+
+*Writing works, from an ordinary one-shot client.* `pw-cli s <id> Props '{ params = [ "band:Freq"
+250.0 "band:Q" 3.0 ] }'` set two controls in one call and both read back. The same syntax the
+`pipewire-props`(7) man page documents for ALSA device params works on a filter-chain node.
+
+*The trap, and it cost four of the six probes.* A filter chain that has **never been connected**
+reports its configured control values forever, whatever is written to it. The write is not lost —
+it surfaces the instant the chain is linked. Isolated on a single dead-ended chain:
+
+| step | node state | wrote | `pw-dump` reported |
+|---|---|---|---|
+| created with `node.autoconnect = false` | `suspended` | — | `Gain 0.0` |
+| write `6.0` | `suspended` | `6.0` | `Gain 0.0` |
+| linked to the real sink by hand | **`running`** | — | **`Gain 6.0`** — the earlier write surfaced |
+| unlinked again | `suspended` | — | `Gain 6.0`, survives |
+| write `-12.0` | `suspended` | `-12.0` | `Gain -12.0` |
+
+So the rule is *not* "a suspended node rejects writes" — the last row writes while suspended and
+reads back immediately. It is that the filter graph's control state does not exist until the chain
+has been instantiated once, and instantiation needs the chain connected to something. Two
+consequences: **`node-create` should link the chain it creates** rather than leave it dangling, and
+the app must not present a never-connected chain's values as authoritative.
+
+The probe's own isolation flag — `node.autoconnect = false`, added so a test chain could not reach
+the speakers — was what hid the result for four rounds. That is the same shape as the `optString`
+probe recorded above: a safety measure that made the test vacuous for exactly the case under test.
+
 **Still hypothesis:** that two-tap linking works under a finger on the panel; that `pw-link` by id
 creates a link the daemon then sees via the monitor; that `wpctl set-volume` against a node id
 behaves as expected (mute is verified, the slider is not); that a real `systemctl --user restart
 pipewire` produces the `reset` → `graph` sequence (the daemon's side is verified above against a
 fake monitor, but PipeWire's own restart behaviour is not); that a `--user` unit starts under the
-cage session's user manager at boot rather than only after a login; and whether `pipewire -c` with a
-generated config really does host a module instance the way `filter-chain.conf` implies.
+cage session's user manager at boot rather than only after a login. The last item on this list
+— whether `pipewire -c` with a generated config really hosts a module instance the way
+`filter-chain.conf` implies — is **answered below, and it does**.
 
 ## First commands
 

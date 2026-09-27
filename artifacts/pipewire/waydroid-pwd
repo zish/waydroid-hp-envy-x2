@@ -134,7 +134,8 @@ TYPES = {
 # source is an Audio/Source or a sink's monitor port is a recording tap. Making
 # one is indistinguishable, mechanically, from making any other link, so it
 # cannot be caught by looking at the verb -- only at the ports.
-CAPABILITIES = ("mixer", "links", "links.capture", "graph", "nodes", "modules")
+CAPABILITIES = ("mixer", "links", "links.capture", "graph", "nodes", "modules",
+                "params")
 DEFAULT_POLICY = {
     "mixer": True,
     "links": True,
@@ -142,7 +143,22 @@ DEFAULT_POLICY = {
     "graph": True,
     "nodes": False,
     "modules": False,
+    "params": True,
 }
+
+# Biquad coefficient ports. libpipewire-module-filter-chain(7) calls them
+# read-only "except for the bq_raw biquad", and nothing pw-dump reports says
+# which filter node is a bq_raw. So this is a hint for the UI and is NOT
+# enforced on the write path: PipeWire ignores a write to a read-only port
+# anyway, so guessing wrong here costs a slider, never correctness.
+COEFFICIENT_PORTS = ("b0", "b1", "b2", "a0", "a1", "a2")
+
+# A bound on control values, not a range check. Real ranges are per-control --
+# Freq is Hz, Gain is dB, "Delay (s)" is seconds -- and nothing in pw-dump
+# reports them, so they belong to the recipe catalogue rather than here. This
+# only refuses values no control could mean, and NaN with it: `not (abs(v) <=
+# LIMIT)` is true for NaN, where `abs(v) > LIMIT` would be false.
+CONTROL_LIMIT = 1e6
 
 TRUE_WORDS = ("yes", "true", "on", "1", "allow", "enabled")
 FALSE_WORDS = ("no", "false", "off", "0", "deny", "disabled")
@@ -330,6 +346,46 @@ class Graph(object):
         items = self._params(obj, name)
         return items[0] if items else None
 
+    @staticmethod
+    def _controls(items):
+        """Filter-graph control ports, out of the SECOND Props entry.
+
+        Measured 2026-09-27 (docs/56). A filter-chain node carries two Props
+        entries, and _param above returns the first -- audioconvert's, with
+        channelVolumes and mute in it, which is why the mixer fields work and
+        why the filter controls were invisible. The second is the filter
+        graph's, and its `params` is a FLAT ALTERNATING list keyed
+        <filter-node>:<port>:
+
+            ['band:Freq', 1000.0, 'band:Q', 1.0, 'band:Gain', 0.0, ...]
+
+        The colon is what tells the two entries apart, and it is also the
+        boundary cmd_node_param refuses to cross. audioconvert's keys carry no
+        colon, so a control write can never reach `debug.wav-path`, which dumps
+        the node's audio to a file and would be a recording tap wearing a
+        mixer's clothes.
+
+        Values a chain reports are its CONFIGURED values until the chain has
+        been connected once -- see cmd_node_param -- so a reader must not treat
+        a never-connected chain's numbers as the running state.
+        """
+        out = []
+        for entry in items:
+            flat = entry.get("params")
+            if not isinstance(flat, list):
+                continue
+            for i in range(0, len(flat) - 1, 2):
+                key, value = flat[i], flat[i + 1]
+                if not isinstance(key, str) or ":" not in key:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                filt, _, port = key.partition(":")
+                out.append({"key": key, "filter": filt, "port": port,
+                            "value": float(value),
+                            "readonly": port in COEFFICIENT_PORTS})
+        return out
+
     def kind(self, oid):
         obj = self.objects.get(oid)
         return TYPES.get(obj.get("type")) if obj else None
@@ -392,6 +448,10 @@ class Graph(object):
                 # agrees with `wpctl get-volume`, and keep the raw list for
                 # anyone who wants per-channel detail.
                 out["volume"] = round(max(volumes) ** (1.0 / 3.0), 4)
+        # Every Props entry, not just the first: the filter graph's is second.
+        controls = self._controls(self._params(obj, "Props"))
+        if controls:
+            out["controls"] = controls
         return out
 
     def _project_port(self, obj):
@@ -717,6 +777,12 @@ context.modules = [
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$")
 SAFE_MODULE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 SAFE_KEY = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+# "<filter-node>:<port>". The port half is a human label from the plugin --
+# "Delay (s)", "In 1", "VAD Threshold (%)" -- so it is much looser than
+# SAFE_KEY, and the colon is mandatory because it is what separates a filter
+# control from an audioconvert prop sharing the same Props param.
+SAFE_CONTROL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+                          r":[A-Za-z0-9][A-Za-z0-9 ()%._+-]{0,63}$")
 
 
 class Client(object):
@@ -875,6 +941,7 @@ class Server(object):
             "quantum": self.cmd_quantum,
             "rate": self.cmd_rate,
             "wp-setting": self.cmd_wp_setting,
+            "node-param": self.cmd_node_param,
             "node-create": self.cmd_node_create,
             "node-destroy": self.cmd_node_destroy,
             "nodes": self.cmd_nodes,
@@ -1330,6 +1397,72 @@ class Server(object):
             raise ValueError("value must be a short string")
         self._tool(["wpctl", "settings", key, value], "wpctl settings")
         client.reply(msg)
+
+    # ---- verbs: filter controls ------------------------------------------
+
+    def cmd_node_param(self, client, msg):
+        """Set filter-graph control ports on a node.
+
+            -> {"id":5,"cmd":"node-param","node":77,
+                "params":{"band:Freq":250.0,"band:Q":3.0}}
+
+        Measured 2026-09-27 (docs/56): `pw-cli s <id> Props '{ params = [...] }'`
+        sets several controls in one call from an ordinary one-shot client, so
+        this needs no persistent pw-cli session and no new hosting mechanism.
+
+        TWO TRAPS, BOTH MEASURED
+
+        The key must be one the node ALREADY advertises. That is not tidiness:
+        a filter-chain node's Props param has two entries, and the other one is
+        audioconvert's, carrying `debug.wav-path` -- which writes the node's
+        audio to a file. Refusing any key the graph does not already report as
+        a filter control keeps this verb on the filter graph's side of that
+        line, where SAFE_CONTROL's mandatory colon is the second lock.
+
+        A chain that has never been CONNECTED reports its configured values
+        forever, whatever is written to it. The write is not lost -- it
+        surfaces the moment the chain is linked. Nothing in pw-dump
+        distinguishes "never instantiated" from "ran once and went idle", so
+        this verb cannot resolve it for the caller; it returns the node's state
+        instead and lets the monitor's update event be the confirmation that a
+        value actually moved. An app that treats the reply as proof will be
+        wrong for exactly the dangling-chain case.
+        """
+        self._gate("params")
+        node = self._object(msg, "node", ("node",))
+        wanted = msg.get("params")
+        if not isinstance(wanted, dict) or not wanted:
+            raise ValueError("params must be a non-empty object of "
+                             "\"<filter>:<port>\": <number>")
+        if len(wanted) > 64:
+            raise ValueError("at most 64 controls in one call")
+        projected = self.graph.project(node) or {}
+        known = {}
+        for control in projected.get("controls") or []:
+            known[control["key"]] = control
+        if not known:
+            raise ValueError("%d advertises no filter controls" % node)
+        flat = []
+        for key, value in wanted.items():
+            if not isinstance(key, str) or not SAFE_CONTROL.match(key):
+                raise ValueError("a control name looks like \"band:Freq\"")
+            if key not in known:
+                raise ValueError("%d has no control \"%s\"" % (node, key))
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("\"%s\" must be a number" % key)
+            value = float(value)
+            if not abs(value) <= CONTROL_LIMIT:
+                raise ValueError("\"%s\" is out of range" % key)
+            flat.append(key)
+            flat.append(value)
+        # SPA-JSON is a superset of JSON, so the param goes in as plain JSON
+        # rather than being rendered by hand -- the same reasoning _module_argv
+        # gives. pw-cli wants the flat alternating list pw-dump reports, not an
+        # object, which is why this is a list and not the dict it came in as.
+        self._tool(["pw-cli", "set-param", str(node), "Props",
+                    json.dumps({"params": flat})], "set-param")
+        client.reply(msg, applied=[flat[i] for i in range(0, len(flat), 2)],
+                     state=projected.get("state"))
 
     # ---- verbs: supervised nodes ----------------------------------------
 

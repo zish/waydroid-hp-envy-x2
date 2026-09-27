@@ -1,3 +1,26 @@
+* Sun Sep 27 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
+- Project a filter graph's control ports, and add node-param to move them. A
+  filter-chain node carries TWO Props entries and the projection read only the
+  first, which is audioconvert's -- so volume and mute worked and an EQ's
+  Freq/Q/Gain were invisible. The second entry is keyed <filter-node>:<port>
+  and is now carried as `controls`, with the biquad coefficients flagged
+  read-only for the UI's benefit (docs/56).
+- New `params` capability, default yes. It is the same kind of thing as
+  `mixer`: audible, reversible, and pointless to gate if the point is an
+  effects UI that can move a slider. It creates nothing -- a chain has to exist
+  first, which still means `nodes` + `modules` or a hand-written conf.d file.
+- node-param will only set a control the node ALREADY advertises. That is a
+  security boundary and not tidiness: the audioconvert Props entry shares the
+  same param id and carries `debug.wav-path`, which writes the node's audio to
+  a file. Filter control names always carry a colon and audioconvert's never
+  do, which is the line the verb refuses to cross -- the concern
+  `links.capture` exists for, arriving through a different door.
+- No protocol version bump. The addition is additive, and the policy map is
+  already the capability advertisement the app reads: a daemon older than this
+  has no `params` key in it at all, so its absence distinguishes "too old to
+  have controls" from "this node has no filter graph", which the absent
+  `controls` field alone could not.
+
 * Fri Sep 25 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First package. Host-side PipeWire graph control for Waydroid's Android:
   nodes, ports, links, volumes, defaults, device profiles and routes, and the
