@@ -1,0 +1,19 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package, and the first waydroid-ext-hw-* one: docs/19's sensor-hub
+  resume check, which reprobes i2c-ITE8350:00 when the accelerometer comes back
+  from s2idle answering reads with a frozen value.
+- Ships the two units, not the /etc/systemd/system-sleep/ite8350 hook they
+  replaced. systemd 259 scans only /usr/lib/systemd/system-sleep, so that hook
+  never ran once -- nine suspends, zero runs (docs/27). It is not in the source
+  package either.
+- Units go to /usr/lib/systemd/system rather than the installer's /etc default.
+  A unit under /usr/local is labelled lib_t and init_t may not start it, which
+  is exactly the path ite8350-sleep.service's ExecStop takes (docs/27).
+- Depends on neither waydroid nor waydroid-ext-sensord. The payload only reads
+  /sys/bus/iio and writes /sys/bus/i2c, so reviving the hub is worth doing
+  whether or not Android is reading it, and nothing generic may depend on a
+  package named after one laptop.
+- Does not remove a pre-package manual install. /etc/systemd/system takes
+  precedence over /usr/lib/systemd/system, so a host that still has the
+  hand-installed units keeps running those and this package's are shadowed;
+  remove them by hand before or after installing.

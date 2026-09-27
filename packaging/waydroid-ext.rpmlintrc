@@ -150,3 +150,15 @@ addFilter("waydroid-ext-backlight.*dangerous-command-in-%postun rm")
 # noise anyway, which is how a real typo gets missed. Descriptions are reviewed
 # by a human instead.
 addFilter("spelling-error")
+
+# ------------------------------------------- a credentials file, mode 0600
+#
+# waydroid-ext-wifi-sync ships /etc/waydroid-wifi-share.conf as
+# %config(noreplace) %attr(0600,root,root). The check is right that a
+# world-unreadable packaged file is usually a mistake; this one is the allow-list
+# naming which host Wi-Fi networks may have their PSK copied into Android, so it
+# is read by a root-run reconciler and by nothing else, and a mode that let any
+# local user enumerate the owner's chosen networks would be the defect. The
+# superseded packaging/waydroid-wifid.spec shipped it at the same mode for the
+# same reason.
+addFilter("waydroid-ext-wifi-sync.*non-readable /etc/waydroid-wifi-share.conf")

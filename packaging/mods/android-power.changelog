@@ -1,0 +1,19 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Arms Android's keyguard before the host suspends and injects a
+  wakeup after it resumes, so the power button and the lid behave like a
+  tablet's on a session that has no host lock screen behind it (docs/27).
+- Deliberately ships no systemd-sleep hook. systemd 259 scans only
+  /usr/lib/systemd/system-sleep, so a hook in /etc is silently dead, and a hook
+  could not do this job in either directory because user.slice is frozen while
+  hooks run and Android is in user.slice. The unit is ordered
+  Before=sleep.target instead, which puts the pre leg ahead of that freeze.
+- The post leg's wakeup is unconditional, which makes any suspend/resume cycle
+  the recovery for an Android that is asleep with no in-band way back -- the
+  black screen docs/52 traced to a launcher gesture calling lockNow().
+- KEY_SLEEP and KEY_WAKEUP rather than KEY_POWER, because those two are
+  absolute rather than a toggle: a lost or repeated injection cannot invert the
+  state and leave the screen off.
+- Enabled by the packaged sleep.target.wants symlink rather than a scriptlet,
+  and the unit goes to /usr/lib/systemd/system, which SELinux labels as a unit
+  file. Under /usr/local it would be lib_t, and init_t may not start a lib_t
+  service -- measured on the sibling unit from docs/19.

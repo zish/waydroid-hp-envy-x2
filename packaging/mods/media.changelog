@@ -1,0 +1,29 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Host-side removable media for Waydroid's Android: USB sticks,
+  SD cards and optical data discs mounted on the host at
+  <data>/media/0/Removable/<label>, which is /sdcard/Removable/<label> inside
+  Android (docs/46).
+- Mounts into the FUSE lower directory rather than editing the LXC config or
+  entering the container's mount namespace: FUSE serves content, so it crosses
+  the per-app mount namespaces and nothing has to be restarted -- which is what
+  keeps a kiosk session off the SDDM greeter.
+- A root system unit, not a --user unit driving udisks2: a --user service is in
+  no login session, so polkit falls through to auth_admin and a kiosk with nobody
+  at it waits for ever. Root is needed twice over anyway -- to mount, and to
+  write into a lower directory that is media_rw mode 0770.
+- No SELinux module, and the earlier prediction that one was needed is withdrawn:
+  the container runs as container_runtime_t, which reads dosfs_t fine. The denial
+  table that said otherwise was measuring waydroid_t, the host daemons' domain.
+- ntfs-3g is a Recommends and not a Requires: it provides the mount.ntfs helper,
+  so without it NTFS volumes alone fail to mount while every other filesystem
+  class still works.
+- Nothing in /etc: every knob is a command-line flag with a built-in default, so
+  there is no configuration file to own and nothing for the uninstall rule
+  packaging/test-install.sh enforces to apply to.
+- The Android half is deliberately not packaged, for the reason no app here is:
+  an APK needs the Android SDK and the Kotlin compiler at build time, and a
+  prebuilt one would be the vendored binary docs/54 rules out. The Eject button
+  and the arrival notification are its.
+- Not supported on a desktop session. GNOME's automounter wins the race and the
+  daemon then skips the device, so nothing appears in Android; docs/49 measures
+  this and designs the follow-the-desktop replacement, which is not built.

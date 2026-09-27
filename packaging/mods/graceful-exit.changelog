@@ -1,0 +1,19 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Unprivileged graceful Android shutdown when the user logs out:
+  a sway drop-in runs it before the compositor goes away, and a
+  graphical-session.target user unit catches the logouts that bypass the chord
+  (docs/24).
+- The sway drop-in ships to /usr/share/sway/config.d, the directory
+  sway-config-fedora owns and a package may populate, rather than to the
+  /etc/sway/config.d the manual install uses. So nothing lands under /etc and
+  nothing has to be marked as an rpm config file.
+- Stated rather than glossed: the drop-in installs correctly and is silently
+  inert on a host whose sway config omits the /usr/share include layer, which
+  is what the reference host has. The backstop is all such a host gets
+  (docs/24, docs/25).
+- sway is a weak dependency, by docs/47's test: without it the drop-in is an
+  unread file, while the compositor-independent backstop still turns a logout
+  into a real shutdown instead of SIGKILL -- dead weight, not worse than stock.
+- docs/23's host-shutdown inhibitor is deliberately a separate modification. It
+  is root, a system unit and a waydroid-container.service drop-in, and this
+  package's whole claim is that a logout needs no privilege.

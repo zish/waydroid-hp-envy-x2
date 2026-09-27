@@ -17,7 +17,7 @@
 
 [Unit]
 Description=Rebuild Waydroid's overlay from the packaged staging trees
-Documentation=file:///usr/share/doc/waydroid-overlay/36-packaging.md
+Documentation=https://github.com/zish/waydroid-hp-envy-x2/blob/HEAD/docs/36-packaging.md
 Before=waydroid-container.service
 After=local-fs.target
 ConditionPathIsDirectory=/var/lib/waydroid

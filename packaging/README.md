@@ -40,7 +40,10 @@ both missing packages by name before, and reports only base-OS dependencies an e
 cannot have once the group, `camera-hal`, `camera-gbm` and `overlay-sync` are in one
 transaction. The group went to 1.0.1 for the dependency change.
 
-**Of the fourteen modifications here, twelve produce something installable**: `overlay-sync`,
+**Superseded 2026-09-27: 22 modifications are written and all 22 produce something
+installable**, `wifid` included, once `--prebuilt` is used for the two compiled daemons. `dexopt`
+is a 23rd with a `.mod` file that is deliberately not shipped. When this was written the count
+was: **of the fourteen modifications here, twelve produce something installable**: `overlay-sync`,
 `sensord`, `camera-gbm`, `btd`, `pidguard`, `restartd`, `backlight` — no longer inert, because
 the `waydroid-sensord` it grants a permission to is now a package, so its `Recommends`
 resolves for the first time — and, as of 2026-09-24, `camera-hal`, `battery`,
@@ -140,6 +143,59 @@ plain — and asserts the harness reaches the right verdict on each.
 | `brightness-overlay` 1.0.1 | yes | yes | **yes** | same |
 | `wifi-framework` | yes | yes | **yes** | same |
 | `wifi-hostd` 1.0.1 | yes | yes | **yes** | same |
+| `media` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
+| `android-power` | yes | yes | **yes** | same |
+| `graceful-exit` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
+| `cage` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
+| `binder-nice` | yes | yes | **yes** | same |
+| `hw-ite8350` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
+| `wifi-sync` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
+| `dexopt` | yes | yes | **yes** | plus `non-etc-or-var-file-marked-as-conffile` — **written, not shipped**, see below |
+
+### The seven host packages added 2026-09-27
+
+`media`, `android-power`, `graceful-exit`, `cage`, `binder-nice`, `hw-ite8350` and `wifi-sync`.
+All seven had a `DESTDIR`-clean `install.sh` and no packaging, which is what made them the
+mechanical batch; the work was in the `%files` list and the dependency set, not the mechanism.
+
+| Package | Payload | Notable |
+|---|---|---|
+| `media` | `waydroid-mediad` + unit | stdlib Python; every command it execs is declared, `mount`/`umount`/`lsblk`/`findmnt` included |
+| `android-power` | suspend/lock key + the `sleep.target` unit | not a `system-sleep` hook: systemd 259 scans only `/usr/lib/systemd/system-sleep` ([docs/27](../docs/27-android-power-button.md)) |
+| `graceful-exit` | logout handler, **user** unit, sway `config.d` drop-in | `%{_userunitdir}`, because logout is a session event |
+| `cage` | the kiosk session wrapper + `.desktop` | session entry goes to `%{_datadir}/wayland-sessions`, which [docs/25](../docs/25-waydroid-in-cage.md) already prescribed |
+| `binder-nice` | one `LimitNICE=40` drop-in | lands in `%{_unitdir}/waydroid-container.service.d`, not `/etc`, following `backlight`'s precedent |
+| `hw-ite8350` | resume check + two units | the first `waydroid-ext-hw-*` package |
+| `wifi-sync` | credential reconciler + timer + 0600 allow-list | the first consumer of `install.sh`'s new component argument |
+
+**Every `%files` list was derived by running the installer into a throwaway `DESTDIR` and reading
+the tree back**, not by reading the installer. That is the check that makes "the spec says X and
+the installer produces Y" impossible rather than merely unlikely, and it is cheap enough that
+there is no reason for a future package to skip it.
+
+Four things were corrected while packaging them, each of which outlived its own modification:
+
+- **27 over-length `DESCRIPTION` lines.** rpmlint's limit is 79 columns and every previously
+  written `.mod` respected it; the new batch did not. Reflowed.
+- **`artifacts/android-power/waydroid-android-key` used `#!/usr/bin/env python3`**, alone among
+  seven packaged Python payloads. rpmlint's `env-script-interpreter` is right: `env` resolves
+  against `PATH` and defeats rpm's automatic dependency generation. Now `#!/usr/bin/python3`.
+- **Five `Documentation=` lines named the superseded monolithic package** and a `/docs/` path
+  segment that `%doc` flattens away, so every one of them was a dead link on an installed system:
+  `ite8350-resume-check`, `ite8350-sleep`, `waydroid-wifi-sync`, `waydroid-wifid` and
+  `waydroid-overlay-sync`. All now use the `blob/HEAD` form
+  [docs/53](../docs/53-release-readiness.md) settled on. The two `file://` URLs left are
+  deliberate: `backlight`'s is already correct, and `artifacts/power/waydroid-sync-sleep.service`
+  belongs to a feature no package ships.
+- **`wifi-sync`'s `/etc/waydroid-wifi-share.conf` is `%config(noreplace) %attr(0600,...)`** and
+  rpmlint's `non-readable` is filtered with the reason: it is the allow-list naming which host
+  networks may have their PSK copied into Android, so a mode letting any local user enumerate the
+  owner's chosen networks would be the defect.
+
+**`dexopt` is written and deliberately not shipped.** It ships no reconciler, so `rpm -i` is a
+no-op on Android; its two lines are one laptop's CPU pinning under a generic name; and its
+`%config` under `/usr/share` fails `test-install.sh` by leaving `/usr/share/waydroid-dexopt`
+behind after erase. Scoped in [docs/53](../docs/53-release-readiness.md), item 1.
 
 ### The five overlay components added 2026-09-24
 

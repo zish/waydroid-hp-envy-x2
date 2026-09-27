@@ -1,0 +1,9 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. The credential reconciler and its timer, split out of
+  waydroid-wifid.spec's `sync` subpackage so a fix to a shell script on a timer
+  no longer reissues the C++ daemon (docs/47).
+- Installs through the `wifi-sync` component of artifacts/wifi/install.sh, which
+  is what lets that installer serve one modification at a time.
+- Ships /etc/waydroid-wifi-share.conf at 0600 with no network named in it, as
+  %%config(noreplace): until an SSID is written into it this package copies
+  nothing anywhere (docs/36).

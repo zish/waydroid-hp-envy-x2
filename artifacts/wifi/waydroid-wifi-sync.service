@@ -8,7 +8,7 @@
 
 [Unit]
 Description=Sync NetworkManager's Wi-Fi networks into Android
-Documentation=file:///usr/share/doc/waydroid-bigtab01/docs/36-wifi-credential-sync.md
+Documentation=https://github.com/zish/waydroid-hp-envy-x2/blob/HEAD/docs/36-wifi-credential-sync.md
 
 # NM is the source of truth being read, and the container is what is written to.
 # Neither is Requires=: with nothing opted in this is a no-op, and it must not

@@ -1,0 +1,21 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. The kiosk session: a greeter entry and the wrapper that is
+  cage's child, so Waydroid's Android is the whole machine full-screen and an
+  in-Android power-off lands back at the greeter (docs/25).
+- The wrapper exists because `cage -- waydroid show-full-ui` cannot work: cage
+  exits when its child exits and show-full-ui does not block once a session is
+  tracked, this image's guest framework never announces its own shutdown, and
+  cage starts no graphical-session.target for docs/24's backstop to hang off.
+- A stale session is cleared rather than reused. The container binds the
+  compositor's Wayland socket by inode and cage unlinks its socket on exit, so
+  an inherited session holds a dead inode a new cage does not restore.
+- The session entry ships in /usr/share/wayland-sessions and not the
+  installer's /etc default, following waydroid-ext-backlight's 2026-09-24
+  precedent -- and because SDDM's compiled-in SessionDir covers the /usr path
+  while /etc is read on this host only via an unpackaged drop-in. Provisional:
+  the host still carries a hand-placed /etc copy that a migration must delete.
+- Enables nothing and defaults nothing: the entry is additive, and which session
+  the machine logs into stays the administrator's decision.
+- waydroid-graceful-exit is deliberately a separate modification (docs/24): its
+  sway hook and user unit have nothing to do with a kiosk. The dependency is
+  weak because the wrapper guards its absence and degrades to a hard kill.

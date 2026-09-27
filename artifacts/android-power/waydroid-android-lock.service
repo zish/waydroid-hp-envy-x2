@@ -3,7 +3,7 @@
 
 [Unit]
 Description=Lock Android before suspend, wake it after resume
-Documentation=file:///usr/share/doc/waydroid-android-power/docs/27-android-power-button.md
+Documentation=https://github.com/zish/waydroid-hp-envy-x2/blob/HEAD/docs/27-android-power-button.md
 
 # systemd-suspend.service is Requires=sleep.target + After=sleep.target, so anything
 # ordered Before=sleep.target runs before the suspend proper -- and, importantly,

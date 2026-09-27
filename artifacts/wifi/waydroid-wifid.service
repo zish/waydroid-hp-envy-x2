@@ -10,7 +10,7 @@
 
 [Unit]
 Description=Wi-Fi native services for Waydroid's Android container
-Documentation=file:///usr/share/doc/waydroid-bigtab01/docs/34-wifi-second-radio.md
+Documentation=https://github.com/zish/waydroid-hp-envy-x2/blob/HEAD/docs/34-wifi-second-radio.md
 
 # NetworkManager is the backend, and NmBackend::init() refuses to start if NM
 # is not answering on the system bus.  Ordering after it turns what would be a

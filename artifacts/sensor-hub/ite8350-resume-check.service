@@ -3,7 +3,7 @@
 
 [Unit]
 Description=Check the ITE8350 sensor hub survived resume
-Documentation=file:///usr/share/doc/waydroid-bigtab01/docs/19-sensor-hub-suspend-wedge.md
+Documentation=https://github.com/zish/waydroid-hp-envy-x2/blob/HEAD/docs/19-sensor-hub-suspend-wedge.md
 
 # Started with --no-block by ite8350-sleep.service on every resume, so nothing
 # waits on it. Also runnable on demand: `systemctl start ite8350-resume-check`.

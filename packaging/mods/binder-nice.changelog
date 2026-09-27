@@ -1,0 +1,16 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. One waydroid-container.service drop-in carrying LimitNICE=40,
+  which stops the kernel's binder driver skipping priority inheritance into
+  every process Waydroid starts (docs/40).
+- The log flood and the defect are one event: 1,028,179 `RLIMIT_NICE not set`
+  records in a 6 h 23 m boot, each one an inheritance already dropped. That is
+  why silencing the message through binder's debug_mask is not a fix, and it is
+  the reason this ships as a package instead of as advice.
+- Installed into %%{_unitdir}/waydroid-container.service.d rather than the
+  installer's /etc default, following waydroid-ext-backlight's udev rule and
+  the monolithic spec that carried this file before the split. systemd reads
+  /etc ahead of /usr/lib, so an admin override still wins, and nothing has to
+  be marked %%config that nobody edits.
+- No dependency on waydroid-ext-sensord in either strength. Sensord produced
+  33,977 of the 33,984 printed messages, but a raised rlimit nothing exercises
+  is inert rather than worse than stock, which is docs/47's test.

@@ -16,7 +16,7 @@ are ahead of the code in several places and reading them alone gives the wrong a
 
 | Question | Answer |
 |---|---|
-| Is every change available as an RPM? | **No — 7 modifications written of ~36 named, and only 4 of those 7 install** |
+| Is every change available as an RPM? | **Not yet, but most of the way: 22 modifications written of ~38 named as of 2026-09-27, and all 22 produce something installable.** Was 7 of ~36 with 4 installable when this was written |
 | Could a general user build and install? | **No** — the two compiled daemons cannot be built off this dev box at all |
 | Are repository paths portable? | **Nearly** — 5 exceptions, all named below; git history is no worse than HEAD |
 | Anything genuinely un-RPM-able? | **Four things**, all small, none of them blocking |
@@ -88,6 +88,13 @@ This is the same class of finding as the rest of docs/47's "what building actual
 section: the only thing that catches it is running it.
 
 ### What is unpackaged, by feature
+
+**Superseded 2026-09-27 for most of this list.** `mediad`, `wifi-sync`, the cage session,
+graceful exit, android-power, binder-nice and the ITE8350 resume machinery were all packaged that
+day, which leaves this section naming only: **graceful shutdown**, **mdns**, the
+**`lxc.net.0.name` edit**, `tools`, the Widevine overlay files, and `dexopt` — which has a `.mod`
+file written but is deliberately NOT shipped, for three reasons recorded under item 1 below. The
+original text follows.
 
 Cross-referencing `packaging/README.md`'s host audit against the fourteen mods: `sensord` and its
 `ILight` half, `mediad`, `wifi-sync`, the cage session, graceful exit and shutdown,
@@ -342,7 +349,33 @@ string Android reports through the sensors HAL, so changing it changes observabl
      of the migration" rule with one the dependency solver enforces. The tree still carries the
      `.so` and `.orig` files as the test oracle; deleting them is entangled with the
      history-rewrite decision, which is the owner's.
-   - **`mediad`**, the cheapest remaining host package.
+   - ~~**`mediad`**, the cheapest remaining host package.~~ — **done 2026-09-27, along with six
+     more**: `media`, `android-power`, `graceful-exit`, `cage`, `binder-nice`, `hw-ite8350` and
+     `wifi-sync`. Each one's `%files` list was derived by running its installer into a throwaway
+     `DESTDIR` and reading the tree back, rather than from reading the installer — which is what
+     makes "the spec says X and the installer produces Y" impossible rather than merely unlikely.
+     All seven lint to the project baseline and pass `packaging/test-install.sh` 36/36.
+     `hw-ite8350` is the first `waydroid-ext-hw-*` package.
+   - **`dexopt` has a `.mod` file and is deliberately not shipped.** Three findings, and the first
+     is disqualifying on its own:
+     **(1) it ships no reconciler.** `artifacts/dexopt/install.sh` is both halves in one script
+     and the RPM only ever reaches the first: everything past the `DESTDIR` guard — the merge
+     into `waydroid_base.prop`, the `.pre-dexopt` original, the live `setprop` — is skipped, and
+     the script itself is not installed. The payload is one data file, so `rpm -i` changes nothing
+     about a running Android, while this document and [docs/47](47-package-split.md) both call the
+     package a reconciler.
+     **(2) it ships one laptop's CPU pinning under a generic name.** The file is two lines and
+     `dalvik.vm.dex2oat-cpu-set=0,2` is the Core M-5Y70's sibling numbering; docs/47 puts those
+     values behind `waydroid-ext-hw-envyx2`. On a CPU that numbers siblings differently the same
+     string takes half of each core and makes matters worse.
+     **(3) its `%config(noreplace)` lives under `/usr/share`**, which rpmlint reports as
+     `non-etc-or-var-file-marked-as-conffile` and which fails `packaging/test-install.sh`
+     outright: an edited copy becomes an `.rpmsave` that rpm then cannot remove, leaving
+     `/usr/share/waydroid-dexopt` behind after erase. On the rpm-ostree target `/usr` is read-only,
+     so the file rpm is protecting cannot be edited in place anyway.
+     The recommendation is to treat it as one piece of work with `waydroid-ext-lxc-config`, since
+     both this document and `packaging/README.md` want **one** generalised pre-start reconciler
+     rather than an RPM per item of mutable state.
    - ~~**`wifi/build.sh --rpm`**, plus the component argument for `artifacts/wifi/install.sh` that
      `artifacts/overlay/install.sh` already has~~ — **both done 2026-09-26.** `--rpm` locates
      libgbinder and libglibutil with `pkg-config`, puts the rpm build environment's `CXXFLAGS` on
