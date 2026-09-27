@@ -14,9 +14,9 @@
 # label, not a namespace: it exists so that installing the useful two thirds of
 # this project does not drag in one laptop's I2C device names. Nothing outside
 # waydroid-ext-hw-* may depend on this package, and this package depends on
-# nothing that would be pulled onto a machine for its sake. What is owed is the
-# other side of that promise -- being INERT on the wrong machine rather than
-# merely unwanted -- and it is not kept; see below.
+# nothing that would be pulled onto a machine for its sake. The other side of
+# that promise -- being INERT on the wrong machine rather than merely unwanted --
+# was NOT kept by 1.0.0 and is kept as of 1.0.1; see below.
 #
 # WHY TWO UNITS AND NOT A system-sleep HOOK
 #
@@ -39,25 +39,31 @@
 # is skipped when DESTDIR is set, correctly -- a buildroot has no host to clean --
 # so this package does not clean up after the manual install either.
 #
-# WHAT HAPPENS ON A MACHINE THAT HAS NO ITE8350, WHICH IS NOT GOOD ENOUGH
+# WHAT USED TO HAPPEN ON A MACHINE THAT HAS NO ITE8350 -- FIXED IN 1.0.1
 #
-# Read the script rather than assuming. accel_path() finds no iio node named
-# accel_3d, accel_is_stale() returns true because "gone entirely counts as
-# stale", and the reprobe writes i2c-ITE8350:00 to
-# /sys/bus/i2c/drivers/i2c_hid_acpi/unbind -- which without that device, or
-# without that driver bound, fails, and the unit exits 1. So on the wrong hardware
-# this logs "accelerometer stale after resume -- reprobing i2c-ITE8350:00" and
-# "unbind failed" and fails ite8350-resume-check.service on EVERY resume, about
-# 11 s after it, forever.
+# 1.0.0 failed its unit on every resume on any machine without the hub, and the
+# path was read out of the script rather than guessed at: accel_path() finds no
+# iio node named accel_3d, accel_is_stale() returns true because "gone entirely
+# counts as stale", and the reprobe writes i2c-ITE8350:00 to
+# /sys/bus/i2c/drivers/i2c_hid_acpi/unbind, which fails without that device.
+# So the wrong hardware logged "accelerometer stale after resume -- reprobing
+# i2c-ITE8350:00" and "unbind failed" and failed ite8350-resume-check.service
+# about 11 s after every resume, forever.
 #
-# Not dangerous -- the write names one device by its exact ACPI id, so another
-# machine's i2c-HID touchpad or touchscreen is never unbound -- but noisy failure
-# is the wrong behaviour for a hw- package, because a metapackage or a curious
-# user will eventually install it somewhere it does not belong. A one-line
-# precondition in the script (no accel_3d and no i2c-ITE8350:00 present -> log
-# once and exit 0) would fix it. That is a change to
-# artifacts/sensor-hub/ite8350-resume-check, not to this file, so it is recorded
-# here and not made here.
+# Reproduced on the Debian dev box, which has no such hub: 8 s, then the reprobe,
+# then exit 1. Never dangerous -- the write names one device by its exact ACPI id,
+# so another machine's i2c-HID touchpad or touchscreen is never unbound -- but
+# noisy failure is the wrong behaviour for a hw- package, because a metapackage or
+# a curious user eventually installs it somewhere it does not belong.
+#
+# The fix is a precondition at the top of the script, and it tests the I2C DEVICE
+# rather than the accelerometer: unbinding the driver removes the driver link and
+# leaves /sys/bus/i2c/devices/i2c-ITE8350:00 in place, so the test is true exactly
+# while the hardware is present and stays true in the wedged state the script
+# exists to repair. Testing for accel_3d instead would have made the script exit 0
+# on precisely the failure it is for. It runs BEFORE the 8 s settle wait, so the
+# wrong machine pays nothing: measured at 0 s and exit 0, against 8 s and exit 1
+# before.
 #
 # WHY NEITHER waydroid NOR waydroid-ext-sensord IS A DEPENDENCY
 #
@@ -89,7 +95,7 @@
 # consecutive resumes, which sits oddly with docs/19's "intermittent" framing and
 # has not been explained.
 
-VERSION=1.0.0
+VERSION=1.0.1
 RELEASE=1
 KIND=host
 

@@ -33,6 +33,26 @@ exec 1> >(systemd-cat -t ite8350-resume -p info) 2>&1
 I2C_DEV=i2c-ITE8350:00
 I2C_DRV=/sys/bus/i2c/drivers/i2c_hid_acpi
 
+# THIS MACHINE, OR NOT THIS MACHINE -- checked first, and before the wait.
+#
+# Everything below assumes the hub exists. On a machine that does not have one
+# there is never an accel_3d node, so accel_is_stale() reports stale: "gone
+# entirely counts as stale" is right for a hub whose accelerometer stopped
+# publishing and wrong for hardware that was never there. The reprobe then
+# unbinds a device that does not exist, fails, and exits 1 -- on every resume,
+# about eleven seconds after each one, forever. A package named after one
+# laptop has to be inert on every other laptop rather than merely harmless,
+# so this is the first thing the script does.
+#
+# The DEVICE node and not the accelerometer, because unbinding the driver
+# removes the driver link and leaves the i2c device in place. So this is true
+# exactly while the hardware is present, which is the question being asked, and
+# it stays true in the wedged state this script exists to repair.
+if [ ! -e "/sys/bus/i2c/devices/$I2C_DEV" ]; then
+	echo "no $I2C_DEV on this machine -- nothing to check"
+	exit 0
+fi
+
 # Give the hub a chance to come back on its own. A single suspend usually
 # recovers unaided, and -121 on resume is common and self-healing, so acting
 # too early would reprobe the hub for no reason on every wake.

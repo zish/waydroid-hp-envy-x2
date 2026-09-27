@@ -181,10 +181,26 @@ with `waydroid-ext-overlay-sync` 1.1.0 on 2026-09-26, and only the fetched row i
 
 **Hardware-specific.**
 
-| Package | Contents |
-|---|---|
-| `waydroid-ext-hw-ite8350` | sensor-hub resume check, sleep hook, the reprobe machinery ([19](19-sensor-hub-suspend-wedge.md)) |
-| `waydroid-ext-hw-envyx2` | metapackage: `hw-ite8350` + the Core M-5Y70 dexopt values |
+| Package | Contents | Written |
+|---|---|---|
+| `waydroid-ext-hw-ite8350` | sensor-hub resume check, sleep hook, the reprobe machinery ([19](19-sensor-hub-suspend-wedge.md)) | **2026-09-27, 1.0.1.** Note "sleep hook" is wrong and was wrong here: it ships two *units*, because [27](27-android-power-button.md) found systemd 259 scans only `/usr/lib/systemd/system-sleep` and the `/etc` hook never once ran |
+| `waydroid-ext-hw-envyx2` | metapackage: `hw-ite8350` + the Core M-5Y70 dexopt values | **2026-09-27, 1.0.0 — half of it.** It requires `hw-ite8350` and recommends `sensord`; the dexopt values are absent because `waydroid-ext-dexopt` installs one data file and nothing that applies it, so requiring it would promise tuning and deliver a file nobody reads |
+
+**What the `hw-` prefix promises, and what 1.0.0 of `hw-ite8350` did not keep.** The prefix is a
+label meaning "this names one laptop's hardware, so do not install it on another" — and the other
+side of that is being *inert* elsewhere rather than merely unwanted. It was not. The resume check
+treated a missing accelerometer as a stale one, so on any machine without the hub it reprobed a
+device that is not there, failed the unbind, and failed its unit about 11 s after **every resume,
+forever**. Never dangerous, because the write names one device by its exact ACPI id and no other
+machine's i2c-HID touchpad could be unbound, but exactly the sort of wrong a metapackage spreads --
+which is why it was fixed before `hw-envyx2` existed to spread it.
+
+Fixed in 1.0.1 by a precondition that tests the **I2C device node** rather than the accelerometer,
+which is the whole subtlety: unbinding the driver removes the driver link and leaves
+`/sys/bus/i2c/devices/i2c-ITE8350:00` in place, so the test is true exactly while the hardware is
+present and stays true in the wedged state the script exists to repair. Testing for `accel_3d`
+instead would have made the script exit 0 on precisely the failure it is for. Reproduced and
+measured on a box with no such hub: 8 s and exit 1 before, 0 s and exit 0 after.
 
 **`waydroid-ext-uvc-autosuspend` was in both tables above and is retired, 2026-09-24.** It would
 have shipped [artifacts/udev/99-uvc-no-autosuspend.rules](../artifacts/udev/99-uvc-no-autosuspend.rules),

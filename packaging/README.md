@@ -148,7 +148,8 @@ plain — and asserts the harness reaches the right verdict on each.
 | `graceful-exit` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
 | `cage` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
 | `binder-nice` | yes | yes | **yes** | same |
-| `hw-ite8350` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
+| `hw-ite8350` 1.0.1 | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
+| `hw-envyx2` | yes | yes | **yes** | same, plus `no-%check-section` — a metapackage has nothing to check |
 | `wifi-sync` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
 | `dexopt` | yes | yes | **yes** | plus `non-etc-or-var-file-marked-as-conffile` — **written, not shipped**, see below |
 
@@ -191,6 +192,23 @@ Four things were corrected while packaging them, each of which outlived its own 
   rpmlint's `non-readable` is filtered with the reason: it is the allow-list naming which host
   networks may have their PSK copied into Android, so a mode letting any local user enumerate the
   owner's chosen networks would be the defect.
+
+**`hw-envyx2` followed on 2026-09-27**, and with it a fix to `hw-ite8350` that had to come first.
+The `hw-` prefix promises a package is inert on hardware it does not name, and 1.0.0 was not: its
+resume check read a *missing* accelerometer as a *stale* one, so on any machine without the hub it
+reprobed a device that is not there, failed the unbind, and failed its unit about 11 s after every
+resume, forever. Reproduced on this box and measured after the fix: 8 s and exit 1 before, 0 s and
+exit 0 after. The precondition tests the I2C device node rather than the accelerometer, because
+unbinding the driver leaves the device in place — so the test is true exactly while the hardware is
+present, and stays true in the wedged state the script exists to repair. Testing for `accel_3d`
+would have made the script exit 0 on precisely the failure it is for. That fix landed before
+`hw-envyx2` existed to spread the fault.
+
+`hw-envyx2` requires `hw-ite8350` and recommends `sensord`. The split is the point: reviving a
+wedged hub is worth doing for the host on its own, since the iio devices that stop publishing are
+the host's, so `hw-ite8350` without `sensord` is coherent and the docs/47 test comes back "not
+worse than stock". The Core M-5Y70 dexopt values, the other half docs/47 defines that package as,
+are absent for the reason below.
 
 **`dexopt` is written and deliberately not shipped.** It ships no reconciler, so `rpm -i` is a
 no-op on Android; its two lines are one laptop's CPU pinning under a generic name; and its

@@ -1,3 +1,22 @@
+* Sun Sep 27 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
+- Be inert on a machine that has no ITE8350, which is the promise the hw- prefix
+  makes and which 1.0.0 did not keep. The resume check treated a missing
+  accelerometer as a stale one, so on any other machine it reprobed a device that
+  is not there, failed the unbind, and failed ite8350-resume-check.service about
+  11 seconds after every resume, forever. Never dangerous -- the write names one
+  device by its exact ACPI id, so nothing else's i2c-HID device could be unbound
+  -- but wrong, and the sort of wrong a metapackage spreads.
+- Reproduced before fixing and measured after, on a box with no such hub: 8
+  seconds and exit 1 before, 0 seconds and exit 0 after.
+- The precondition tests the I2C device node and not the accelerometer, which is
+  the whole subtlety: unbinding the driver leaves the device in place, so the test
+  is true exactly while the hardware is present and stays true in the wedged state
+  the script exists to repair. Testing for accel_3d would have made the script
+  exit 0 on precisely the failure it is for.
+- Documentation= in both units pointed at file:///usr/share/doc/waydroid-bigtab01/
+  docs/..., naming the superseded monolithic package and a path the doc macro flattens
+  away, so both were dead links on an installed system.
+
 * Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First package, and the first waydroid-ext-hw-* one: docs/19's sensor-hub
   resume check, which reprobes i2c-ITE8350:00 when the accelerometer comes back

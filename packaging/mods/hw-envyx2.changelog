@@ -1,0 +1,15 @@
+* Sun Sep 27 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. The machine metapackage docs/47 named: what an HP Envy x2 owner
+  installs, as opposed to the feature groups, which are the same on any laptop.
+- Requires waydroid-ext-hw-ite8350 and recommends waydroid-ext-sensord, and the
+  difference is deliberate. The hub revival is worth doing for the host on its
+  own -- the iio devices that stop publishing are the host's, and a host running
+  no Android session still wants its accelerometer back after suspend -- so
+  sensord is the "on this machine you probably also want the daemon" judgement
+  rather than a hard edge. dnf installs weak dependencies by default, so it comes
+  along unless somebody has turned them off.
+- The Core M-5Y70 dexopt values, the other half docs/47 defines this package as,
+  are deliberately absent. waydroid-ext-dexopt installs one data file and nothing
+  that applies it, so requiring it would make this package promise dexopt tuning
+  and deliver a file nobody reads. They arrive with the pre-start reconciler
+  docs/53 item 1 scopes.
