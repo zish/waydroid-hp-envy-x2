@@ -444,6 +444,13 @@ with the mismatch account rather than the deadline one. Nothing else in the path
 eq6 chain measured transparent (every band `Gain 0.0` with pass-through biquad coefficients), all
 volumes unity, and the four links a correct stereo pair on each hop with no duplicate.
 
+**The ladder confirms it on hardware, 2026-09-26.** Re-run with the divergence instrument and audio
+playing: 512 passed with every client served and zero xruns, 256 the same, and 128 was caught on the
+first read after the settle -- `client 77 negotiated 256, graph is at 128 -- Waydroid` -- so it
+stopped there rather than spending twenty seconds sampling a counter that was never going to move.
+Floor 256, and the instrument now fails at the step a listener would object to instead of passing all
+five.
+
 **So the open item is answered, and the question it asked was wrong.** "How low a quantum will this
 host hold" has no useful answer: the host holds 32 by every counter there is. The floor is *whatever
 the fussiest client negotiated* — 256 for Android's `pipewire-pulse` stream here — because the sink
