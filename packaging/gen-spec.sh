@@ -37,7 +37,11 @@ while [ $# -gt 0 ]; do
 			[ -e "$m" ] || continue
 			n=$(basename "$m" .mod)
 			s=$(. "$m" >/dev/null 2>&1; printf '%s' "${SUMMARY:-}")
-			printf '%-28s %s\n' "$n" "$s"
+			u=$(. "$m" >/dev/null 2>&1; printf '%s' "${SHIPPED:-}")
+			case "$u" in
+			[Nn]o|[Ff]alse|0) printf '%-28s %s\n' "$n (unshipped)" "$s" ;;
+			*)                printf '%-28s %s\n' "$n" "$s" ;;
+			esac
 		done
 		exit 0 ;;
 	-h|--help) sed -n '19,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;

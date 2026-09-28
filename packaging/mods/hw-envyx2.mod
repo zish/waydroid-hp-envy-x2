@@ -39,7 +39,8 @@
 # belong here rather than in a generic waydroid-ext-dexopt.
 #
 # They are not here because there is nothing yet to put them in.
-# packaging/mods/dexopt.mod is written and deliberately unshipped: the RPM would
+# packaging/mods/dexopt.mod is written and deliberately unshipped -- it declares
+# SHIPPED=no, so build-mod.sh --all skips it and says so: the RPM would
 # install one data file and nothing that applies it, because
 # artifacts/dexopt/install.sh is both halves in one script and the packaged half
 # stops at the DESTDIR guard. So `rpm -i` changes nothing about a running Android.

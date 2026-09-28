@@ -376,6 +376,12 @@ string Android reports through the sensors HAL, so changing it changes observabl
      The recommendation is to treat it as one piece of work with `waydroid-ext-lxc-config`, since
      both this document and `packaging/README.md` want **one** generalised pre-start reconciler
      rather than an RPM per item of mutable state.
+     **How "not shipped" is enforced, as of 2026-09-26:** the `.mod` declares `SHIPPED=no`, which
+     `build-mod.sh --all` honours and announces, and which therefore keeps the package out of
+     `test-install.sh --all` too, that being a glob over what `--all` built. Naming it explicitly
+     still builds, lints and install-tests it — which is how the 5-of-6 failure above was
+     reproduced rather than taken on faith. Deleting the key is the last step of the reconciler
+     work, not a tidy-up.
    - ~~**`wifi/build.sh --rpm`**, plus the component argument for `artifacts/wifi/install.sh` that
      `artifacts/overlay/install.sh` already has~~ — **both done 2026-09-26.** `--rpm` locates
      libgbinder and libglibutil with `pkg-config`, puts the rpm build environment's `CXXFLAGS` on

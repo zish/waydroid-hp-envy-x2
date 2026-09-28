@@ -1,0 +1,18 @@
+* Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Ships the two dalvik.vm dex2oat properties that confine Play
+  Store's background dexopt to one physical core, after a storm that ran 91.6%
+  busy across all four CPUs with dex2oat at "threads: 4" and nothing containing
+  it, Android's cgroup layer being inert on a cgroup v2 host (docs/43).
+- The values are staged into /usr/share and marked %%config(noreplace), because
+  they cannot be a file this package owns: /var/lib/waydroid/waydroid_base.prop
+  is state that make_base_props() rewrites, so `waydroid init -f` and `waydroid
+  upgrade` erase the edit (docs/47).
+- Values only in this release: no unit, no scriptlet, nothing scheduling the
+  re-apply. Applying them is still artifacts/dexopt/install.sh run from a
+  checkout. docs/47 and packaging/README.md ask for one reconciler covering all
+  three pre-start inputs as an ExecStartPre on waydroid-container.service, and
+  this package deliberately does not pre-empt it.
+- The shipped cpu-set of 0,2 is Core M-5Y70 tuning, not a generic default --
+  cpu0 and cpu2 are one physical core's two threads on that CPU and are not on
+  every CPU. docs/47 puts those values behind waydroid-ext-hw-envyx2; until that
+  split is made, noreplace configuration is what lets an admin correct them once.

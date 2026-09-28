@@ -44,12 +44,35 @@ LINT=0
 PREBUILT=0
 mods=""
 
+# A modification may declare SHIPPED=no to stay out of --all. Read with sed
+# rather than by sourcing, because sourcing every .mod just to decide what to
+# build would run twenty-four files' worth of assignments into this shell before
+# the build loop does it properly, one at a time, with its own resets.
+#
+# --all is the only thing this affects: naming a modification on the command line
+# builds it regardless, so an unshipped package can still be built, linted and
+# install-tested deliberately.
+mod_shipped() {
+	case "$(sed -n "s/^SHIPPED=[\"']*\([A-Za-z0-9]*\).*/\1/p" "$1" \
+	        | tail -1 | tr 'A-Z' 'a-z')" in
+	no|false|0) return 1 ;;
+	*)          return 0 ;;
+	esac
+}
+
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--srpm) SRPM_ONLY=1; shift ;;
 	--lint) LINT=1; shift ;;
 	--prebuilt) PREBUILT=1; shift ;;
-	--all)  for m in "$MODDIR"/*.mod; do mods="$mods $(basename "$m" .mod)"; done; shift ;;
+	--all)  for m in "$MODDIR"/*.mod; do
+			[ -e "$m" ] || continue
+			n=$(basename "$m" .mod)
+			# Said out loud, not skipped quietly: a gate that drops a
+			# package silently reads as "everything passed".
+			mod_shipped "$m" || { echo "note: $n declares SHIPPED=no, not in --all"; continue; }
+			mods="$mods $n"
+		done; shift ;;
 	-h|--help) sed -n '19,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 	-*) echo "unknown argument: $1" >&2; exit 2 ;;
 	*)  mods="$mods $1"; shift ;;
@@ -82,7 +105,7 @@ for mod in $mods; do
 	modfile="$MODDIR/$mod.mod"
 	[ -f "$modfile" ] || { echo "no such modification: $mod" >&2; exit 1; }
 
-	NAME=$mod VERSION=0.0.0 KIND=host FILES="" SOURCES="" DOCS="" PREBUILT_FILES=""
+	NAME=$mod VERSION=0.0.0 KIND=host FILES="" SOURCES="" DOCS="" PREBUILT_FILES="" SHIPPED=""
 	# shellcheck disable=SC1090
 	. "$modfile"
 
