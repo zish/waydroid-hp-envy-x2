@@ -71,7 +71,8 @@ pipewire-utils
 wireplumber"
 
 DOCS="docs/56-pipewire-control.md
-artifacts/pipewire/policy.conf.example"
+artifacts/pipewire/policy.conf.example
+artifacts/pipewire/eq6-sink.conf.example"
 
 DESCRIPTION="Exposes the host's PipeWire graph to an Android app running under Waydroid, so
 the machine's audio routing can be driven from inside Android on a host that

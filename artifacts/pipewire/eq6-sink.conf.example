@@ -1,0 +1,87 @@
+# A six-band equalizer sink for the host's PipeWire graph, adjustable from the
+# Patchbay app. See docs/56-pipewire-control.md.
+#
+#     mkdir -p ~/.config/pipewire/filter-chain.conf.d
+#     cp eq6-sink.conf.example ~/.config/pipewire/filter-chain.conf.d/10-eq6-sink.conf
+#     systemctl --user enable --now filter-chain.service
+#     wpctl set-default <the effect_input.eq6 node id>
+#
+# WHY filter-chain.conf.d AND NOT pipewire.conf.d
+#
+# Fedora ships filter-chain.service, which runs `pipewire -c filter-chain.conf`
+# as its own unit, BindsTo=pipewire.service, and merges this directory. So the
+# chain is a systemd-supervised child process rather than a module inside the
+# audio server: adding, changing or removing an effect restarts one small unit
+# and never interrupts Android's stream, and a crash takes out the chain instead
+# of the graph. That is the same argument docs/56 makes for supervised children,
+# already shipped -- so the persistent half of an effects rack needs no daemon
+# verb at all.
+#
+# TWO THINGS MEASURED 2026-09-28 ARE BAKED INTO THE SHAPE BELOW
+#
+# There is deliberately no `inputs` or `outputs` in filter.graph. Declaring them
+# pins the graph to the channels named, and an earlier probe that wrote
+# inputs = [ "eq_band_1:In" ] got a MONO sink. Omitted, filter-chain duplicates
+# the whole graph per channel, which gives a stereo sink AND -- the part worth
+# knowing -- still publishes ONE set of control ports rather than two, because
+# the duplicated graphs share a control namespace. So a single write to
+# "eq_band_3:Gain" moves that band on both channels, and the app needs one
+# slider per band rather than a left/right pair that could drift apart.
+#
+# Chained bq_* nodes, not param_eq. param_eq chains its biquads internally and
+# is the more efficient design, but it publishes no control ports at all -- its
+# curve comes from `config`, which is read at instantiation -- so nothing can
+# move a band without respawning the chain. Same for
+# libpipewire-module-parametric-equalizer. Those two are the right answer for
+# loading a fixed AutoEQ correction curve and the wrong answer for a fader.
+#
+# EVERY BAND SHIPS AT 0 dB, so installing this changes nothing about how the
+# machine sounds until something moves a slider. An equalizer that arrived with
+# a curve already in it would be a surprise in the one place a surprise is least
+# welcome.
+
+context.modules = [
+    { name = libpipewire-module-filter-chain
+        args = {
+            node.description = "6-band Equalizer"
+            media.name       = "6-band Equalizer"
+            filter.graph = {
+                nodes = [
+                    { type = builtin  name = eq_band_1  label = bq_lowshelf
+                      control = { "Freq" = 100.0   "Q" = 1.0 "Gain" = 0.0 } }
+                    { type = builtin  name = eq_band_2  label = bq_peaking
+                      control = { "Freq" = 250.0   "Q" = 1.0 "Gain" = 0.0 } }
+                    { type = builtin  name = eq_band_3  label = bq_peaking
+                      control = { "Freq" = 800.0   "Q" = 1.0 "Gain" = 0.0 } }
+                    { type = builtin  name = eq_band_4  label = bq_peaking
+                      control = { "Freq" = 2500.0  "Q" = 1.0 "Gain" = 0.0 } }
+                    { type = builtin  name = eq_band_5  label = bq_peaking
+                      control = { "Freq" = 6000.0  "Q" = 1.0 "Gain" = 0.0 } }
+                    { type = builtin  name = eq_band_6  label = bq_highshelf
+                      control = { "Freq" = 10000.0 "Q" = 1.0 "Gain" = 0.0 } }
+                ]
+                links = [
+                    { output = "eq_band_1:Out" input = "eq_band_2:In" }
+                    { output = "eq_band_2:Out" input = "eq_band_3:In" }
+                    { output = "eq_band_3:Out" input = "eq_band_4:In" }
+                    { output = "eq_band_4:Out" input = "eq_band_5:In" }
+                    { output = "eq_band_5:Out" input = "eq_band_6:In" }
+                ]
+            }
+            audio.channels = 2
+            audio.position = [ FL FR ]
+            capture.props = {
+                node.name   = "effect_input.eq6"
+                media.class = Audio/Sink
+            }
+            playback.props = {
+                node.name    = "effect_output.eq6"
+                # Upstream's sink-eq6.conf sets this and it is kept: a passive
+                # playback node does not drive the graph, so the EQ does not
+                # hold the sound card awake when nothing is playing. On a
+                # battery machine that matters more than it would on a desktop.
+                node.passive = true
+            }
+        }
+    }
+]

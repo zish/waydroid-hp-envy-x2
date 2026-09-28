@@ -540,6 +540,49 @@ controls rather than two**: 18 keys either way, because the per-channel duplicat
 control namespace. One write to `band1:Gain` moved the band on both channels. So the UI wants one
 slider per band per parameter, with no left/right pairing, and the two channels cannot drift apart.
 
+**Deployed on bigtab01, 2026-09-28 — a six-band EQ the app can drive, and the unit that hosts it.**
+[artifacts/pipewire/eq6-sink.conf.example](../artifacts/pipewire/eq6-sink.conf.example), copied to
+`~/.config/pipewire/filter-chain.conf.d/10-eq6-sink.conf`. User scope throughout: no sudo, nothing
+in `/usr`, nothing in the image.
+
+**The persistent half of an effects rack needs no daemon verb, because Fedora already ships it.**
+`filter-chain.service` runs `pipewire -c filter-chain.conf` as its own unit, `BindsTo=pipewire.service`,
+and merges `~/.config/pipewire/filter-chain.conf.d/`. That is exactly the supervised-child argument
+this document makes for `node-create`, already packaged and already systemd-managed — so adding,
+changing or removing a persistent effect restarts one small unit and **never interrupts Android's
+stream**, and a crash takes out the chain rather than the graph. The `conf.d` verb this document's
+plan wanted is therefore "write a file and poke one unit", not "restart the audio server".
+
+Measured after `systemctl --user enable --now filter-chain.service`:
+
+- the sink appears as `effect_input.eq6`, `media.class = Audio/Sink`, 2 in / 2 out, publishing
+  **18 adjustable controls out of 54 keys** — six bands of Freq/Gain/Q, the other 36 being the
+  read-only biquad coefficients the projection flags;
+- its output is linked FL→FL, FR→FR into `alsa_output.pci-0000_00_1b.0.analog-stereo`;
+- `wpctl set-default` takes, and both `default.audio.sink` and `default.configured.audio.sink`
+  become `effect_input.eq6`;
+- `pw-cat` with **no** `--target` lands on `effect_input.eq6:playback_FL/FR`, which is the proof
+  that the routing works — anything that plays to the default sink, Android included, now goes
+  through the EQ;
+- writes take while running (two gains in one call, then a Freq), survive the chain going idle,
+  and are still settable once idle.
+
+**`wpctl status` files it under `Filters`, not `Sinks`.** The node is an `Audio/Sink` and `pw-dump`
+says so, but WirePlumber presents link-group nodes in their own section, so a `wpctl status` read
+that stops at `Sources:` will conclude the sink vanished and the default is unset. Both were
+briefly believed here. The app is unaffected: it classifies on `media.class` from the projection,
+not on wpctl's presentation.
+
+**One rough edge, and it is the 2026-09-27 trap in its natural habitat.** Between the unit starting
+and the first audio, the chain has never been instantiated, so writes are accepted and invisible —
+a slider will appear not to move. After the first playback it behaves normally, including while
+suspended. In practice nobody EQs in silence, but the app should not present that window as a
+failure.
+
+Not yet verified: that the unit comes back after a reboot under the cage session's user manager.
+That is the same open question this document already has for `waydroid-pwd.service`, now with a
+second unit riding on it.
+
 **Still hypothesis:** that two-tap linking works under a finger on the panel; that `pw-link` by id
 creates a link the daemon then sees via the monitor; that `wpctl set-volume` against a node id
 behaves as expected (mute is verified, the slider is not); that a real `systemctl --user restart
