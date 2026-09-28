@@ -583,6 +583,69 @@ Not yet verified: that the unit comes back after a reboot under the cage session
 That is the same open question this document already has for `waydroid-pwd.service`, now with a
 second unit riding on it.
 
+**Built on bigtab01, 2026-09-28 — the Effects screen, and what a slider can honestly claim.**
+[pw-app/src/Controls.kt](../pw-app/src/Controls.kt) and the `showEffects` dialog in
+[MainActivity.kt](../pw-app/src/MainActivity.kt). An "Effects" button appears on any node row whose
+projection carries `controls`, and opens one slider per adjustable control, grouped by filter.
+
+**The entry point is its own row rather than a button on the volume row.** A filter chain does not
+have to be a sink: a node hosted by `pipewire -c` with no audioconvert in front of it publishes
+control ports and no volume at all, so hanging the button off the mixer would hide the controls on
+exactly the nodes that have nothing but controls.
+
+**The coefficient ports are dropped, not shown read-only.** They are two thirds of what a biquad
+publishes — 36 of the 54 keys on the six-band EQ — and they are outputs: a biquad computes `b0`..`a2`
+from the `Freq`, `Q` and `Gain` above them. A screen that lists them is mostly a view of its own
+arithmetic. The count is still reported in the header, so the hiding is visible rather than silent.
+
+**A slider's range is keyed on the PORT name, and that is a compromise with a known cost.**
+PipeWire publishes a control as `<filter-node-name>:<port>`, and the filter node's name is whatever
+the config author chose — `eq_band_1` here, which says nothing about what kind of filter it is. The
+*label* (`bq_peaking`, `delay`, `noisegate`) lives in the config and never reaches the graph, so
+nothing the daemon can see reports it. Port names, by contrast, are fixed by the plugin, and
+libpipewire-module-filter-chain(7) is the list: every biquad has `Freq`/`Q`/`Gain`, the delay has
+`Delay (s)`/`Feedback`/`Feedforward`, the noise gate has `Attack (s)`/`Release (s)`/`Hold (s)` and
+its two thresholds, the mixer has `Gain 1`..`Gain 8`. The cost is one collision: `lufs2gain`
+publishes an *output* control also called `Gain`, linear, which gets a biquad's ±24 dB slider.
+Writing to an output control does nothing, so the damage is a misleading readout rather than a
+wrong sound — but the real fix is the host telling the app what each control is, which is the
+recipe catalogue this document sketches and the app deliberately does not fake.
+
+**A port this table has never heard of gets no slider.** A slider is a claim about where the ends
+are, and for an unknown port there is no honest claim to make; a guessed range would put a real
+control somewhere arbitrary on the bar. Those fall back to typing the number, which is exactly as
+capable and does not lie. Where a control's *configured* value falls outside an assumed range, the
+range is widened to cover it rather than clamped, or the first touch of the slider would jerk the
+control to the end without anybody asking.
+
+Two smaller things the existing screen already settled, reused here: sends happen on
+`onStopTrackingTouch` and not per pixel, because a `set-param` per progress step is a `pw-cli`
+spawn per progress step on the host; and nothing suppresses rendering during a drag, unlike the
+volume slider, because these views live in a dialog rather than in the list `render()` rebuilds.
+
+Verified over the wire against the running daemon, from the host:
+
+| | |
+|---|---|
+| `auth` returns `params: true` in the policy | ✔ |
+| node 84 projects `controls`: 54 keys, 18 with `readonly: false` | ✔ |
+| each entry carries `key`, `filter`, `port`, `value`, `readonly` as the app reads them | ✔ |
+| `node-param` applies and replies `{"ok":true,"applied":[…],"state":"running"}` | ✔ |
+| `node-param` with `debug.wav-path` is refused — *a control name looks like "band:Freq"* | ✔ |
+| the app installs, connects from the container's address, and does not throw | ✔ |
+
+Not verified: that a finger on a slider produces the sound it promises. That needs the panel.
+
+**A deployment finding worth more than the screen.** `bin/pipewire-test.sh` failed every protocol
+leg, and the reason was not the daemon: it has been running as a bare `/tmp/waydroid-pwd` process
+with `--state-dir /tmp/pwd-state` since 24 September, so the token was not where the test looks for
+it. Two consequences that matter more than the test output. The process had been running **three-day-old
+code** — the file on disk was current, Python read it at exec, and `md5sum` comparing the file to
+the repo agrees while the running process does not, which is a check that looks convincing and
+proves nothing. And nothing about that deployment survives a reboot. The daemon needs to be the
+packaged `waydroid-ext-pwd` under a `--user` unit at the default state directory before any of this
+is real; `rpm -q` says it is still not installed.
+
 **Still hypothesis:** that two-tap linking works under a finger on the panel; that `pw-link` by id
 creates a link the daemon then sees via the monitor; that `wpctl set-volume` against a node id
 behaves as expected (mute is verified, the slider is not); that a real `systemctl --user restart

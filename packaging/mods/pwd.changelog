@@ -20,6 +20,13 @@
   at all, so their curves are config-time and no slider can reach them. A
   chained graph that omits filter.graph's inputs/outputs comes out stereo with
   one shared set of controls, which is exactly what a per-band slider wants.
+- The docs shipped here now cover the app's Effects screen, which is where the
+  `controls` above surface: one slider per adjustable control, the biquad
+  coefficients dropped rather than shown, and slider ranges keyed on the PORT
+  name because the filter's LABEL never reaches the graph -- the filter node's
+  name is whatever the config author chose. A port with no known range gets a
+  number field rather than a slider with invented ends. The app itself is
+  still not packaged here; pw-app/build.sh --install remains the delivery.
 - No protocol version bump. The addition is additive, and the policy map is
   already the capability advertisement the app reads: a daemon older than this
   has no `params` key in it at all, so its absence distinguishes "too old to

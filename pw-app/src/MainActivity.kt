@@ -389,6 +389,9 @@ class MainActivity : Activity(), PwClient.Listener {
 
         if (node.has("volume")) card.addView(volumeRow(node, id))
 
+        val controls = Controls.of(node)
+        if (controls.isNotEmpty()) card.addView(effectsRow(node, id, controls))
+
         val ports = graph.portsOf(id)
             .filter { !hideMonitors || !it.optBoolean("monitor", false) }
         for (port in ports.sortedWith(compareBy({ it.optString("direction") },
@@ -437,6 +440,36 @@ class MainActivity : Activity(), PwClient.Listener {
         row.addView(flatButton("Default") {
             send("set default", "default-set") { it.put("node", id) }
         }.apply { isEnabled = allowed("mixer") })
+        return row
+    }
+
+    /**
+     * The way in to a node's filter controls.
+     *
+     * A row of its own rather than a button on the volume row, because a
+     * filter chain does not have to be a sink: a node created by
+     * `pipewire -c` with no audioconvert in front of it publishes controls and
+     * no volume at all, and hanging the entry point off the mixer would hide
+     * the controls on exactly those nodes.
+     */
+    private fun effectsRow(node: JSONObject, id: Int, controls: List<Controls.Control>): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, 0)
+        }
+        val adjustable = controls.count { !it.readonly }
+        val filters = controls.map { it.filter }.distinct().size
+        row.addView(TextView(this).apply {
+            text = "$filters " + (if (filters == 1) "filter" else "filters") +
+                "  ·  $adjustable adjustable"
+            setTextColor(MUTED)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            layoutParams = LinearLayout.LayoutParams(0, wrap(), 1f)
+        })
+        // Always enabled, like Graph: with the capability off the dialog still
+        // opens and says so, which is more use than a dead button.
+        row.addView(flatButton("Effects") { showEffects(node, id) })
         return row
     }
 
@@ -645,6 +678,210 @@ class MainActivity : Activity(), PwClient.Listener {
             .setNegativeButton("Cancel", null)
             .show()
     }
+
+    /**
+     * One filter chain's controls, one slider each.
+     *
+     * The coefficient ports are dropped rather than shown read-only. They are
+     * two thirds of what a biquad publishes -- 36 of the 54 keys on the host's
+     * six-band EQ -- and they are outputs: a biquad computes b0..a2 from the
+     * Freq, Q and Gain above them, so a screen that lists them is mostly a
+     * view of its own arithmetic.
+     *
+     * No left/right pairing, because there is none to make. A filter graph
+     * declared without explicit `inputs`/`outputs` is duplicated across both
+     * channels by filter-chain and the two copies share one set of control
+     * ports, so one slider here moves both. docs/56 measured that.
+     *
+     * Nothing suppresses rendering while a slider is dragged, which the volume
+     * slider has to do: these views live in a dialog rather than in the list
+     * that render() rebuilds, so the finger is never over a view that is about
+     * to be replaced.
+     */
+    private fun showEffects(node: JSONObject, nodeId: Int) {
+        val controls = Controls.of(node)
+        val adjustable = controls.filter { !it.readonly }
+        if (adjustable.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle(graph.label(node))
+                .setMessage(
+                    "This node publishes ${controls.size} filter values and none " +
+                        "of them are adjustable: they are coefficients the filters " +
+                        "compute for themselves."
+                )
+                .setPositiveButton("Close", null)
+                .show()
+            return
+        }
+
+        val editable = allowed("params")
+        val resets = ArrayList<() -> Unit>()
+        val opened = LinkedHashMap<String, Double>()
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(4), dp(18), dp(8))
+        }
+
+        val filters = adjustable.map { it.filter }.distinct().size
+        layout.addView(note(buildString {
+            append(filters).append(if (filters == 1) " filter" else " filters")
+            append("  ·  ").append(adjustable.size).append(" adjustable")
+            val computed = controls.size - adjustable.size
+            if (computed > 0) append("  ·  ").append(computed).append(" computed, hidden")
+        }))
+
+        if (!editable) {
+            layout.addView(note(
+                "The params capability is disabled in the daemon's policy, so " +
+                    "these are read-only here."
+            ))
+        } else if (Graph.text(node, "state") != "running") {
+            // docs/56: a chain that has never been instantiated reports its
+            // CONFIGURED values whatever is written to it. The write is not
+            // lost, and nothing in the graph distinguishes that state from an
+            // ordinary idle one, so this is worded as the possibility it is.
+            layout.addView(note(
+                "Not running. A move still applies, but a chain that has never " +
+                    "passed audio keeps reporting its configured values, so the " +
+                    "host may not confirm the new number until something plays."
+            ))
+        }
+
+        for ((filter, group) in adjustable.groupBy { it.filter }) {
+            layout.addView(heading(filter))
+            for (control in group) {
+                opened[control.key] = control.value
+                layout.addView(controlRow(nodeId, control, editable, resets))
+            }
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(graph.label(node))
+            .setView(ScrollView(this).apply { addView(layout) })
+            .setPositiveButton("Close", null)
+            .setNeutralButton("Revert", null)
+            .create()
+        dialog.show()
+        // Wired after show() so that reverting does not also dismiss: undoing
+        // one bad move is the point, and being thrown out of the screen to do
+        // it would mean scrolling back to where you were every time.
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.apply {
+            isEnabled = editable
+            setOnClickListener {
+                send("revert controls", "node-param") {
+                    it.put("node", nodeId)
+                    val payload = JSONObject()
+                    for ((key, value) in opened) payload.put(key, value)
+                    it.put("params", payload)
+                }
+                for (reset in resets) reset()
+            }
+        }
+    }
+
+    private fun controlRow(
+        nodeId: Int,
+        control: Controls.Control,
+        editable: Boolean,
+        resets: MutableList<() -> Unit>
+    ): View {
+        val spec = ControlSpec.of(control.port, control.value)
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(6), 0, dp(2))
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(this).apply {
+            text = control.port
+            setTextColor(FOREGROUND)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            layoutParams = LinearLayout.LayoutParams(0, wrap(), 1f)
+        })
+        val readout = TextView(this).apply {
+            text = spec?.format(control.value) ?: plain(control.value)
+            setTextColor(ACCENT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setPadding(dp(8), 0, dp(8), 0)
+        }
+        header.addView(readout)
+        row.addView(header)
+
+        if (spec == null) {
+            // No calibrated range for this port name; Controls.kt says why a
+            // guessed one would be worse than typing the number.
+            header.addView(flatButton("Set…") {
+                showControlEntry(nodeId, control, readout)
+            }.apply { isEnabled = editable })
+            resets.add { readout.text = plain(control.value) }
+            return row
+        }
+
+        val bar = SeekBar(this).apply {
+            max = ControlSpec.STEPS
+            progress = spec.toProgress(control.value)
+            isEnabled = editable
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar, value: Int, fromUser: Boolean) {
+                    readout.text = spec.format(spec.fromProgress(value))
+                }
+
+                override fun onStartTrackingTouch(bar: SeekBar) {}
+
+                // On release and not on every pixel: a set-param per progress
+                // step is a pw-cli spawn per progress step on the host.
+                override fun onStopTrackingTouch(bar: SeekBar) {
+                    send("set ${control.port}", "node-param") {
+                        it.put("node", nodeId)
+                        it.put(
+                            "params",
+                            JSONObject().put(control.key, spec.fromProgress(bar.progress))
+                        )
+                    }
+                }
+            })
+        }
+        row.addView(bar)
+        resets.add {
+            bar.progress = spec.toProgress(control.value)
+            readout.text = spec.format(control.value)
+        }
+        return row
+    }
+
+    private fun showControlEntry(nodeId: Int, control: Controls.Control, readout: TextView) {
+        val field = EditText(this).apply {
+            setText(plain(control.value))
+            inputType = InputType.TYPE_CLASS_NUMBER or
+                InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                InputType.TYPE_NUMBER_FLAG_SIGNED
+        }
+        AlertDialog.Builder(this)
+            .setTitle(control.key)
+            .setView(LinearLayout(this).apply {
+                setPadding(dp(20), dp(12), dp(20), 0)
+                addView(field)
+            })
+            .setPositiveButton("Set") { _, _ ->
+                val value = field.text.toString().trim().toDoubleOrNull()
+                if (value == null) {
+                    toast("not a number")
+                } else {
+                    readout.text = plain(value)
+                    send("set ${control.port}", "node-param") {
+                        it.put("node", nodeId)
+                        it.put("params", JSONObject().put(control.key, value))
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun plain(value: Double): String = "%.4f".format(value)
 
     /**
      * The graph-wide controls: quantum, and what the host currently runs.
