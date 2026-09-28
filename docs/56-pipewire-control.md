@@ -634,7 +634,16 @@ Verified over the wire against the running daemon, from the host:
 | `node-param` with `debug.wav-path` is refused — *a control name looks like "band:Freq"* | ✔ |
 | the app installs, connects from the container's address, and does not throw | ✔ |
 
-Not verified: that a finger on a slider produces the sound it promises. That needs the panel.
+**Confirmed on the panel, 2026-09-28.** The owner opened Patchbay, found the EQ under SINKS as
+*6-band Equalizer*, moved a band and heard it. That closes the last step of the chain this
+document has been building one measurement at a time: a finger on Android, through the daemon's
+`node-param`, through `pw-cli set-param`, into a filter-chain node hosted by `filter-chain.service`,
+and out of the host's speakers. Nothing crosses the bridge but JSON, which was the constraint the
+whole control-plane design exists to satisfy.
+
+Also confirmed the same day, and separately: Android's own audio goes through the chain. YouTube
+in the container sounded normal with the EQ flat and default — the routing proof above was
+`pw-cat` on the host, which is reasoning about Android's path rather than a measurement of it.
 
 **A deployment finding worth more than the screen.** `bin/pipewire-test.sh` failed every protocol
 leg, and the reason was not the daemon: it has been running as a bare `/tmp/waydroid-pwd` process
