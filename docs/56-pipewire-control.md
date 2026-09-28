@@ -511,6 +511,35 @@ The probe's own isolation flag — `node.autoconnect = false`, added so a test c
 the speakers — was what hid the result for four rounds. That is the same shape as the `optString`
 probe recorded above: a safety measure that made the test vacuous for exactly the case under test.
 
+**Measured on bigtab01, 2026-09-28 — which of the three equalizers a slider can actually reach.**
+Three chains side by side, all three loading without complaint, all torn down:
+
+| chain | ports | second `Props` entry |
+|---|---|---|
+| `param_eq`, three bands from a `filters` array | 2 in / 2 out, `running` | **no controls** |
+| `libpipewire-module-parametric-equalizer`, fed an AutoEQ file | 8 in / 8 out, `suspended` | **no controls** |
+| chained `bq_lowshelf` + `bq_peaking` | `running` | 18 keys, every one colon-keyed |
+
+The write sweep found a settable Gain only on the chained pair, and it landed where it was aimed:
+`b1:Gain` took 4.5 while `b2:Gain` stayed at 0.0. The suspended row does not weaken the result —
+the probe above established that a dead-ended chain still *reports* its configured control values,
+so suspension hides nothing, and no keys means no controls.
+
+Both file-driven equalizers are therefore config-time only, exactly as their man pages imply:
+`param_eq` takes `config = { filename | filters }`, and `module-parametric-equalizer` takes
+`equalizer.filepath` and nothing else — it parses an AutoEQ or Squiglink file and translates it
+into filter-chain arguments at load. Changing a band means respawning the chain. They still earn a
+catalogue entry, just a different one: *load a headphone correction curve* is a real use case,
+where `param_eq`'s efficiency and its eight channels are the advantage and there was never going
+to be a slider. The affordance there is a file picker, not a fader.
+
+**And the graph must not declare its own `inputs`/`outputs`.** The first attempt wrote
+`inputs = [ "b1:In" ]` and got a **mono** sink — `n-input-ports` 1. Omitting both, which is what
+the shipped `sink-eq6.conf` does, gives a stereo sink and, the part worth knowing, **one set of
+controls rather than two**: 18 keys either way, because the per-channel duplicated graphs share a
+control namespace. One write to `band1:Gain` moved the band on both channels. So the UI wants one
+slider per band per parameter, with no left/right pairing, and the two channels cannot drift apart.
+
 **Still hypothesis:** that two-tap linking works under a finger on the panel; that `pw-link` by id
 creates a link the daemon then sees via the monitor; that `wpctl set-volume` against a node id
 behaves as expected (mute is verified, the slider is not); that a real `systemctl --user restart

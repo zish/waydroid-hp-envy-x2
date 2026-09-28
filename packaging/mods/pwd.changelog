@@ -15,6 +15,11 @@
   a file. Filter control names always carry a colon and audioconvert's never
   do, which is the line the verb refuses to cross -- the concern
   `links.capture` exists for, arriving through a different door.
+- The adjustable EQ is chained bq_* nodes, not param_eq. Measured 2026-09-28:
+  param_eq and libpipewire-module-parametric-equalizer publish no control ports
+  at all, so their curves are config-time and no slider can reach them. A
+  chained graph that omits filter.graph's inputs/outputs comes out stereo with
+  one shared set of controls, which is exactly what a per-band slider wants.
 - No protocol version bump. The addition is additive, and the policy map is
   already the capability advertisement the app reads: a daemon older than this
   has no `params` key in it at all, so its absence distinguishes "too old to
