@@ -655,17 +655,11 @@ proves nothing. And nothing about that deployment survives a reboot. The daemon 
 packaged `waydroid-ext-pwd` under a `--user` unit at the default state directory before any of this
 is real; `rpm -q` says it is still not installed.
 
-**Still hypothesis:** that two-tap linking works under a finger on the panel; that `wpctl
-set-volume` against a node id behaves as expected (mute is verified, the slider is not); that a
-real `systemctl --user restart pipewire` produces the `reset` → `graph` sequence (the daemon's side
-is verified above against a fake monitor, but PipeWire's own restart behaviour is not).
-
-Three items that were on this list are now struck off. Whether `pipewire -c` with a generated
-config really hosts a module instance the way `filter-chain.conf` implies: **it does**, measured
-2026-09-27. Whether `pw-link` by id creates a link the daemon then sees via the monitor: **it
-does**, in the first clean run of `bin/pipewire-test.sh` below. Whether a `--user` unit starts
-under the cage session's user manager at boot rather than only after a login: **it does**, measured
-across the 2026-09-28 reboot.
+**Nothing on this list is still hypothesis.** Every item it carried has been measured, the last
+three on 2026-09-28 and recorded at the end of this document: two-tap linking under a finger, the
+volume slider, and a real `systemctl --user restart pipewire`. The earlier three went the same way
+— `pipewire -c` hosting a module instance (2026-09-27), `pw-link` by id round-tripping through the
+monitor, and a `--user` unit starting under the cage session at boot.
 
 **Installed on bigtab01, 2026-09-28 — the package, and the first clean run of the suite.**
 `waydroid-ext-pwd-1.1.0-1.noarch` layered with `rpm-ostree install` and applied with
@@ -728,6 +722,46 @@ probe's output, and with the probe dead they each fell through to their own defa
 connect from both root and the session user answered immediately. A probe that cannot run now says
 so once, by name. This is the same shape as the `optString` and `node.autoconnect` traps already
 recorded here: the misleading symptom cost more than the defect.
+
+**Measured on bigtab01, 2026-09-28 — the last three hypotheses, driven without a human finger.**
+The panel tests in this document had stayed hypothesis because they needed somebody touching the
+screen. They do not: `input tap` / `input swipe` inside the container drives the app, and
+`screencap` reads the result back. `uiautomator dump` would have been the obvious tool and is
+unusable here — it is SIGKILLed (exit 137) under this host's memory pressure — so coordinates come
+from reading the screenshot instead, which works because the panel is 1920×1080 and the capture is
+1:1.
+
+**Two-tap linking works under a finger.** Tapping `◀ Midi Through: Port-0 (capture)` armed it: the
+row highlighted and the banner read *Connecting from Midi-Bridge:Midi Through: Port-0 (capture)*.
+Tapping `▶ Midi Through: Port-0 (playback)` created link 80, confirmed independently with
+`pw-link -lI`, and the app's own count went 43 → 44 objects with the link listed `active`. The ✕
+destroyed it and `pw-link` confirmed nothing remained. The MIDI pair was chosen for the reason
+`bin/pipewire-test.sh` chooses it: no audio device is touched.
+
+One incidental confirmation: the banner renders the port as
+`Midi-Bridge:Midi Through: Port-0 (capture)` — a name with two colons in it, which is exactly the
+finding above about `pw-link`'s name form being unparseable. The app is unaffected because it
+addresses ports by id.
+
+**The volume slider works, and the arithmetic checks out.** The EQ sink's track spans x=50..1637
+and its thumb sat at x=1108, which is progress 100 of 150 — volume 1.00, matching `wpctl`. Dragging
+to x=700 predicts `(700-50)/1587 × 150 = 61`, so 0.61; `wpctl get-volume` reported **0.62**, one
+progress step away. Touch → SeekBar → `node-volume` → `wpctl` → host, closed.
+
+**A real PipeWire restart produces `error` → `reset` → `graph`.** Measured against the live daemon
+rather than the fake monitor the local suite uses:
+
+```
+~42 × update (removed=1)    the graph torn down object by object as pipewire exits
+ev=error  pipewire monitor lost
+ev=reset                    ids declared stale
+ev=graph  objects=31        the new generation
+```
+
+**0.7 seconds** from monitor loss to a fresh graph. The host came back whole: `filter-chain.service`
+still active, the EQ back as a new node id, `default.audio.sink` still `effect_input.eq6` — it
+survives because WirePlumber stores the default **by name**, which is the same property that
+carried it across the reboot — and its output relinked to the analog sink.
 
 ## First commands
 
