@@ -284,12 +284,19 @@ A native PipeWire client deletes the second row outright, and lets the guest ask
 obstacle**: `clock.min-quantum` is 32 — 0.67 ms — against `max-quantum` 2048. The 1024 sitting
 there is a default nobody has had a reason to lower.
 
-Measured since, and it qualifies that last sentence — see docs/56. `force-quantum` was set to 32 on
-this host and Android's audio became unusable, because the setting is graph-wide and the HAL path
-has no headroom for a 0.67 ms deadline. `min-quantum` is what PipeWire will *accept*, not what the
-machine will hold. So the graph is not the obstacle, but it is load-bearing: the reason to lower it
-does not come from this path, where 1024 costs 21.3 ms of the ~106 ms budget above and none of it
-audible on playback. Lower it for host-side clients with short paths of their own, not for Android.
+Measured since, and it qualifies that last sentence and corrects the row above it — see docs/56.
+`force-quantum` was set to 32 on this host and Android's audio became unusable. `min-quantum` is
+what PipeWire will *accept*, not what the machine will hold, so the graph is not the obstacle but it
+is load-bearing: lower it for host-side clients with short paths of their own, not for Android.
+
+**The 21.3 ms in the table is the setting, not the running graph.** `clock.quantum` is 1024, but
+`pw-top` on 2026-09-26 showed the graph running at `QUANT 256` with nothing forced, because the
+Waydroid stream node negotiates 256 and PipeWire follows the smallest request any client makes. So
+this hop costs **5.33 ms** while Android is playing, and the 1024 is only what the graph falls back
+to when nothing asks for less — which makes this row a smaller term in the budget than it appears,
+and the HAL's 85 ms an even more dominant one. Forcing the graph *below* what the client negotiated
+is what broke the audio: the sink followed to 32 while the stream stayed at 256, and PipeWire
+resampled across the mismatch.
 
 But the HAL's own 85 ms dwarfs everything downstream. Rewriting the period constants alone, over
 today's unchanged pulse transport, captures most of the available win.

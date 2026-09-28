@@ -418,13 +418,29 @@ This was two items on the hypothesis list below, and it is worth separating what
 range-checked it against the live `clock.min-quantum` of 32, accepted it, and `pw-metadata` wrote it.
 Nothing in the chain misbehaved.
 
-*The host does not survive it.* 32 frames is 0.667 ms against a configured `clock.quantum` of 1024,
-a 32× cut, and `force-quantum` is graph-wide — so it applies to Waydroid's `pipewire-pulse` path,
-which reaches PipeWire through an ~85 ms HAL buffer and has nothing like that timing headroom.
-Android's audio went scratchy and then progressively robotic: deadline misses at block rate, which
-is dense artefacts rather than occasional clicks. Host load average was 0.06 throughout, so this is
-wakeup latency and scheduling granularity and NOT CPU exhaustion — a low load average does not
-exonerate a small quantum.
+*The host does not survive it.* 32 frames is 0.667 ms and `force-quantum` is graph-wide, so it
+applies to Waydroid's `pipewire-pulse` path too. Android's audio went scratchy and then
+progressively robotic.
+
+**The mechanism is NOT deadline misses, and this document said it was for a day.** Measured directly
+on 2026-09-26 by forcing 32 and reading `pw-top`'s own columns: the ALSA sink follows the force to
+`QUANT 32`, and the Waydroid stream node *stays at `QUANT 256`*. The client keeps delivering
+256-frame buffers into a graph cycling every 32, and PipeWire resamples across the gap. That is a
+buffer-size mismatch, not a missed deadline, which is why the sink's `ERR` counter barely moves — it
+is being fed unevenly, not running out of time. Host load average was 0.06 throughout, which was
+never evidence for the deadline story either way.
+
+The consequence is that **xruns are the wrong instrument for this failure**, and
+`bin/pw-quantum-bisect.sh` walked 512, 256, 128, 64 and 32 with audio playing and reported zero
+xruns at every step including the one known to have made the machine unusable. The script's own
+"flat `ERR` means drift, not load" branch was right and the mechanism written here was wrong. What
+the ladder should compare is the graph's quantum against what each client negotiated, not `ERR`.
+
+Two numbers here were also wrong, and both came from reading a setting instead of the running graph.
+`clock.quantum` is 1024, but with nothing forced the graph *runs* at 256 when Android plays, because
+the Waydroid stream negotiates it down and PipeWire follows the smallest request. So Android's graph
+hop costs 5.33 ms and not the 21.3 ms docs/44's budget lists, the 1024 is only the default for when
+nothing asks for less, and "forcing 32 buys 19% of the path" was arithmetic on the wrong term.
 
 Three things about it are worth keeping:
 
@@ -452,10 +468,16 @@ Three things about it are worth keeping:
   there is one, such as monitoring a mic or playing a software instrument. Which settles who the
   control is for — host-side clients with a short path of their own, not audio arriving through the
   HAL.
-- **The diagnosis was nearly vacuous.** xruns only accumulate on a graph that is carrying audio, so
-  the first `pw-audio-diag.sh` run skipped its own decisive leg and said so rather than reporting a
-  clean zero it had not earned. That is the same failure shape as the `optString` probe recorded
-  above, caught this time by the script refusing to answer.
+- **The diagnosis was nearly vacuous, twice, and the second one got through.** xruns only
+  accumulate on a graph carrying audio, so the first `pw-audio-diag.sh` run skipped its own decisive
+  leg rather than reporting a clean zero it had not earned. The guard that caught that did not catch
+  the next one: both scripts sampled with `pw-top -b -n 1`, and pw-top's FIRST batch iteration is
+  always placeholders — state `C`, `QUANT 0`, `RATE 0`, no timings, `ERR 0` for every node — because
+  nothing has been measured yet. So the sampler reported a clean host no matter what the host was
+  doing, and a five-step ladder passed on an instrument that could only ever return zero. Both now
+  ask for three iterations, read the last complete block, and require at least one node actually
+  processing before believing a delta. Third time the same shape: a probe that cannot fail is worse
+  than no probe, because it produces a number.
 
 **Measured on bigtab01, 2026-09-27 — the effects gate: hosting a filter chain, reading its
 controls, and writing them.** Six probes, each torn down before the next; `pw-dump` reported zero

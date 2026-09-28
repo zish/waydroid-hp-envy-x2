@@ -93,30 +93,53 @@ trap 'restore; printf "\033[1mterminated -- nothing concluded\033[0m\n"; exit 14
 trap restore EXIT
 
 # ---- xrun sampling, shared with pw-audio-diag.sh -----------------------------
-xruns() {   # xruns(seconds) -> total ERR delta across all nodes
-    asuser pw-top -b -n 1 > "$TMP/a" 2>/dev/null
+xruns() {   # xruns(seconds) -> total ERR delta across all nodes, -1 if unreadable
+    asuser pw-top -b -n 3 > "$TMP/a" 2>/dev/null
     sleep "$1"
-    asuser pw-top -b -n 1 > "$TMP/b" 2>/dev/null
+    asuser pw-top -b -n 3 > "$TMP/b" 2>/dev/null
     python3 - "$TMP/a" "$TMP/b" <<'PY'
 import sys
-def parse(path):
-    err, ei, di = {}, None, None
-    try: lines = open(path).read().splitlines()
-    except OSError: return err
-    for line in lines:
+def blocks(path):
+    """pw-top -b emits one block per iteration, and the FIRST is always
+    placeholders -- state C, QUANT 0, RATE 0, no timings -- because nothing has
+    been measured yet. So `-n 1` can only ever report ERR 0 for every node, which
+    is a sampler that reports a clean host no matter what the host is doing. Ask
+    for several iterations and read the LAST complete block."""
+    out, cur, ei = [], None, None
+    for line in open(path):
         f = line.split()
         if not f: continue
         if "ERR" in f and "ID" in f:
-            ei, di = f.index("ERR"), f.index("ID"); continue
-        if ei is None or len(f) <= ei: continue
-        try: err[int(f[di])] = int(f[ei])
-        except ValueError: pass
-    return err
-a, b = parse(sys.argv[1]), parse(sys.argv[2])
-if not a or not b:
+            if cur: out.append(cur)
+            cur = {"err": {}, "live": 0}
+            ei = dict((k, f.index(k)) for k in ("ID", "ERR", "RATE") if k in f)
+            continue
+        if cur is None or ei is None or "ERR" not in ei or len(f) <= ei["ERR"]:
+            continue
+        try: nid = int(f[ei["ID"]])
+        except (ValueError, KeyError): continue
+        try: cur["err"][nid] = int(f[ei["ERR"]])
+        except ValueError: continue
+        try:
+            if f[0] == "R" and int(f[ei["RATE"]]) > 0: cur["live"] += 1
+        except (ValueError, KeyError): pass
+    if cur: out.append(cur)
+    return out
+
+
+def sample(path):
+    """The last block, or None if no block shows a node actually processing."""
+    b = blocks(path)
+    if not b: return None
+    last = b[-1]
+    return last if last["live"] > 0 else None
+
+a, b = sample(sys.argv[1]), sample(sys.argv[2])
+if a is None or b is None:
     print("-1")            # could not read the counters: never report this clean
 else:
-    print(sum(max(0, b[k] - a[k]) for k in b if k in a))
+    ae, be = a["err"], b["err"]
+    print(sum(max(0, be[k] - ae[k]) for k in be if k in ae))
 PY
 }
 playing() {

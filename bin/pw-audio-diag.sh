@@ -188,37 +188,60 @@ head_ "6. XRUN TREND over ${GAP}s  <-- the decisive leg"
 if [ "${running:-0}" -le 0 ]; then
     na "skipped: nothing is playing, so a zero here would be vacuous"
 else
-    asuser pw-top -b -n 1 > "$TMP/top1" 2>/dev/null || true
+    asuser pw-top -b -n 3 > "$TMP/top1" 2>/dev/null || true
     inf "sampling ... keep the audio playing for ${GAP}s"
     sleep "$GAP"
-    asuser pw-top -b -n 1 > "$TMP/top2" 2>/dev/null || true
+    asuser pw-top -b -n 3 > "$TMP/top2" 2>/dev/null || true
     if [ ! -s "$TMP/top1" ] || [ ! -s "$TMP/top2" ]; then
         na "pw-top produced no batch output (is pipewire-utils' pw-top present?)"
     else
         python3 - "$TMP/top1" "$TMP/top2" "$TMP/d2.json" "$GAP" <<'PY'
 import json, sys
-def parse(path):
-    err = {}
-    ei = di = None
+def blocks(path):
+    """pw-top -b emits one block per iteration, and the FIRST is always
+    placeholders -- state C, QUANT 0, RATE 0, no timings -- because nothing has
+    been measured yet. So `-n 1` can only ever report ERR 0 for every node, which
+    is a sampler that reports a clean host no matter what the host is doing. Ask
+    for several iterations and read the LAST complete block."""
+    out, cur, ei = [], None, None
     for line in open(path):
         f = line.split()
         if not f: continue
         if "ERR" in f and "ID" in f:
-            ei, di = f.index("ERR"), f.index("ID"); continue
-        if ei is None or len(f) <= ei: continue
-        try: nid = int(f[di])
+            if cur: out.append(cur)
+            cur = {"err": {}, "live": 0}
+            ei = dict((k, f.index(k)) for k in ("ID", "ERR", "RATE") if k in f)
+            continue
+        if cur is None or ei is None or "ERR" not in ei or len(f) <= ei["ERR"]:
+            continue
+        try: nid = int(f[ei["ID"]])
+        except (ValueError, KeyError): continue
+        try: cur["err"][nid] = int(f[ei["ERR"]])
         except ValueError: continue
-        try: err[nid] = int(f[ei])
-        except ValueError: pass
-    return err
-a, b = parse(sys.argv[1]), parse(sys.argv[2])
+        try:
+            if f[0] == "R" and int(f[ei["RATE"]]) > 0: cur["live"] += 1
+        except (ValueError, KeyError): pass
+    if cur: out.append(cur)
+    return out
+
+
+def sample(path):
+    """The last block, or None if no block shows a node actually processing."""
+    b = blocks(path)
+    if not b: return None
+    last = b[-1]
+    return last if last["live"] > 0 else None
+
+_a, _b = sample(sys.argv[1]), sample(sys.argv[2])
+a = _a["err"] if _a else {}
+b = _b["err"] if _b else {}
 gap = float(sys.argv[4])
 # A parser that found no ERR column would report "nothing moved" for every host
 # on earth, which is the false clean this whole script exists to avoid. Say so
 # instead.
 if not a or not b:
-    print("  \033[33mSKIP\033[0m  pw-top batch output carried no parseable ERR column")
-    print("        (%d/%d nodes read) -- run `pw-top -b -n 1` by hand and send it" % (len(a), len(b)))
+    print("  \033[33mSKIP\033[0m  pw-top showed no node actually processing in either sample")
+    print("        (%d/%d nodes read) -- run `pw-top -b -n 3` by hand and send it" % (len(a), len(b)))
     raise SystemExit(0)
 name = {}
 for o in json.load(open(sys.argv[3])):
