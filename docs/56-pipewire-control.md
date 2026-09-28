@@ -655,14 +655,79 @@ proves nothing. And nothing about that deployment survives a reboot. The daemon 
 packaged `waydroid-ext-pwd` under a `--user` unit at the default state directory before any of this
 is real; `rpm -q` says it is still not installed.
 
-**Still hypothesis:** that two-tap linking works under a finger on the panel; that `pw-link` by id
-creates a link the daemon then sees via the monitor; that `wpctl set-volume` against a node id
-behaves as expected (mute is verified, the slider is not); that a real `systemctl --user restart
-pipewire` produces the `reset` → `graph` sequence (the daemon's side is verified above against a
-fake monitor, but PipeWire's own restart behaviour is not); that a `--user` unit starts under the
-cage session's user manager at boot rather than only after a login. The last item on this list
-— whether `pipewire -c` with a generated config really hosts a module instance the way
-`filter-chain.conf` implies — is **answered below, and it does**.
+**Still hypothesis:** that two-tap linking works under a finger on the panel; that `wpctl
+set-volume` against a node id behaves as expected (mute is verified, the slider is not); that a
+real `systemctl --user restart pipewire` produces the `reset` → `graph` sequence (the daemon's side
+is verified above against a fake monitor, but PipeWire's own restart behaviour is not).
+
+Three items that were on this list are now struck off. Whether `pipewire -c` with a generated
+config really hosts a module instance the way `filter-chain.conf` implies: **it does**, measured
+2026-09-27. Whether `pw-link` by id creates a link the daemon then sees via the monitor: **it
+does**, in the first clean run of `bin/pipewire-test.sh` below. Whether a `--user` unit starts
+under the cage session's user manager at boot rather than only after a login: **it does**, measured
+across the 2026-09-28 reboot.
+
+**Installed on bigtab01, 2026-09-28 — the package, and the first clean run of the suite.**
+`waydroid-ext-pwd-1.1.0-1.noarch` layered with `rpm-ostree install` and applied with
+`rpm-ostree apply-live --allow-replacement`, joining the ten other `waydroid-ext-*` entries under
+`LocalPackages`. `apply-live` refuses a plain run here because four packages change, not one:
+resolving against `updates` also pulled `vim-filesystem` and `xxd` forward, which is worth knowing
+before running it on a host where that is not wanted.
+
+**A `--user` unit does start under the cage session's user manager at boot.** This document has
+carried the opposite as an open question since the design, and the packaged daemon is a `--user`
+unit riding on the answer. `filter-chain.service` came back `enabled` and `active` across the
+reboot with nobody logging in, which settles it.
+
+Be careful how far that generalises, because three different enablement paths are in play and only
+one of them is now proven end to end:
+
+| enablement path | used by | status |
+|---|---|---|
+| `~/.config/systemd/user/default.target.wants/` | `filter-chain.service`, via `systemctl --user enable` | **started at boot, measured** |
+| `/usr/lib/systemd/system/multi-user.target.wants/` | `waydroid-btd.service` and the other packages | works, but these are **system** units and say nothing about the user manager |
+| `/usr/lib/systemd/user/default.target.wants/` | the packaged `waydroid-pwd.service` | wiring verified live, boot behaviour **untested until the next reboot** |
+
+The middle row is worth stating plainly because it is the easy mistake: `waydroid-btd.service`
+lives in `/usr/lib/systemd/system/`, so it corroborates the `.wants`-symlink trick for *system*
+units and is no evidence at all about user ones. What does cover the packaged daemon is
+`systemctl --user list-dependencies default.target`, which lists `waydroid-pwd.service` right
+now — so the user manager has read the `/usr/lib/systemd/user` symlink and honours it. That is the
+wiring, not the boot.
+
+Note also that `systemctl is-enabled` reports **`disabled`** for units enabled this way, because it
+does not count a symlink under `/usr/lib/systemd/*/\*.target.wants/` as enablement state. They run
+anyway. Reading `is-enabled` as the answer gives exactly the wrong one.
+
+**`Linger=no`, and that is correct rather than an oversight.** Without lingering, the user manager
+exists only while a session does, so a `--user` unit cannot start before the cage session does.
+That is the right coupling here and not a limitation to design around: `waydroid-pwd` talks to
+PipeWire, PipeWire is itself a session-scoped user service, and a daemon that outlived the session
+would come up with nothing to connect to. The unit says as much — `Wants=pipewire.service`,
+`After=pipewire.service wireplumber.service`. Enabling linger would buy a daemon that starts
+earlier and immediately fails.
+
+**What the reboot cost, and it is the argument for the conf.d verb.** The EQ came back *flat*.
+Control-port values live only in the running graph, so every band reset to what
+`10-eq6-sink.conf` declares; a curve worth keeping has to be written into the file. And `/tmp` is
+tmpfs, so the hand-run daemon and its entire state directory — token included — were simply gone.
+That is the deployment this document flagged the day before, failing exactly as predicted.
+
+**`bin/pipewire-test.sh`: 27 passed, 0 failed, 0 skipped**, the first clean run. It took a fix, and
+the bug is worth recording because the graph growing is what triggered it. The script passed the
+whole of `pw-dump` to its protocol probe **as an environment variable**, and Linux caps a single
+env string at `MAX_ARG_STRLEN` — 128 KiB, which unlike `ARG_MAX` is a compile-time constant and
+cannot be raised. Adding the filter chain took this host's `pw-dump` to 215 KB across 74 objects,
+so `execve` began failing with `E2BIG` before python ever started. The dump now goes through a
+temporary file.
+
+The second half of that fix matters more than the first. Six independent `case` statements read the
+probe's output, and with the probe dead they each fell through to their own default — so one
+`execve` failure printed as six unrelated ones, the loudest being *could not connect to
+192.168.240.1:7713* against a port that was listening the whole time, and which a manual `socket`
+connect from both root and the session user answered immediately. A probe that cannot run now says
+so once, by name. This is the same shape as the `optString` and `node.autoconnect` traps already
+recorded here: the misleading symptom cost more than the defect.
 
 ## First commands
 

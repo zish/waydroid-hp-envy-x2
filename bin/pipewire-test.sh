@@ -146,10 +146,18 @@ if [ -n "$TOKEN" ]; then
 else
     na "no token at $STATE/token -- daemon running with --no-auth?"
 fi
-PWDUMP=$(asuser pw-dump 2>/dev/null)
+# Through a file and not the environment. Linux caps a SINGLE env string at
+# MAX_ARG_STRLEN -- 128 KiB, and unlike ARG_MAX it is not raisable -- and this
+# host's pw-dump passed that the moment a filter chain was added to the graph:
+# 215 KB across 74 objects. execve then fails with E2BIG before python starts,
+# which is the failure the guard below exists to name.
+PWDUMP_FILE=$(mktemp -t pwtest-dump.XXXXXX)
+trap 'rm -f "$PWDUMP_FILE"' EXIT HUP INT TERM
+asuser pw-dump > "$PWDUMP_FILE" 2>/dev/null || true
 RESULT=""
+PROBE_RAN=no
 if [ -n "$ADDR" ]; then
-    RESULT=$(ADDR="$ADDR" PORT="$PORT" TOKEN="$TOKEN" PWDUMP="$PWDUMP" python3 - <<'PY' 2>&1
+    RESULT=$(ADDR="$ADDR" PORT="$PORT" TOKEN="$TOKEN" PWDUMP_FILE="$PWDUMP_FILE" python3 - <<'PY' 2>&1
 import json, os, socket, sys, time
 
 addr, port = os.environ["ADDR"], int(os.environ["PORT"])
@@ -234,8 +242,9 @@ KINDS = {
     "PipeWire:Interface:Metadata": "metadata",
 }
 try:
-    raw = json.loads(os.environ.get("PWDUMP") or "[]")
-except ValueError:
+    with open(os.environ["PWDUMP_FILE"], encoding="utf-8") as handle:
+        raw = json.load(handle)
+except (OSError, ValueError):
     raw = []
 expected = {o["id"] for o in raw if KINDS.get(o.get("type"))}
 got = {o["id"] for o in objects}
@@ -366,6 +375,20 @@ if out_port is not None and in_port is not None:
 sock.close()
 PY
 )
+    # Every path through the probe above prints one of these three, including
+    # both of its failure paths. None of them means the probe never ran at all
+    # -- and the six `case` statements below would then each fall to its own
+    # default, turning one failure into six wrong diagnoses, the loudest being
+    # a connection error against a port that was listening the whole time.
+    # That is exactly what the env-var overflow produced before it was fixed.
+    PROBE_RAN=no
+    case "$RESULT" in
+    *GATED*|*UNGATED*|*CONNECT-FAIL*) PROBE_RAN=yes ;;
+    esac
+fi
+if [ -n "$ADDR" ] && [ "$PROBE_RAN" = no ]; then
+    no "the protocol probe did not run: $(printf '%s' "$RESULT" | tr '\n' ' ' | cut -c1-110)"
+elif [ -n "$ADDR" ]; then
     case "$RESULT" in
     *GATED*)   ok "an unauthenticated command is refused" ;;
     *UNGATED*) na "auth is not enforced (--no-auth)" ;;
