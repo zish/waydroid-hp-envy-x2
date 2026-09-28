@@ -6,7 +6,7 @@
 #
 # `key = value`, one per line, yes/no. Not INI and not YAML: this repository has
 # no YAML parser and does not want one (packaging/gen-spec.sh says why about .mod
-# files), and seven keys do not need sections.
+# files), and eight keys do not need sections.
 #
 # WHAT THE GATES ARE ACTUALLY PROTECTING
 #
@@ -63,3 +63,24 @@ modules = no
 # This gate does NOT create effects. A chain has to exist first, which means
 # either `nodes` + `modules`, or a conf.d drop-in the owner wrote by hand.
 params = yes
+
+# Writing a filter chain's live control values back into the conf.d drop-in
+# that declares it, so they survive the chain stopping. Off by default, and
+# NOT folded into `params`, because the two are different kinds of act: moving
+# a slider is audible, reversible and confined to the running graph, while
+# this writes a file the audio server executes at every start afterwards. It
+# is also the only verb here that reaches outside the graph to the filesystem.
+#
+# What it will touch is one file: the single drop-in under
+# ~/.config/pipewire/filter-chain.conf.d/ that declares the node being saved,
+# found by parsing each candidate rather than by matching text. It rewrites
+# only the bytes between the braces of a `control = { }` block, keeps the
+# file's comments, refuses if the result will not parse, and leaves the
+# previous contents in a .bak beside it. It creates no chains and deletes
+# none.
+#
+# It does not restart anything. The running chain is already in the state
+# being written, so the file only matters at the next start -- and restarting
+# filter-chain.service would destroy and recreate the sink, which on a host
+# where that sink is the default would bump every playing stream off it.
+config = no

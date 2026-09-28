@@ -763,6 +763,80 @@ still active, the EQ back as a new node id, `default.audio.sink` still `effect_i
 survives because WirePlumber stores the default **by name**, which is the same property that
 carried it across the reboot — and its output relinked to the analog sink.
 
+**Built on bigtab01, 2026-09-28 — `chain-save`, and the bug that writing it found.**
+The verb docs/44 does *not* need — that requirement is `/system/etc/asound.conf`, an overlay
+**inside the Android image**, and nothing a host-side PipeWire drop-in can serve. This one exists
+for the reason the 2026-09-28 reboot supplied: a control value lives only in the running graph.
+
+**Nothing else persists one, measured rather than assumed.** WirePlumber's entire state directory
+is three files — `default-nodes`, `default-routes`, `stream-properties` — and a filter graph's
+control ports appear in none of them. It restores which node is default and per-stream volumes, and
+has no model for a control port at all; PipeWire core persists nothing. The drop-in's
+`control = { }` blocks are the only place a curve can live, which is what makes this a config verb
+rather than a state one.
+
+**It restarts nothing, and that is what makes it safe.** It is a save, not a load: the running
+chain is already in the state being written, so the file only has to matter at the next start.
+Restarting `filter-chain.service` would destroy and recreate the sink — on this host, the *default*
+sink — and bump every playing stream off it mid-save.
+
+**The edit is textual and surgical.** `spa-json-dump` gives a clean tree and writing it back would
+be valid SPA-JSON — and would drop every comment in the file. These drop-ins are documentation as
+much as configuration, so only the bytes between one `control = { }` pair move. The result is
+re-parsed with `spa-json-dump` *before* it replaces anything, the previous contents go to `.bak`,
+and a filter the file does not name — or names without a control block — is returned in `skipped`
+rather than silently dropped. `spa-json-dump` is also how the right drop-in is found: each
+candidate is parsed and walked for the `node.name`, so a comment mentioning the name cannot match.
+
+Its own capability, `config`, **default off**, deliberately not folded into `params`. Moving a
+slider is audible, reversible and confined to the running graph. Writing a file the audio server
+executes at every start afterwards is none of those three, and it is the only verb here that
+reaches outside the graph to the filesystem.
+
+**THE BUG, WHICH IS THE PART WORTH READING**
+
+The first cut read the control values out of the graph — the obvious thing, and wrong. Testing it
+produced a save that reported `ok`, `18 values`, and changed nothing but whitespace.
+
+The cause is the read-back blackout this document has recorded since 2026-09-27, arriving through a
+door nobody was watching. A `systemctl --user restart pipewire` had recreated the chain, so it was
+freshly un-instantiated; three `node-param` writes went in and stayed invisible in `pw-dump`; and
+`chain-save` dutifully read the *configured* values back out and wrote them where the user's new
+ones should have gone. **A save verb that silently persists the values you were trying to
+replace, and reports success**, is the worst failure this daemon could ship — it is the
+`optString`, `node.autoconnect` and `E2BIG` pattern a fourth time, where the symptom is
+indistinguishable from working.
+
+Settling it also re-confirmed the underlying rule in a case it had not been tested in. Playing one
+second of silence into the chain made all three writes appear at once, exactly as written:
+
+```
+suspended, never instantiated     after pw-cat instantiated it
+  eq_band_1:Gain = 0.0              eq_band_1:Gain = 5.5
+  eq_band_3:Freq = 800.0            eq_band_3:Freq = 1200.0
+  eq_band_6:Gain = 0.0              eq_band_6:Gain = -2.25
+```
+
+So the write is never lost even for a chain recreated by a PipeWire restart, and **the daemon's own
+record of what it wrote is more trustworthy than the graph**. Every `node-param` is now remembered
+until the graph echoes it back; `chain-save` prefers the remembered value where the two disagree
+and names those keys in the reply's `pending`. The record is cleared on `reset`, because ids are
+reused and a remembered write would otherwise land on whatever object inherits the number.
+
+**Measured end to end**, against a chain deliberately restarted into the blackout:
+
+| | |
+|---|---|
+| `chain-save` returns `pending` naming exactly the three unechoed keys | ✔ |
+| the three values land in the file; bands 2, 4 and 5 untouched | ✔ |
+| all 41 comment lines survive | ✔ |
+| the result still parses under `spa-json-dump` | ✔ |
+| `.bak` is byte-identical to the original, no `.new` left behind | ✔ |
+| after `systemctl --user restart filter-chain`, a **fresh** chain comes up carrying 5.5 / 1200.0 / −2.25 | ✔ |
+
+The last row is the loop closed: slider → `node-param` → `chain-save` → drop-in → restart → the
+values come back.
+
 ## First commands
 
 The host-side reads above needed no sudo. What is left needs the container running, and should be

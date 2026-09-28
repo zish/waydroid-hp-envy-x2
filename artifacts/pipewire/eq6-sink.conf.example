@@ -1,6 +1,12 @@
 # A six-band equalizer sink for the host's PipeWire graph, adjustable from the
 # Patchbay app. See docs/56-pipewire-control.md.
 #
+# THIS FILE IS ALSO WRITTEN BY MACHINE. waydroid-pwd's `chain-save` rewrites
+# the numbers inside each `control = { }` block below, and nothing else: the
+# comments, the layout and every other line survive, and the previous contents
+# are left in a .bak beside it. So the values here are whatever was last saved
+# from the app, and the prose is still the author's.
+#
 #     mkdir -p ~/.config/pipewire/filter-chain.conf.d
 #     cp eq6-sink.conf.example ~/.config/pipewire/filter-chain.conf.d/10-eq6-sink.conf
 #     systemctl --user enable --now filter-chain.service

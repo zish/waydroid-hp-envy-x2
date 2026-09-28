@@ -135,7 +135,7 @@ TYPES = {
 # one is indistinguishable, mechanically, from making any other link, so it
 # cannot be caught by looking at the verb -- only at the ports.
 CAPABILITIES = ("mixer", "links", "links.capture", "graph", "nodes", "modules",
-                "params")
+                "params", "config")
 DEFAULT_POLICY = {
     "mixer": True,
     "links": True,
@@ -144,7 +144,25 @@ DEFAULT_POLICY = {
     "nodes": False,
     "modules": False,
     "params": True,
+    "config": False,
 }
+
+# Where filter-chain.service merges its drop-ins, relative to XDG_CONFIG_HOME.
+#
+# Deliberately not pipewire.conf.d. That is the audio server's own config, so a
+# chain declared there is hosted by the server itself and changing it means
+# restarting the graph out from under every client, Android included.
+# filter-chain.service is a separate unit that BindsTo=pipewire.service, so a
+# chain declared here is a supervised child that can be restarted alone -- the
+# design docs/56 argued for, which Fedora turned out to already ship.
+FILTER_CONF_DIR = ("pipewire", "filter-chain.conf.d")
+
+# A drop-in this daemon will read. Config files are hand-written and small; a
+# megabyte is four orders of magnitude of headroom and stops chain-save reading
+# something that is not a config at all.
+MAX_CONF_BYTES = 1 << 20
+
+INFINITY = float("inf")
 
 # Biquad coefficient ports. libpipewire-module-filter-chain(7) calls them
 # read-only "except for the bq_raw biquad", and nothing pw-dump reports says
@@ -172,6 +190,77 @@ def log(message):
 def run(argv, timeout=15):
     return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           text=True, check=False, timeout=timeout)
+
+
+def filter_conf_dir():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    return os.path.join(base, *FILTER_CONF_DIR)
+
+
+def declares_node(parsed, name):
+    """Does this parsed drop-in declare a node called `name`?
+
+    Walks every dict for a "node.name" rather than looking only at
+    capture.props and playback.props, because which half of a chain carries
+    the name the graph reports depends on how the chain was written, and a
+    recipe generated later need not use the same shape.
+    """
+    stack = [parsed]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if item.get("node.name") == name:
+                return True
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
+
+def rewrite_controls(text, by_filter):
+    """Rewrite each filter's `control = { ... }` body in place.
+
+    Textual, and deliberately so. spa-json-dump gives a clean tree and writing
+    that back out would be valid SPA-JSON -- and would drop every comment in
+    the file. These drop-ins are documentation as much as configuration
+    (eq6-sink.conf.example is mostly explanation of why it is shaped the way it
+    is), and a save verb that silently ate the explanation would be a bad
+    trade. So the edit touches only the bytes between one pair of braces, and
+    the caller re-parses the result to prove the file is still valid.
+
+    Returns (new_text, written, skipped). A filter lands in `skipped` when the
+    file does not name it, or names it without giving it a control block --
+    never silently, because the caller reports both lists.
+    """
+    written, skipped = [], []
+    out = text
+    for filt in sorted(by_filter):
+        ports = by_filter[filt]
+        anchor = re.search(
+            r'(?:^|[\s{,])"?name"?\s*=\s*"?%s"?(?![\w.-])' % re.escape(filt),
+            out)
+        if anchor is None:
+            skipped.append(filt)
+            continue
+        keyword = re.compile(r'(?:^|[\s{,])"?control"?\s*=\s*\{').search(
+            out, anchor.end())
+        close = out.find("}", keyword.end()) if keyword else -1
+        # A filter that has no control block of its own would otherwise capture
+        # the NEXT filter's and write this one's values onto that node. Any
+        # further `name =` between the two says we have walked into it.
+        if keyword is None or close < 0 or re.search(
+                r'(?:^|[\s{,])"?name"?\s*=', out[anchor.end():keyword.start()]):
+            skipped.append(filt)
+            continue
+        body = out[keyword.end():close]
+        # Keep the order the author wrote, so the diff is the numbers only.
+        seen = [p for p in re.findall(r'"([^"]+)"\s*=', body) if p in ports]
+        order = seen + [p for p in sorted(ports) if p not in seen]
+        rendered = " ".join('"%s" = %r' % (p, float(ports[p])) for p in order)
+        out = out[:keyword.end()] + " " + rendered + " " + out[close:]
+        written.append(filt)
+    return out, written, skipped
 
 
 def as_int(value):
@@ -925,6 +1014,22 @@ class Server(object):
         self.sock = None
         self._bind_warned = False
 
+        # What node-param has written that the graph has not yet echoed back.
+        #
+        # Needed because of the read-back blackout measured in docs/56: a
+        # filter chain that has not been instantiated reports its CONFIGURED
+        # values however many times it is written to, and the write is not lost
+        # -- it surfaces the moment the chain runs. Re-measured 2026-09-28
+        # against a chain recreated by a PipeWire restart, where three writes
+        # stayed invisible and then all three appeared exactly as written.
+        #
+        # chain-save is the verb that cannot live with that. Reading the graph
+        # during the blackout would persist the values the user was trying to
+        # replace, and report success doing it. So every write is remembered
+        # here and wins over the graph until the graph agrees with it.
+        self.written = {}
+        self.written_lock = threading.Lock()
+
         self.commands = {
             "auth": self.cmd_auth,
             "ping": self.cmd_ping,
@@ -942,6 +1047,7 @@ class Server(object):
             "rate": self.cmd_rate,
             "wp-setting": self.cmd_wp_setting,
             "node-param": self.cmd_node_param,
+            "chain-save": self.cmd_chain_save,
             "node-create": self.cmd_node_create,
             "node-destroy": self.cmd_node_destroy,
             "nodes": self.cmd_nodes,
@@ -1114,6 +1220,10 @@ class Server(object):
             # A PipeWire restart. Every id the app is holding is now stale, so
             # tell it to throw the lot away rather than trying to reconcile.
             log("PipeWire resynced; %s" % counted)
+            # Ids are reused, so a remembered write would otherwise be applied
+            # to whatever object inherits its number.
+            with self.written_lock:
+                self.written.clear()
             self.broadcast({"ev": "reset"})
             self.broadcast({"ev": "graph", "objects": snapshot})
         else:
@@ -1461,8 +1571,190 @@ class Server(object):
         # object, which is why this is a list and not the dict it came in as.
         self._tool(["pw-cli", "set-param", str(node), "Props",
                     json.dumps({"params": flat})], "set-param")
+        with self.written_lock:
+            remembered = self.written.setdefault(node, {})
+            for i in range(0, len(flat), 2):
+                remembered[flat[i]] = flat[i + 1]
         client.reply(msg, applied=[flat[i] for i in range(0, len(flat), 2)],
                      state=projected.get("state"))
+
+    # ---- verbs: configuration -------------------------------------------
+
+    def cmd_chain_save(self, client, msg):
+        """Write a filter chain's live control values into its drop-in.
+
+            -> {"id":9,"cmd":"chain-save","node":40}
+            <- {"id":9,"ok":true,"file":".../10-eq6-sink.conf",
+                "written":["eq_band_1",...],"skipped":[],"values":18}
+
+        WHY THIS NEEDS NO RESTART, WHICH IS THE WHOLE REASON IT IS SAFE
+
+        Because it is a save, not a load. The running chain is ALREADY in the
+        state being written; the file only has to matter at the next start, and
+        filter-chain.service is what reads it. Restarting that unit would
+        destroy and recreate the sink -- which on this host is the default sink
+        -- so anything playing would be bumped off it mid-save. Nothing here
+        does that, and nothing here touches the running graph at all.
+
+        WHY THE VERB HAS TO EXIST
+
+        Nothing else persists a control value. Measured 2026-09-28:
+        WirePlumber's entire state is default-nodes, default-routes and
+        stream-properties, and a filter graph's control ports appear in none of
+        them. It restores which node is default and per-stream volumes, and has
+        no model for a control port at all; PipeWire core persists nothing. So
+        an EQ curve lives exactly as long as the chain does -- confirmed the
+        hard way by a reboot that brought every band back flat.
+
+        WHY ITS OWN CAPABILITY, DEFAULT OFF
+
+        Not folded into `params`. Moving a slider is audible and reversible and
+        confined to the running graph. Writing a file that the audio server
+        executes at every start afterwards is none of those three, and it is
+        the only verb here that reaches outside the graph to the filesystem.
+        """
+        self._gate("config")
+        node = self._object(msg, "node", ("node",))
+        projected = self.graph.project(node) or {}
+        controls = [control for control in (projected.get("controls") or [])
+                    if not control.get("readonly")]
+        if not controls:
+            raise ValueError("%d advertises no adjustable filter controls"
+                             % node)
+        name = projected.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("%d has no node.name to find a drop-in by" % node)
+
+        # The graph's value is right unless this daemon wrote something the
+        # graph has not echoed back yet, which is the blackout above. A
+        # remembered write that the graph now agrees with is just confirmation
+        # and is dropped; one it disagrees with is the value to save.
+        with self.written_lock:
+            remembered = dict(self.written.get(node) or {})
+        pending = []
+        resolved = []
+        for control in controls:
+            key = control["key"]
+            if key in remembered and remembered[key] != control.get("value"):
+                pending.append(key)
+                control = dict(control, value=remembered[key])
+            resolved.append(control)
+        controls = resolved
+
+        by_filter = {}
+        for control in controls:
+            value = control.get("value")
+            # Nothing should have produced a non-finite control value, and a
+            # NaN written into the file would come back as a chain the server
+            # refuses to build. Refuse here rather than corrupt there.
+            if not isinstance(value, (int, float)) or isinstance(value, bool) \
+                    or value != value or value in (INFINITY, -INFINITY):
+                raise ValueError("\"%s\" is not a finite number"
+                                 % control.get("key"))
+            by_filter.setdefault(control["filter"], {})[control["port"]] = value
+
+        path = self._conf_for_node(name)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                original = handle.read(MAX_CONF_BYTES + 1)
+        except OSError as exc:
+            raise RuntimeError("cannot read %s: %s"
+                               % (path, exc.strerror or exc))
+        if len(original) > MAX_CONF_BYTES:
+            raise ValueError("%s is larger than this daemon will rewrite"
+                             % path)
+
+        updated, written, skipped = rewrite_controls(original, by_filter)
+        if not written:
+            raise ValueError("%s declares no control block for %s"
+                             % (os.path.basename(path),
+                                ", ".join(sorted(by_filter))))
+
+        # Prove the edit parses BEFORE it replaces anything. A regex that went
+        # wrong would otherwise leave a config the audio server cannot read,
+        # and the symptom -- a chain that silently stops existing at the next
+        # boot, long after this call returned ok -- is the worst shape of bug
+        # this daemon could ship.
+        staged = path + ".new"
+        self._write_like(staged, updated, path)
+        try:
+            self._plain_tool(["spa-json-dump", staged], "spa-json-dump")
+        except RuntimeError:
+            try:
+                os.unlink(staged)
+            except OSError:
+                pass
+            raise RuntimeError("the rewritten %s would not parse, so it was "
+                               "left alone" % os.path.basename(path))
+        self._write_like(path + ".bak", original, path)
+        os.replace(staged, path)
+        client.reply(msg, file=path, written=sorted(written),
+                     skipped=sorted(skipped), pending=sorted(pending),
+                     values=sum(len(ports) for ports in by_filter.values()))
+
+    def _conf_for_node(self, name):
+        """Which drop-in declares this node, if exactly one does."""
+        directory = filter_conf_dir()
+        try:
+            entries = sorted(os.listdir(directory))
+        except OSError as exc:
+            raise RuntimeError("cannot read %s: %s"
+                               % (directory, exc.strerror or exc))
+        matches = []
+        for entry in entries:
+            if not entry.endswith(".conf"):
+                continue
+            path = os.path.join(directory, entry)
+            try:
+                parsed = json.loads(self._plain_tool(
+                    ["spa-json-dump", path], "spa-json-dump"))
+            except (ValueError, RuntimeError):
+                # A drop-in this daemon cannot parse is somebody else's
+                # business. It just cannot be the one being saved.
+                continue
+            if declares_node(parsed, name):
+                matches.append(path)
+        if not matches:
+            raise ValueError("no drop-in in %s declares \"%s\""
+                             % (directory, name))
+        if len(matches) > 1:
+            raise ValueError("%d drop-ins declare \"%s\", so this cannot "
+                             "tell which to write" % (len(matches), name))
+        return matches[0]
+
+    def _plain_tool(self, argv, what):
+        """_tool without the --remote insertion.
+
+        spa-json-dump is not a pw- tool and takes no -r; handing it one would
+        be a usage error rather than the remote-graph selection _tool adds it
+        for.
+        """
+        try:
+            proc = run(argv)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise RuntimeError("%s is not installed" % argv[0])
+            raise RuntimeError("%s: %s" % (what, exc.strerror or exc))
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("%s timed out" % what)
+        if proc.returncode != 0:
+            raise RuntimeError("%s rejected %s" % (what, argv[-1]))
+        return proc.stdout or ""
+
+    @staticmethod
+    def _write_like(path, text, model):
+        """Write `text` to `path` with the mode `model` already has.
+
+        os.replace keeps the mode of the file being moved into place, not the
+        one being replaced, so a staged file created at the default umask would
+        quietly widen the permissions on the config it becomes.
+        """
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        try:
+            os.chmod(path, os.stat(model).st_mode & 0o7777)
+        except OSError:
+            pass
 
     # ---- verbs: supervised nodes ----------------------------------------
 

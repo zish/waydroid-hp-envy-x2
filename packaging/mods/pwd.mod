@@ -42,7 +42,7 @@
 # vendored binary docs/54 rules out. pw-app/build.sh --install is the delivery
 # mechanism, as bt-app/build.sh is for Bluetooth.
 
-VERSION=1.1.0
+VERSION=1.2.0
 RELEASE=1
 KIND=host
 ARCH=noarch

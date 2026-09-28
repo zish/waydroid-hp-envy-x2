@@ -1,3 +1,37 @@
+* Mon Sep 28 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.2.0-1
+- New `chain-save` verb: write a filter chain's live control values into the
+  conf.d drop-in that declares it, so an EQ curve survives the chain stopping.
+  Nothing else persists one. Measured 2026-09-28: WirePlumber's entire state
+  is default-nodes, default-routes and stream-properties, none of which has
+  any model for a filter control port -- so before this a reboot brought every
+  band back flat, as one did.
+- It does NOT restart anything, which is what makes it safe. The running chain
+  is already in the state being written, so the file only matters at the next
+  start; restarting filter-chain.service would destroy and recreate the sink,
+  and on this host that sink is the default, so every playing stream would be
+  bumped off it mid-save.
+- New `config` capability, default NO, and deliberately not folded into
+  `params`. Moving a slider is audible, reversible and confined to the running
+  graph; writing a file the audio server executes at every start afterwards is
+  none of those, and it is the only verb here that reaches outside the graph
+  to the filesystem.
+- The edit is textual and surgical rather than parse-and-reserialise.
+  spa-json-dump would give a clean tree and writing it back would be valid
+  SPA-JSON -- and would drop every comment in the file. These drop-ins are
+  documentation as much as configuration, so only the bytes between one pair
+  of braces move, and the result is re-parsed with spa-json-dump before it
+  replaces anything. Previous contents go to .bak; a filter the file does not
+  name, or names without a control block, is reported in `skipped` rather than
+  silently dropped.
+- chain-save trusts the daemon's own writes over the graph, and that is not
+  belt-and-braces. Re-measured 2026-09-28 against a chain recreated by a
+  PipeWire restart: three node-param writes stayed invisible in pw-dump and
+  then appeared exactly as written the moment the chain was instantiated. A
+  first cut of this verb read the graph, saved the values the user was trying
+  to replace, and reported success doing it. Every node-param is now
+  remembered until the graph echoes it, and the reply names those keys in
+  `pending`. The record is dropped on `reset`, because ids are reused.
+
 * Sun Sep 27 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
 - Project a filter graph's control ports, and add node-param to move them. A
   filter-chain node carries TWO Props entries and the projection read only the

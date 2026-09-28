@@ -192,6 +192,19 @@ class MainActivity : Activity(), PwClient.Listener {
         if (!reply.optBoolean("ok", false)) {
             val error = reply.optString("error", "refused")
             toast(if (what != null) "$what: $error" else error)
+            return
+        }
+        // Successful verbs are normally silent, because the monitor's update
+        // event is the confirmation. A config write produces no graph change
+        // at all, so it is the one verb whose success nothing would otherwise
+        // show.
+        if (what == "save") {
+            val file = reply.optString("file", "").substringAfterLast('/')
+            val skipped = reply.optJSONArray("skipped")?.length() ?: 0
+            toast(
+                "saved ${reply.optInt("values")} values to $file" +
+                    if (skipped > 0) " ($skipped filter(s) had no control block)" else ""
+            )
         }
     }
 
@@ -756,6 +769,28 @@ class MainActivity : Activity(), PwClient.Listener {
             }
         }
 
+        // A row rather than a dialog button. The three button slots are taken
+        // by Close and Revert, and the one left is the "negative" slot, which
+        // sitting next to those two reads as Cancel.
+        layout.addView(heading("Startup values"))
+        if (!allowed("config")) {
+            layout.addView(note(
+                "These values live only in the running graph, and the config " +
+                    "capability is disabled in the daemon's policy, so they " +
+                    "last only until the chain stops."
+            ))
+        } else {
+            layout.addView(note(
+                "These values live only in the running graph \u2014 nothing " +
+                    "else persists a filter control, so the chain stopping " +
+                    "loses them. Saving writes them into the drop-in that " +
+                    "declares this chain."
+            ))
+            layout.addView(flatButton("Save as startup values") {
+                confirmSave(nodeId, graph.label(node))
+            })
+        }
+
         val dialog = AlertDialog.Builder(this)
             .setTitle(graph.label(node))
             .setView(ScrollView(this).apply { addView(layout) })
@@ -778,6 +813,35 @@ class MainActivity : Activity(), PwClient.Listener {
                 for (reset in resets) reset()
             }
         }
+    }
+
+    /**
+     * The second tap before writing a file.
+     *
+     * Same reasoning as confirmQuantum: this is the one control in the app
+     * that outlives the process on both sides. It is well short of dangerous
+     * -- the daemon keeps a .bak, preserves the file's comments and refuses an
+     * edit that would not parse -- but "the config the audio server reads at
+     * every start" deserves being named out loud before it changes.
+     */
+    private fun confirmSave(nodeId: Int, label: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Save $label?")
+            .setMessage(
+                "Writes the current control values into the conf.d drop-in " +
+                    "that declares this chain, so it starts this way. The " +
+                    "previous contents are kept beside it as .bak, the file's " +
+                    "comments survive, and the write is refused if the result " +
+                    "would not parse.\n\n" +
+                    "Nothing restarts and nothing stops playing: the chain is " +
+                    "already in this state, so the file only matters the next " +
+                    "time it starts."
+            )
+            .setPositiveButton("Save") { _, _ ->
+                send("save", "chain-save") { it.put("node", nodeId) }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun controlRow(
