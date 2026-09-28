@@ -78,7 +78,8 @@ class ControlSpec private constructor(
     private val log: Boolean,
     private val unit: String,
     private val decimals: Int,
-    private val signed: Boolean
+    private val signed: Boolean,
+    private val detent: Double? = null
 ) {
 
     fun toProgress(value: Double): Int {
@@ -93,7 +94,15 @@ class ControlSpec private constructor(
 
     fun fromProgress(progress: Int): Double {
         val fraction = progress.toDouble() / STEPS
-        return if (log) min * Math.pow(max / min, fraction) else min + (max - min) * fraction
+        val value = if (log) min * Math.pow(max / min, fraction)
+        else min + (max - min) * fraction
+        // Snap to the neutral value when close to it. A gain slider spans 48 dB
+        // in a thumb's width, so landing on exactly 0.0 dB -- the one value
+        // anybody actually wants to return to -- is otherwise luck. Only ports
+        // whose neutral this file is willing to assert have one; see NEUTRAL
+        // below.
+        val neutral = detent ?: return value
+        return if (Math.abs(toProgress(neutral) - progress) <= STEPS / 100) neutral else value
     }
 
     fun format(value: Double): String {
@@ -122,7 +131,7 @@ class ControlSpec private constructor(
         // A logarithmic scale cannot reach or cross zero, so a value at or
         // below zero demotes the control to a linear slider rather than
         // dropping the value off the end of the bar.
-        return ControlSpec(low, high, log && low > 0.0, unit, decimals, signed)
+        return ControlSpec(low, high, log && low > 0.0, unit, decimals, signed, detent)
     }
 
     companion object {
@@ -137,11 +146,11 @@ class ControlSpec private constructor(
             // Every biquad, and so every band of an equalizer.
             "Freq" to ControlSpec(20.0, 20000.0, true, "Hz", 0, false),
             "Q" to ControlSpec(0.1, 10.0, true, "", 2, false),
-            "Gain" to ControlSpec(-24.0, 24.0, false, "dB", 1, true),
+            "Gain" to ControlSpec(-24.0, 24.0, false, "dB", 1, true, 0.0),
             // delay
             "Delay (s)" to ControlSpec(0.0, 2.0, false, "s", 3, false),
-            "Feedback" to ControlSpec(-1.0, 1.0, false, "", 2, true),
-            "Feedforward" to ControlSpec(-1.0, 1.0, false, "", 2, true),
+            "Feedback" to ControlSpec(-1.0, 1.0, false, "", 2, true, 0.0),
+            "Feedforward" to ControlSpec(-1.0, 1.0, false, "", 2, true, 0.0),
             // noisegate
             "Attack (s)" to ControlSpec(0.0, 2.0, false, "s", 3, false),
             "Release (s)" to ControlSpec(0.0, 2.0, false, "s", 3, false),
@@ -153,9 +162,18 @@ class ControlSpec private constructor(
             "Target LUFS" to ControlSpec(-70.0, 0.0, false, "LUFS", 1, true)
         )
 
+        // NEUTRAL VALUES, AND WHY ONLY THESE PORTS HAVE ONE
+        //
+        // A detent is a claim that one value is the "off" one, and it is only
+        // defensible where this table has already claimed to know the units: a
+        // biquad's Gain is dB, so 0 is flat, and the delay's Feedback and
+        // Feedforward are coefficients, so 0 is neither. Freq and Q have no
+        // such value -- there is no neutral frequency -- and they get none
+        // rather than an invented one.
+
         // mixer publishes "Gain 1" to "Gain 8", and unlike a biquad's "Gain"
         // these are linear multipliers with a default of 1.0.
-        private val MIXER_GAIN = ControlSpec(0.0, 2.0, false, "", 2, false)
+        private val MIXER_GAIN = ControlSpec(0.0, 2.0, false, "", 2, false, 1.0)
 
         /** A slider for this port, or null if this app has no honest range. */
         fun of(port: String, value: Double): ControlSpec? {
