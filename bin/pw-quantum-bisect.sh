@@ -142,6 +142,61 @@ else:
     print(sum(max(0, be[k] - ae[k]) for k in be if k in ae))
 PY
 }
+# ---- the real instrument: does every client still get the quantum it asked for?
+#
+# xruns are NOT the signal for this failure, measured 2026-09-26: forcing 32 on
+# bigtab01 made Android's audio plainly bad to a listener while the sink's ERR
+# counter moved by single digits over minutes. The sink FOLLOWS a forced quantum;
+# a pipewire-pulse client does not. Android's stream negotiates 256 and keeps
+# delivering 256-frame buffers into whatever the graph is cycling at, and PipeWire
+# resamples across the gap. That is a buffer-size mismatch, and the sink never
+# misses a deadline, so ERR stays flat while it sounds wrong.
+#
+# So the verdict is divergence: any client whose quantum exceeds the graph's is
+# being fed in pieces smaller than it asked for. xruns stay in the report as a
+# secondary signal, because a step can do both.
+diverged() {   # prints "<client-id> <client-quantum> <graph-quantum> <name>" per offender
+    asuser pw-top -b -n 3 > "$TMP/q" 2>/dev/null
+    asuser pw-dump > "$TMP/qd" 2>/dev/null
+    python3 - "$TMP/q" "$TMP/qd" <<'PY'
+import json, sys
+rows, cur = [], None
+for line in open(sys.argv[1]):
+    f = line.split()
+    if not f: continue
+    if "ERR" in f and "ID" in f:
+        cur = []; rows.append(cur)
+        idx = dict((k, f.index(k)) for k in ("ID", "QUANT", "RATE") if k in f)
+        continue
+    if cur is None: continue
+    try:
+        if f[0] != "R": continue
+        if int(f[idx["RATE"]]) <= 0: continue
+        cur.append((int(f[idx["ID"]]), int(f[idx["QUANT"]])))
+    except (ValueError, KeyError, IndexError): continue
+live = rows[-1] if rows and rows[-1] else []
+if not live:
+    sys.exit(0)                      # nothing processing: caller treats as unreadable
+cls, name = {}, {}
+try:
+    for o in json.load(open(sys.argv[2])):
+        if not o.get("type", "").endswith("Node"): continue
+        p = (o.get("info") or {}).get("props") or {}
+        cls[o["id"]] = str(p.get("media.class", ""))
+        name[o["id"]] = p.get("node.description") or p.get("node.name") or "?"
+except Exception:
+    pass
+# the graph's quantum is the driver's: the sink, the one that is not a stream
+graph = [q for i, q in live if not cls.get(i, "").startswith("Stream/")]
+if not graph:
+    sys.exit(0)
+gq = min(graph)
+for i, q in live:
+    if cls.get(i, "").startswith("Stream/") and q > gq:
+        print("%d %d %d %s" % (i, q, gq, name.get(i, "?")))
+PY
+}
+
 playing() {
     asuser pw-dump 2>/dev/null | python3 -c '
 import json, sys
@@ -208,14 +263,26 @@ for q in $CANDIDATES; do
         bad "audio stopped during this step -- restarting it is part of the test"
         ABORT="audio stopped partway through"; break
     fi
-    inf "sampling xruns for ${SAMPLE}s"
+    # Divergence first: it is the signal that matches what a listener hears.
+    off=$(diverged)
+    if [ -n "$off" ]; then
+        bad "$q starves a client that asked for more:"
+        echo "$off" | while read -r cid cq gq cname; do
+            inf "client $cid negotiated $cq, graph is at $gq -- $cname"
+        done
+        inf "PipeWire resamples across that gap. This is what sounds wrong, and it"
+        inf "does NOT show up as an xrun. $q is below this host's usable floor."
+        BOUNDED=1; break
+    fi
+    ok "every client is getting the quantum it asked for"
+    inf "sampling xruns for ${SAMPLE}s (secondary signal)"
     delta=$(xruns "$SAMPLE")
     if [ "$delta" -lt 0 ]; then
         bad "could not read pw-top's ERR column; stopping rather than guessing"
         ABORT="pw-top's ERR column was unreadable"; break
     fi
     if [ "$delta" -gt "$TOLERANCE" ]; then
-        bad "$delta xruns in ${SAMPLE}s -- deadline misses. $q is too low."
+        bad "$delta xruns in ${SAMPLE}s -- deadline misses on top of it. $q is too low."
         BOUNDED=1; break
     fi
     ok "$delta xruns in ${SAMPLE}s"
@@ -249,9 +316,13 @@ elif [ "$LAST_GOOD" = "$CFG" ]; then
 else
     ms=$(python3 -c "print('%.2f' % ($LAST_GOOD * 1000.0 / $RATE))")
     saved=$(python3 -c "print('%.2f' % (($CFG - $LAST_GOOD) * 1000.0 / $RATE))")
-    ok "lowest quantum that held: $LAST_GOOD frames ($ms ms), saving $saved ms vs $CFG"
-    inf "docs/44 puts Android's HAL buffer at 85 ms, so that is $saved ms off a ~106 ms"
-    inf "path -- worth having for host-side clients, inaudible for Android playback."
-    inf "It is NOT persisted. To keep it, set clock.quantum in a pipewire.conf.d"
-    inf "drop-in rather than forcing it; force-quantum dies with the next reboot."
+    ok "lowest quantum every client still got: $LAST_GOOD frames ($ms ms)"
+    inf "That is $saved ms below the configured $CFG -- but read it as a FLOOR, not a"
+    inf "saving. The floor is whatever the fussiest client negotiated, not a property"
+    inf "of this host: the graph will follow a force well below it and report no"
+    inf "xruns doing so, while the client goes on delivering its own buffer size and"
+    inf "PipeWire resamples the difference. That is the part a listener hears."
+    inf "Forcing a value the graph already negotiates on its own buys nothing."
+    inf "It is NOT persisted either. To keep one, set clock.quantum in a"
+    inf "pipewire.conf.d drop-in; force-quantum dies with the next reboot."
 fi

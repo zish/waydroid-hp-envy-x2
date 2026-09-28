@@ -434,7 +434,23 @@ The consequence is that **xruns are the wrong instrument for this failure**, and
 `bin/pw-quantum-bisect.sh` walked 512, 256, 128, 64 and 32 with audio playing and reported zero
 xruns at every step including the one known to have made the machine unusable. The script's own
 "flat `ERR` means drift, not load" branch was right and the mechanism written here was wrong. What
-the ladder should compare is the graph's quantum against what each client negotiated, not `ERR`.
+the ladder should compare is the graph's quantum against what each client negotiated, not `ERR`, and
+it does now — the verdict is divergence, and it names the starved client.
+
+**Confirmed by a listener, 2026-09-26.** Held at 32 with the owner at the machine: audio was plainly
+bad and intermittently so, while the sink's `ERR` moved by single digits over minutes. Restored to
+`0`, graph and client both back at 256, and it was fine. Two points on real hardware, and they agree
+with the mismatch account rather than the deadline one. Nothing else in the path is implicated — the
+eq6 chain measured transparent (every band `Gain 0.0` with pass-through biquad coefficients), all
+volumes unity, and the four links a correct stereo pair on each hop with no duplicate.
+
+**So the open item is answered, and the question it asked was wrong.** "How low a quantum will this
+host hold" has no useful answer: the host holds 32 by every counter there is. The floor is *whatever
+the fussiest client negotiated* — 256 for Android's `pipewire-pulse` stream here — because the sink
+follows a force and the client does not. Forcing at or above that is fine and forcing below it
+starves the client, which is why 32 was audible and why the same 32 produced no xruns. It also means
+forcing 256 buys nothing on this host: the graph already negotiates 256 on its own whenever Android
+plays. The knob is for host-side clients that negotiate something shorter.
 
 Two numbers here were also wrong, and both came from reading a setting instead of the running graph.
 `clock.quantum` is 1024, but with nothing forced the graph *runs* at 256 when Android plays, because
@@ -451,10 +467,11 @@ Three things about it are worth keeping:
   and nothing has to be edited to recover.
 - **`min-quantum` is not a safety floor.** It is what PipeWire will accept. The daemon's range check
   against it was working correctly and still admitted a value that made the machine unusable.
-  32 is now known bad and 1024 known good; nothing in between has been measured, and
-  `bin/pw-quantum-bisect.sh` is what measures it -- it walks 512, 256, 128, 64, 32 with audio
-  playing, samples the xrun delta at each step, asks how each one sounds before going lower, and
-  restores the original `force-quantum` on any exit including an interrupt. The app therefore
+  32 is known bad and 256 is the measured floor, for the reason above: it is what
+  Android's stream negotiates, not what this host can stand. `bin/pw-quantum-bisect.sh` walks the
+  ladder and flags the first step that starves a client, samples xruns as a secondary signal, asks
+  how each step sounds before going lower, and restores the original `force-quantum` on any exit
+  including an interrupt. The app therefore
   labels any choice below the graph's configured quantum and takes a second tap to send it
   (`confirmQuantum`), which is a confirmation and not a floor — a real floor would need the policy
   file to parse numbers, and it parses yes/no only.
