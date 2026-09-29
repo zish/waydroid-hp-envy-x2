@@ -1,3 +1,27 @@
+* Tue Sep 29 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.2.1-1
+- Documentation only: no change to the daemon, the units, the policy or the
+  payload. The bump exists because docs/56-pipewire-control.md ships as %%doc and
+  the copy in 1.2.0 states a mechanism that has since been retracted, which is
+  worse on an installed host than no documentation at all.
+- Retracted: that a too-low `clock.force-quantum` degrades audio through deadline
+  misses. Measured instead -- the ALSA sink follows a forced quantum and a
+  pipewire-pulse client does not, so Android's stream goes on delivering the
+  256-frame buffers it negotiated into a graph cycling shorter and PipeWire
+  resamples the difference. The sink never misses a deadline, which is why the
+  fault was plainly audible while the xrun counter moved by single digits.
+- Corrected: the graph does not run at `clock.quantum` 1024 while Android plays.
+  It runs at 256, negotiated down by the stream, so that hop costs 5.33 ms rather
+  than the 21.3 ms docs/44's budget lists, and the 1024 is only the fallback for
+  when nothing asks for less.
+- Answered, by retiring the question: "how low a quantum will this host hold" has
+  no useful answer, because the host holds 32 by every counter there is. The floor
+  is whatever the fussiest client negotiated -- 256 here -- and forcing a value the
+  graph already reaches on its own buys nothing.
+- The tooling that found this is deliberately not packaged, as `bin/` never is:
+  `bin/pw-audio-diag.sh` is read-only and `bin/pw-quantum-bisect.sh` degrades
+  audio on purpose to locate the floor. Both want a checkout, the same as
+  `bin/pipewire-test.sh`.
+
 * Mon Sep 28 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.2.0-1
 - New `chain-save` verb: write a filter chain's live control values into the
   conf.d drop-in that declares it, so an EQ curve survives the chain stopping.
