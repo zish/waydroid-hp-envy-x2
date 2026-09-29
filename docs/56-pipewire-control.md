@@ -753,7 +753,34 @@ one of them is now proven end to end:
 |---|---|---|
 | `~/.config/systemd/user/default.target.wants/` | `filter-chain.service`, via `systemctl --user enable` | **started at boot, measured** |
 | `/usr/lib/systemd/system/multi-user.target.wants/` | `waydroid-btd.service` and the other packages | works, but these are **system** units and say nothing about the user manager |
-| `/usr/lib/systemd/user/default.target.wants/` | the packaged `waydroid-pwd.service` | wiring verified live, boot behaviour **untested until the next reboot** |
+| `/usr/lib/systemd/user/default.target.wants/` | the packaged `waydroid-pwd.service` | **measured 2026-09-29: starts with the LOGIN, not with the boot** |
+
+**Measured across the 2026-09-29 reboot, and it is not what the paragraph above expects.** The
+packaged daemon came back `active`/`running`, but every relevant timestamp lands on the same
+second: boot at 12:15:12, then the `sddm` session, `user@1000.service` and `waydroid-pwd.service`
+all at 12:17:31 -- two minutes and nineteen seconds later. The unit started with the session, not
+with the machine. Nor could it have done otherwise here: `loginctl show-user jmelanso` reports
+`Linger=no`, `/var/lib/systemd/linger/` is empty, and sddm has no `Autologin User=`, so
+`user@1000.service` does not exist until somebody authenticates.
+
+So the practical consequence is worth stating plainly: **on a booted but unattended machine this
+daemon is not running**, and the app cannot connect until a human has logged in. For a host whose
+entire premise is that Android is the only screen, that is a real limitation rather than a detail.
+
+This also puts the paragraph above in question, and it is left standing rather than quietly edited
+because its evidence is not re-examined here. `filter-chain.service` cannot have come back active
+"with nobody logging in" while `Linger=no` and autologin is unconfigured -- there would have been no
+user manager to start it. Either a login did occur in that test, or lingering was enabled at the
+time and has since been turned off. Worth re-checking before anything else is built on it.
+
+**The remedy is `loginctl enable-linger <user>`, and it is deliberately NOT the default.** Lingering
+starts the user manager at boot, which would start PipeWire and this daemon before anybody has
+authenticated. On a host with two-factor authentication at sddm -- which bigtab01 has, deliberately
+-- that hands a booted machine a live audio graph and a token-authenticated control port on the
+bridge, with the 2FA gate not yet passed. It weakens exactly the boundary the second factor exists
+to hold. bigtab01 therefore keeps `Linger=no` and accepts that the daemon follows the login. Any
+deployment that genuinely needs the daemon before a login should enable lingering knowingly, and
+should understand it applies to every user unit and not just this one.
 
 The middle row is worth stating plainly because it is the easy mistake: `waydroid-btd.service`
 lives in `/usr/lib/systemd/system/`, so it corroborates the `.wants`-symlink trick for *system*
