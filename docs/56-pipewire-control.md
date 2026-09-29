@@ -451,6 +451,22 @@ stopped there rather than spending twenty seconds sampling a counter that was ne
 Floor 256, and the instrument now fails at the step a listener would object to instead of passing all
 five.
 
+A listener was present for that run and reported no degradation at any point in it, which closes the
+remaining half of the question: **diverging *upward* is inaudible.** 512 ran for twenty-six seconds
+with the graph above the client's 256 and nobody heard anything, consistent with the account -- a
+client fed in chunks larger than it asked for is not starved, it just waits. The same statement is
+deliberately NOT extended to the 128 step, which was held for about six seconds before the
+divergence check stopped it: six seconds against an intermittent fault is weak evidence in either
+direction, where 32 was held for minutes when it was plainly heard.
+
+One operational note, because it is the argument for the app-side gate rather than a theory about it.
+Three days later, after a reboot, this host was found at `force-quantum 512` again. Nothing persists
+it: there is no `pipewire.conf.d` drop-in, no `quantum` anywhere in the config tree, and the daemon's
+state directory holds only `profile.json` and `token`. So it was set at runtime inside that boot,
+which on this host means `pw-metadata` by hand or the app's quantum dialog through the daemon. The
+tablet is still running the pre-gate APK, where any value in the list is one tap away with no
+confirmation -- which is exactly the hazard `confirmQuantum` exists to close, still uninstalled.
+
 **So the open item is answered, and the question it asked was wrong.** "How low a quantum will this
 host hold" has no useful answer: the host holds 32 by every counter there is. The floor is *whatever
 the fussiest client negotiated* — 256 for Android's `pipewire-pulse` stream here — because the sink
