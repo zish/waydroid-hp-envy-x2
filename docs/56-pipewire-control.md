@@ -464,8 +464,19 @@ Three days later, after a reboot, this host was found at `force-quantum 512` aga
 it: there is no `pipewire.conf.d` drop-in, no `quantum` anywhere in the config tree, and the daemon's
 state directory holds only `profile.json` and `token`. So it was set at runtime inside that boot,
 which on this host means `pw-metadata` by hand or the app's quantum dialog through the daemon. The
-tablet is still running the pre-gate APK, where any value in the list is one tap away with no
-confirmation -- which is exactly the hazard `confirmQuantum` exists to close, still uninstalled.
+tablet was still running the pre-gate APK at that point, where any value in the list was one tap away
+with no confirmation -- which is exactly the hazard `confirmQuantum` exists to close.
+
+**Both halves deployed, 2026-09-29.** The gated APK was built from the current tree and installed:
+`pm install` reported `Success`, the publisher handed over the connection profile, and the activity
+launched. Verified by hash rather than by that `Success` -- the installed
+`/data/app/.../base.apk` is `057c1acd00ca0bee07da8aae67936d26ec9dcf9d362e4b7b7fb8857f08bc1285`,
+byte-identical to the local build, whose dex carries the confirm dialog's text. (A `strings` check
+run *on the tablet* returned zero matches and means nothing: binutils is not installed there, so it
+found no tool rather than no match. Hash equality against an artifact that does contain the text is
+the claim that holds.) `waydroid-ext-pwd-1.2.1-1` is layered and staged for the next boot, carrying
+the corrected `%doc` copy of this file; `rpm -q` on the running system still reports 1.2.0 until
+then, and that transaction also pulls `vim-filesystem` and `xxd` forward to 9.2.1129.
 
 **So the open item is answered, and the question it asked was wrong.** "How low a quantum will this
 host hold" has no useful answer: the host holds 32 by every counter there is. The floor is *whatever
