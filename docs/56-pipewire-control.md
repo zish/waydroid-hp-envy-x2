@@ -741,17 +741,25 @@ monitor, and a `--user` unit starting under the cage session at boot.
 resolving against `updates` also pulled `vim-filesystem` and `xxd` forward, which is worth knowing
 before running it on a host where that is not wanted.
 
-**A `--user` unit does start under the cage session's user manager at boot.** This document has
-carried the opposite as an open question since the design, and the packaged daemon is a `--user`
-unit riding on the answer. `filter-chain.service` came back `enabled` and `active` across the
-reboot with nobody logging in, which settles it.
+**A `--user` unit does NOT start at boot on this host. It starts at the login.** This paragraph
+previously claimed the opposite -- that `filter-chain.service` came back `active` across a reboot
+"with nobody logging in" -- and the journal for that very boot says a login is exactly what started
+it. Boot `-1` of 2026-09-28: machine up at 13:06:36, sddm greeter at 13:06:57, then at 13:08:18
+`New session '2' of user 'jmelanso' ... type 'tty'`, `user@1000.service` starting in the same
+second, and `Started filter-chain.service` in that same second too. It restarted at 13:08:53 under a
+second user manager when the wayland session replaced the tty one. Nothing ran before 13:08:18,
+because there was no user manager to run it.
 
-Be careful how far that generalises, because three different enablement paths are in play and only
-one of them is now proven end to end:
+The original reading is understandable -- the unit *was* enabled and *was* active after a reboot,
+and the intervening login was 102 seconds of someone else's evening. It is wrong all the same, and
+the packaged daemon was designed on it.
+
+Three different enablement paths are in play, and the distinction between them turned out to matter
+less than which manager runs them:
 
 | enablement path | used by | status |
 |---|---|---|
-| `~/.config/systemd/user/default.target.wants/` | `filter-chain.service`, via `systemctl --user enable` | **started at boot, measured** |
+| `~/.config/systemd/user/default.target.wants/` | `filter-chain.service`, via `systemctl --user enable` | **corrected: starts at the LOGIN** -- journal, boot -1 of 2026-09-28 |
 | `/usr/lib/systemd/system/multi-user.target.wants/` | `waydroid-btd.service` and the other packages | works, but these are **system** units and say nothing about the user manager |
 | `/usr/lib/systemd/user/default.target.wants/` | the packaged `waydroid-pwd.service` | **measured 2026-09-29: starts with the LOGIN, not with the boot** |
 
@@ -767,11 +775,17 @@ So the practical consequence is worth stating plainly: **on a booted but unatten
 daemon is not running**, and the app cannot connect until a human has logged in. For a host whose
 entire premise is that Android is the only screen, that is a real limitation rather than a detail.
 
-This also puts the paragraph above in question, and it is left standing rather than quietly edited
-because its evidence is not re-examined here. `filter-chain.service` cannot have come back active
-"with nobody logging in" while `Linger=no` and autologin is unconfigured -- there would have been no
-user manager to start it. Either a login did occur in that test, or lingering was enabled at the
-time and has since been turned off. Worth re-checking before anything else is built on it.
+This matched the other unit exactly once the journal was read, which is how the paragraph above came
+to be rewritten rather than merely doubted. The reasoning that prompted the check: `filter-chain.`
+`service` could not have come back active "with nobody logging in" while `Linger=no` and autologin
+is unconfigured, because there would have been no user manager to start it. Persistent journals
+settled which of the two possible explanations it was -- a login, not lingering-since-disabled --
+and `user@1000.service` starting in the same second as the session is what rules lingering out,
+since lingering would have started it at boot instead.
+
+So there is one phenomenon here, not two: **every `--user` unit on this host waits for a login**,
+whichever `.wants` directory enabled it. The two rows of the table that differ on this were the same
+measurement misread twice.
 
 **The remedy is `loginctl enable-linger <user>`, and it is deliberately NOT the default.** Lingering
 starts the user manager at boot, which would start PipeWire and this daemon before anybody has
