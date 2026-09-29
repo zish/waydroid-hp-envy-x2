@@ -250,6 +250,20 @@ one-overlay-file lever that woke the whole Wi-Fi framework up in
 [Stage 0](32-wifi-stage3.md). **This is a genuinely different route to multichannel from rewriting
 `audio_hw.c`, and it should be costed before that rewrite is started.**
 
+**Corrected 2026-09-29: three ingredients, not four — `usb.host` is already declared, by the
+image.** The paragraph above measured `/system/etc/permissions` and stopped there. `/vendor/etc/`
+`permissions/` holds `android.hardware.usb.host.xml` and `android.hardware.usb.accessory.xml`, so
+`pm list features` does report `android.hardware.usb.host` on this device and `UsbManager` has its
+feature flag already. Nothing here added it; our overlay's permissions directory contains exactly
+one file, the Stage 0 `android.hardware.wifi.xml`. So that ingredient is spent, and the shopping
+list is `/dev/snd`, node permissions, and the attach event.
+
+`android.hardware.midi.xml` really is absent, from **both** directories — checked by `ls` on each
+path and corroborated by `pm list features`, which reports no MIDI feature and no MIDI system
+service. So the MIDI half of the conclusion stands exactly as written; only the USB half was
+measured a directory short. Worth knowing when grepping for this: `pm list features | grep midi`
+matches `android.hardware.sensor.relative_hu`**`midi`**`ty`, which is not a MIDI feature.
+
 **The guest's alsa-lib install is complete enough to matter, with one gap.**
 `/vendor/usr/share/alsa/` holds `alsa.conf`, `cards/` and `pcm/` — the full plugin config set
 (`dmix.conf`, `dsnoop.conf`, `iec958.conf`, `surround*.conf`, …) — so `hw:`, `plughw:` and format
@@ -371,7 +385,9 @@ sudo: this image does ship that fork's `alsa.conf`, with `pcm.pulse` at line 662
 offering apps only 48 kHz / 16-bit / stereo out and mono in, with no `DIRECT` mixPort;
 `audio.usb.default.so` ships in both ABIs and its policy include uses dynamic profiles;
 `android.hardware.usb.host.xml` and `android.hardware.midi.xml` are absent from
-`/system/etc/permissions`; there is no Bluetooth audio HAL in the image; the host graph runs
+`/system/etc/permissions` (**scoped to that directory, and `usb.host` turns out to be declared in
+`/vendor/etc/permissions` — see the correction above; `midi` is absent from both**); there is no
+Bluetooth audio HAL in the image; the host graph runs
 `clock.quantum` 1024 at 48 kHz with `min-quantum` 32; the host has `hci0` with `bluetooth.service`
 active and PipeWire 1.6.8 serving the PA socket; `bluez-alsa` is not installed.
 
