@@ -433,7 +433,7 @@ way A and B never were: mount a tmpfs at that path on the host, look for it in t
 **Transport: host watcher pushes in.** On mount, the host side runs
 
 ```
-waydroid shell -- am broadcast -a lan.syshlt.bigtab01.MEDIA_MOUNTED --es label … --es path …
+waydroid shell -- am broadcast -a com.systemhalted.bigtab01.MEDIA_MOUNTED --es label … --es path …
 ```
 
 `waydroid shell` is root inside Android, so this needs no in-guest privilege work. The receiver
@@ -661,7 +661,7 @@ and a hotplug are all the same code path, which is why `--once` and the service 
    | `am broadcast -n <pkg>/<class> -a <action>` | fires |
 
    All three report success, which is what made this expensive: there is no error anywhere, in
-   logcat or in `am`'s output. The daemon now sends `-p lan.syshlt.removablemedia`. **`-p` rather
+   logcat or in `am`'s output. The daemon now sends `-p com.systemhalted.removablemedia`. **`-p` rather
    than `-n`** deliberately: it keeps dispatch action-based, so renaming the receiver class cannot
    silently break the host side.
 
@@ -717,7 +717,7 @@ There is no channel from inside the container back out to the host — the daemo
 with `am broadcast`, but nothing pulls the other way. The Eject button on the notification therefore
 works by the helper app dropping a **zero-byte marker named after the volume** into its own
 app-private files directory, which on this host is plain host filesystem underneath
-(`<data>/data/lan.syshlt.removablemedia/files/eject/<label>`); `waydroid-mediad` polls that directory
+(`<data>/data/com.systemhalted.removablemedia/files/eject/<label>`); `waydroid-mediad` polls that directory
 once a second, unmounts, and consumes the marker.
 
 **On the app's "no file I/O" rule**: this is the only file the app ever writes. It lives in the app

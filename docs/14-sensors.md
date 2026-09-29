@@ -294,12 +294,12 @@ glance.
 
 Two custom views, pinned above the scrolling card list so they stay visible.
 
-[`CompassView`](../sensor-app/src/lan/syshlt/sensorinfo/CompassView.kt) is a rotating-card dial in
+[`CompassView`](../sensor-app/src/com/systemhalted/sensorinfo/CompassView.kt) is a rotating-card dial in
 the heading-indicator convention rather than the magnetic-needle one: the card turns under a fixed
 lubber index, so whatever the device's **+Y axis** (the top edge of the screen) points at reads off
 directly at twelve o'clock, with the number repeated in the middle.
 
-[`AttitudeView`](../sensor-app/src/lan/syshlt/sensorinfo/AttitudeView.kt) draws a thin rectangular
+[`AttitudeView`](../sensor-app/src/com/systemhalted/sensorinfo/AttitudeView.kt) draws a thin rectangular
 slab standing in for the laptop, inside a compass ring fixed to the world. The slab's **+Z** face —
 the screen side — is labelled `FRONT` and its **-Z** face `BACK`. A gold wedge lying in the ring's
 plane points along the reported heading. Both views take their numbers from the same rotation

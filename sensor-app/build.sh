@@ -48,7 +48,7 @@ SDK="$TOOLS/sdk"
 BT="$SDK/build-tools/34.0.0"
 PLATFORM="$SDK/platforms/android-33/android.jar"
 KOTLINC="$TOOLS/kotlinc/bin/kotlinc"
-PKG=lan.syshlt.sensorinfo
+PKG=com.systemhalted.sensorinfo
 
 CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
 KOTLIN_URL="https://github.com/JetBrains/kotlin/releases/download/v2.0.21/kotlin-compiler-2.0.21.zip"

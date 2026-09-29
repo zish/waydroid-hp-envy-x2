@@ -1,4 +1,4 @@
-package lan.syshlt.quatmon
+package com.systemhalted.quatmon
 
 import android.util.Log
 import java.io.BufferedOutputStream

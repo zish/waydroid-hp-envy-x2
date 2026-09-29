@@ -412,13 +412,13 @@ string Android reports through the sensors HAL, so changing it changes observabl
 
    | Directory | Application id | Name | Kind |
    |---|---|---|---|
-   | [bt-app/](../bt-app) | `lan.syshlt.bluetooth` | Bluetooth | product |
-   | [media-app/](../media-app) | `lan.syshlt.removablemedia` | Removable Media | product |
-   | [pw-app/](../pw-app) | **`com.systemhalted.patchbay`** | Patchbay | product |
-   | [sensor-app/](../sensor-app) | `lan.syshlt.sensorinfo` | Sensor Info | product |
-   | [drm-probe/](../drm-probe) | `lan.syshlt.drmprobe` | DRM Probe | instrument |
-   | [quat-monitor/](../quat-monitor) | `lan.syshlt.quatmon` | Quat Monitor | instrument |
-   | [touch-probe/](../touch-probe) | `lan.syshlt.touchprobe` | Touch Probe | instrument |
+   | [bt-app/](../bt-app) | `com.systemhalted.bluetooth` | Bluetooth | product |
+   | [media-app/](../media-app) | `com.systemhalted.removablemedia` | Removable Media | product |
+   | [pw-app/](../pw-app) | `com.systemhalted.patchbay` | Patchbay | product |
+   | [sensor-app/](../sensor-app) | `com.systemhalted.sensorinfo` | Sensor Info | product |
+   | [drm-probe/](../drm-probe) | `com.systemhalted.drmprobe` | DRM Probe | instrument |
+   | [quat-monitor/](../quat-monitor) | `com.systemhalted.quatmon` | Quat Monitor | instrument |
+   | [touch-probe/](../touch-probe) | `com.systemhalted.touchprobe` | Touch Probe | instrument |
 
    They have nothing in common with the host packaging: a different toolchain (757 MB of SDK and
    kotlinc against `rpmbuild`), a different distribution channel (F-Droid against an RPM repo), a
@@ -436,9 +436,24 @@ string Android reports through the sensors HAL, so changing it changes observabl
    - **The debug keystore, above, is a hard blocker.** Fix it as part of the move, not after it — a
      published APK signed with a throwaway key cannot be un-published, and losing the keystore
      breaks updates for every installed user.
-   - **`pw-app` does not share the others' application id.** `com.systemhalted.patchbay` against
-     `lan.syshlt.*` for the other six. An application id is permanent once published, so this is
-     decided before the first tag or not at all.
+   - ~~**`pw-app` does not share the others' application id.**~~ **Settled 2026-09-29, in
+     `pw-app`'s favour.** The other six were `lan.syshlt.*` and are now `com.systemhalted.*`: 52
+     files, the four nested source trees moved with `git mv`, and all six APKs rebuilt and their
+     ids read back out with `aapt2 dump packagename`. `pw-app` was already correct and is
+     untouched. An application id is permanent once published, which is why this was worth doing
+     before the first tag rather than after it.
+     **Two consequences.** The rename crosses the host↔app contract, so
+     `artifacts/media/waydroid-mediad`, `artifacts/bluetooth/waydroid-btd` and three `bin/*-test.sh`
+     moved with it — they address the apps by package name, and `waydroid-mediad` also builds a
+     path from it (`data/com.systemhalted.removablemedia/files/eject`). And the old APKs installed
+     on bigtab01 are now *different applications* as far as Android is concerned: the daemons will
+     address the new ids and the old packages will sit there orphaned, so that migration starts
+     with uninstalling them.
+     **Still wrong, and not from this change:** the removable-media broadcast action is
+     `com.systemhalted.bigtab01.media.VOLUME_MOUNTED`. It matches on both sides so it works, but it
+     names one laptop in the public intent surface of an app about to be published. It wants to be
+     `com.systemhalted.media.VOLUME_*` before the first tag — a two-line change in
+     `media-app/src/Volumes.kt`, its manifest, and `waydroid-mediad`.
    - **The six hardcoded `jmelanso` paths** (item 5 below) are in these build scripts, which are
      the files moving. Cheapest to fix during the move.
    **Two decisions still open**, both recorded in [docs/57](57-upstream-queue.md)'s sibling

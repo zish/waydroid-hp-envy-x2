@@ -15,7 +15,7 @@
  * No AndroidX, no Compose, no Gradle -- the entire UI is built in code so the
  * build is aapt2 + kotlinc + d8 + apksigner. See build.sh.
  */
-package lan.syshlt.sensorinfo
+package com.systemhalted.sensorinfo
 
 import android.app.Activity
 import android.content.Context

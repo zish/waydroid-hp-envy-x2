@@ -1,4 +1,4 @@
-package lan.syshlt.touchprobe
+package com.systemhalted.touchprobe
 
 import android.app.Activity
 import android.content.pm.PackageManager

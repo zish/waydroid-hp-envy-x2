@@ -12,7 +12,7 @@
 
 set -u
 
-PKG=lan.syshlt.removablemedia
+PKG=com.systemhalted.removablemedia
 pass=0; fail=0; skip=0
 
 ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$1"; pass=$((pass+1)); }

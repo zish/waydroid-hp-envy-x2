@@ -61,7 +61,7 @@ BASE_SUBDIR = "media/0/Removable"
 # Note this does NOT break the app's "no file I/O" property: the marker lives in
 # the app's own sandbox, never on the removable volume, and carries no data --
 # it is a control signal whose entire content is its filename.
-EJECT_SUBDIR = "data/lan.syshlt.removablemedia/files/eject"
+EJECT_SUBDIR = "data/com.systemhalted.removablemedia/files/eject"
 
 # Android's media_rw. There is no idmap, so the container's uids ARE the host's
 # raw uids and this is host uid/gid 1023 too. /data/media/0 is media_rw:media_rw
@@ -407,8 +407,8 @@ def make_notifier(enabled):
     Failure is never fatal -- the mount is useful whether or not anything in
     Android is listening yet.
     """
-    action = "lan.syshlt.bigtab01.media.VOLUME_%s"
-    package = "lan.syshlt.removablemedia"
+    action = "com.systemhalted.bigtab01.media.VOLUME_%s"
+    package = "com.systemhalted.removablemedia"
 
     def notify(event, target, dev):
         if not enabled:

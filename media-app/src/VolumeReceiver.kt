@@ -1,4 +1,4 @@
-package lan.syshlt.removablemedia
+package com.systemhalted.removablemedia
 
 import android.content.BroadcastReceiver
 import android.content.Context

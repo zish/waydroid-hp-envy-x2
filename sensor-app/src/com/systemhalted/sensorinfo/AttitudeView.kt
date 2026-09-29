@@ -25,7 +25,7 @@
  * pushed through the rotation matrix; the slab therefore moves and the ring
  * stays put, which is the reading that makes heading legible.
  */
-package lan.syshlt.sensorinfo
+package com.systemhalted.sensorinfo
 
 import android.content.Context
 import android.graphics.Canvas

@@ -1,4 +1,4 @@
-package lan.syshlt.touchprobe
+package com.systemhalted.touchprobe
 
 import android.content.Context
 import android.graphics.Canvas

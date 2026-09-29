@@ -1,4 +1,4 @@
-package lan.syshlt.removablemedia
+package com.systemhalted.removablemedia
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -22,8 +22,8 @@ import android.provider.DocumentsContract
  */
 object Volumes {
 
-    const val ACTION_MOUNTED = "lan.syshlt.bigtab01.media.VOLUME_MOUNTED"
-    const val ACTION_UNMOUNTED = "lan.syshlt.bigtab01.media.VOLUME_UNMOUNTED"
+    const val ACTION_MOUNTED = "com.systemhalted.bigtab01.media.VOLUME_MOUNTED"
+    const val ACTION_UNMOUNTED = "com.systemhalted.bigtab01.media.VOLUME_UNMOUNTED"
 
     private const val CHANNEL_ID = "removable-media"
     private const val PREFS = "volumes"

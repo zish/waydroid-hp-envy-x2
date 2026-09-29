@@ -1,4 +1,4 @@
-package lan.syshlt.quatmon
+package com.systemhalted.quatmon
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -337,7 +337,7 @@ class SamplerService : Service() {
         private const val TAG = "quatmon"
         const val CHANNEL = "quatmon"
         const val NOTE_ID = 1
-        const val ACTION_MARK = "lan.syshlt.quatmon.MARK"
+        const val ACTION_MARK = "com.systemhalted.quatmon.MARK"
 
         const val TICK_MS = 50L                 // 20 Hz, the hub's ceiling
         const val PERIOD_US = 50_000            // ask both sensors for 20 Hz

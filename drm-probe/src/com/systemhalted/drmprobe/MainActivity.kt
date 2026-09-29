@@ -1,4 +1,4 @@
-package lan.syshlt.drmprobe
+package com.systemhalted.drmprobe
 
 import android.app.Activity
 import android.graphics.Typeface

@@ -451,7 +451,7 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    **The app also replaces the stock Quick Settings tile**, added the same day at the owner's
    request. The stock `bt` tile is inert here (`dumpsys bluetooth_manager`: `state: OFF,
    address: null`), so it is a control that can only fail. The lever is one **writable secure
-   setting**, `sysui_qs_tiles` — swap `bt` for `custom(lan.syshlt.bluetooth/…BtTileService)` and it
+   setting**, `sysui_qs_tiles` — swap `bt` for `custom(com.systemhalted.bluetooth/…BtTileService)` and it
    takes effect live, with **no overlay and no container restart, so no drop to the greeter**.
    `bin/bt-tile.sh` does it with `--install`/`--remove`/`--status` and keeps an exact backup of the
    original list. Note removing `bt` hides it from the shade but not from the edit-tiles tray,

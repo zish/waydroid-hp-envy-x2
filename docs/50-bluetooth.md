@@ -81,7 +81,7 @@ controller would sit there with no stack to drive it.
                                      │
     ┌───────────────────┐            │   ┌──────────────────┐        ┌──────────┐
     │ Bluetooth (app)   │  TCP/JSON  │   │  waydroid-btd    │ D-Bus  │ bluez    │
-    │ lan.syshlt.       │ ──────────►│──►│                  │ ──────►│ hci0     │
+    │ com.systemhalted.       │ ──────────►│──►│                  │ ──────►│ hci0     │
     │ bluetooth         │◄────────── │◄──│  org.bluez.Agent1│◄────── │          │
     └───────────────────┘   events   │   └──────────────────┘        └──────────┘
       192.168.240.112               │     192.168.240.1:7712
@@ -176,7 +176,7 @@ The app is handed everything it needs — address, port, token, and the certific
 is on — as one JSON file dropped into its own app-private directory:
 
 ```
-~jmelanso/.local/share/waydroid/data/data/lan.syshlt.bluetooth/files/btd.json
+~jmelanso/.local/share/waydroid/data/data/com.systemhalted.bluetooth/files/btd.json
 ```
 
 That works because of a fact worth writing down on its own: **SELinux is `Disabled` inside the
@@ -213,7 +213,7 @@ SystemUI reads the shade's tile list from the secure setting `sysui_qs_tiles`:
 
 ```
 before  wifi,bt,dnd,flashlight,rotation,battery,airplane,night,screenrecord,reduce_brightness
-after   wifi,custom(lan.syshlt.bluetooth/lan.syshlt.bluetooth.BtTileService),dnd,…
+after   wifi,custom(com.systemhalted.bluetooth/com.systemhalted.bluetooth.BtTileService),dnd,…
 ```
 
 It is an ordinary writable string, it takes effect live, and **nothing has to be restarted** —

@@ -40,7 +40,7 @@ SDK="$TOOLS/sdk"
 BT="$SDK/build-tools/34.0.0"
 PLATFORM="$SDK/platforms/android-33/android.jar"
 KOTLINC="$TOOLS/kotlinc/bin/kotlinc"
-PKG=lan.syshlt.bluetooth
+PKG=com.systemhalted.bluetooth
 APK=bluetooth.apk
 
 CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"

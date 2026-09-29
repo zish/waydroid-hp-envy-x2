@@ -39,7 +39,7 @@ SDK="$TOOLS/sdk"
 BT="$SDK/build-tools/34.0.0"
 PLATFORM="$SDK/platforms/android-33/android.jar"
 KOTLINC="$TOOLS/kotlinc/bin/kotlinc"
-PKG=lan.syshlt.quatmon
+PKG=com.systemhalted.quatmon
 APK=quat-monitor.apk
 
 # Waydroid's data root for the session user; the app's files live under it.

@@ -29,7 +29,7 @@
 
 set -u
 
-PKG=lan.syshlt.bluetooth
+PKG=com.systemhalted.bluetooth
 TILE="custom($PKG/$PKG.BtTileService)"
 STOCK=bt
 BACKUP=/var/lib/waydroid-btd/qs-tiles.orig

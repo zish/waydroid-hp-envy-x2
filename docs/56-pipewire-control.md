@@ -163,7 +163,7 @@ different states, and on a quiet host both would otherwise look like nothing at 
 btd's profile lives at
 
 ```
-~jmelanso/.local/share/waydroid/data/data/lan.syshlt.bluetooth/files/btd.json
+~jmelanso/.local/share/waydroid/data/data/com.systemhalted.bluetooth/files/btd.json
 ```
 
 measured as uid 10213, mode 0600, inside a `drwxr-x--x` directory. That is **real kernel DAC

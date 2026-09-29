@@ -33,7 +33,7 @@ SDK="$TOOLS/sdk"
 BT="$SDK/build-tools/34.0.0"
 PLATFORM="$SDK/platforms/android-33/android.jar"
 KOTLINC="$TOOLS/kotlinc/bin/kotlinc"
-PKG=lan.syshlt.drmprobe
+PKG=com.systemhalted.drmprobe
 APK=drm-probe.apk
 
 # Waydroid's data root for the session user. NOT /var/lib/waydroid/data, which

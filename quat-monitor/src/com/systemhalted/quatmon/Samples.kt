@@ -1,4 +1,4 @@
-package lan.syshlt.quatmon
+package com.systemhalted.quatmon
 
 import kotlin.math.abs
 import kotlin.math.acos

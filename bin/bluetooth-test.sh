@@ -14,7 +14,7 @@
 
 set -u
 
-PKG=lan.syshlt.bluetooth
+PKG=com.systemhalted.bluetooth
 PORT=7712
 pass=0; fail=0; skip=0
 

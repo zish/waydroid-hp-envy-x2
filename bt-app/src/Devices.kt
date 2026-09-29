@@ -1,4 +1,4 @@
-package lan.syshlt.bluetooth
+package com.systemhalted.bluetooth
 
 import org.json.JSONObject
 

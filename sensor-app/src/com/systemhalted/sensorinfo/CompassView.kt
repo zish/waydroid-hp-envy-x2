@@ -14,7 +14,7 @@
  * and label positions are built once per size and then drawn under a single
  * canvas rotation. See AttitudeView for why that mattered.
  */
-package lan.syshlt.sensorinfo
+package com.systemhalted.sensorinfo
 
 import android.content.Context
 import android.graphics.Canvas

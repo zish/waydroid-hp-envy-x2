@@ -12,7 +12,7 @@
   Netflix's privileges.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="lan.syshlt.drmprobe"
+    package="com.systemhalted.drmprobe"
     android:versionCode="1"
     android:versionName="1.0">
 
