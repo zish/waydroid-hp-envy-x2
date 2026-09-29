@@ -404,25 +404,50 @@ string Android reports through the sensors HAL, so changing it changes observabl
      that will compile it, and the LDFLAGS defect found during review — the builder's `CXXFLAGS`
      were on the compile line only, silently discarding `-flto=auto` and half of annobin's
      instrumentation — is the kind of thing only that build will confirm is now right.
-2. **Move the APKs into their own GitHub repositories**, one per app, each with its own CI/CD.
-   Added at the owner's request, 2026-09-22. There are six — [media-app/](../media-app)
-   (`lan.syshlt.removablemedia`), [sensor-app/](../sensor-app) (`…sensorinfo`),
-   [bt-app/](../bt-app) (`…bluetooth`), [quat-monitor/](../quat-monitor) (`…quatmon`),
-   [drm-probe/](../drm-probe) (`…drmprobe`) and [touch-probe/](../touch-probe)
-   (`…touchprobe`) — and they have nothing in common
-   with the host packaging: a different toolchain (757 MB of SDK and kotlinc against `rpmbuild`),
-   a different distribution channel (F-Droid against an RPM repo), a different signing story
-   (an Android keystore against a GPG key), and a release cadence that has no reason to match.
-   Keeping them here means every APK change drags the RPM pipeline along and vice versa. Fix the
-   debug-keystore problem above as part of the move, not after it — a published APK signed with a
-   throwaway key cannot be un-published.
-   One decision the owner still has to make: only three of the six are *products* — Removable
-   Media, Sensor Info and Bluetooth. `quat-monitor`, `drm-probe` and `touch-probe` are
-   instruments, built to settle a question and read once
-   ([docs/20](20-quat-monitor.md), [docs/21](21-netflix-widevine.md), and the multitouch
-   count respectively), and publishing them to F-Droid would be publishing a debugging tool as
-   an app. They may be better as one `waydroid-probes` repository, or as branches of the notes
-   they belong to. The three products are the F-Droid candidates.
+2. **Move the APKs into their own GitHub repositories**, one per app, each with its own CI/CD,
+   pulled back in here as **git submodules**. Added at the owner's request 2026-09-22; the shape
+   was settled 2026-09-29.
+   **There are seven, not six.** This item was written before [pw-app/](../pw-app) existed
+   (2026-09-25, [docs/56](56-pipewire-control.md)):
+
+   | Directory | Application id | Name | Kind |
+   |---|---|---|---|
+   | [bt-app/](../bt-app) | `lan.syshlt.bluetooth` | Bluetooth | product |
+   | [media-app/](../media-app) | `lan.syshlt.removablemedia` | Removable Media | product |
+   | [pw-app/](../pw-app) | **`com.systemhalted.patchbay`** | Patchbay | product |
+   | [sensor-app/](../sensor-app) | `lan.syshlt.sensorinfo` | Sensor Info | product |
+   | [drm-probe/](../drm-probe) | `lan.syshlt.drmprobe` | DRM Probe | instrument |
+   | [quat-monitor/](../quat-monitor) | `lan.syshlt.quatmon` | Quat Monitor | instrument |
+   | [touch-probe/](../touch-probe) | `lan.syshlt.touchprobe` | Touch Probe | instrument |
+
+   They have nothing in common with the host packaging: a different toolchain (757 MB of SDK and
+   kotlinc against `rpmbuild`), a different distribution channel (F-Droid against an RPM repo), a
+   different signing story (an Android keystore against a GPG key), and a release cadence that has
+   no reason to match. Keeping them here means every APK change drags the RPM pipeline along and
+   vice versa.
+   **Decided 2026-09-29.** *Submodules, not subtrees* — F-Droid builds the app repo at a tag, so
+   that repo has to stand alone and be buildable on its own, and a submodule keeps one source of
+   truth with no duplicated history. *Seven repositories, one per app*, which answers the question
+   this item used to leave open in favour of publishing the instruments too: they were built to
+   settle a question ([docs/20](20-quat-monitor.md), [docs/21](21-netflix-widevine.md), and the
+   multitouch count respectively) and the owner's judgement is that they will be useful to other
+   people, so the `waydroid-probes` single-repository alternative is rejected rather than pending.
+   **Three things this move must not get wrong:**
+   - **The debug keystore, above, is a hard blocker.** Fix it as part of the move, not after it — a
+     published APK signed with a throwaway key cannot be un-published, and losing the keystore
+     breaks updates for every installed user.
+   - **`pw-app` does not share the others' application id.** `com.systemhalted.patchbay` against
+     `lan.syshlt.*` for the other six. An application id is permanent once published, so this is
+     decided before the first tag or not at all.
+   - **The six hardcoded `jmelanso` paths** (item 5 below) are in these build scripts, which are
+     the files moving. Cheapest to fix during the move.
+   **Two decisions still open**, both recorded in [docs/57](57-upstream-queue.md)'s sibling
+   discussion rather than settled here: whether the host-side code that supports an app (e.g.
+   `artifacts/bluetooth/waydroid-btd` and `packaging/mods/btd.mod` for Bluetooth) travels *into*
+   the app's repository to keep APK and daemon versions in lockstep, or stays here with the RPM's
+   `Requires` doing the pinning; and whether the target is f-droid.org's own repository — which
+   means their review queue, their build server and a reproducible standard build these custom
+   `build.sh` scripts may not satisfy — or a repository of our own that users add by hand.
 3. **Write `BUILDING.md`.** Prerequisites in one place, and a native build path for the two
    daemons that does not involve copying `.so` files off bigtab01.
 4. **Reconcile the two packaging systems** — retire the four legacy specs or say clearly in

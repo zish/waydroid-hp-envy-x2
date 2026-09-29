@@ -28,7 +28,7 @@ $ waydroid session start
 
 ### Three things the direct call cannot do
 
-1. **Clear `args.session`.** At [`container_manager.py:265`](https://github.com/waydroid/waydroid/blob/main/tools/actions/container_manager.py#L265), `if "session" in args:` is False in the CLI process, so the service's record survives and the next `do_start()` raises `Already tracking a session` ([`container_manager.py:157`](https://github.com/waydroid/waydroid/blob/main/tools/actions/container_manager.py#L157)).
+1. **Clear `args.session`.** At [`container_manager.py:265`](https://github.com/waydroid/waydroid/blob/main/tools/actions/container_manager.py#L265), `if "session" in args:` is False in the CLI process, so the service's record survives and the next `do_start()` raises `Already tracking a session` ([`container_manager.py:157-158`](https://github.com/waydroid/waydroid/blob/main/tools/actions/container_manager.py#L157-L158)).
 
 2. **Stop the hardware manager.** `services.hardware_manager.stop()` ([`container_manager.py:230`](https://github.com/waydroid/waydroid/blob/main/tools/actions/container_manager.py#L230)) sets a module-global `stopping` and quits `args.hardwareLoop` — both of which live in the *service's* process. In the CLI, `stopping` is a fresh global and `args.hardwareLoop` does not exist; the `AttributeError` is caught and logged as `Hardware service is not even started`. The service's `service_thread` goes on re-registering `waydroidhardware` for a container that is gone.
 
@@ -48,7 +48,9 @@ Route the CLI through the service, falling back to the direct call when it is no
 
 ### Waydroid version
 
-1.6.3. `tools/__init__.py` and `tools/actions/container_manager.py` on `main` are byte-identical to the 1.6.3 files (verified by md5), so this applies to `main` unchanged.
+Found on 1.6.3, and **still present on `main`** — re-checked 2026-09-29 at `c78a305a38a9`. The `stop` dispatch is unchanged at `tools/__init__.py:78-79`, and `tools/actions/container_manager.py` has had no commit since 2026-03-29 (`13cb638f50ea`).
+
+Nothing open addresses it: #2388 refactors this exact file into a dispatch table and keeps the same direct call; #2389, which rewrote `stop()`'s internals, was closed unmerged.
 
 ### Operating System
 

@@ -589,6 +589,24 @@ channel for when the backlight last moved once logcat has rolled. See
 Work the list in order. Don't start a later item until the one before it is either done or
 explicitly parked.
 
+## Sending work upstream
+
+The goals above are about making this machine work. A separate queue tracks what of it belongs to
+Waydroid rather than to us: **[docs/57-upstream-queue.md](docs/57-upstream-queue.md)**, opened
+2026-09-29, which ranks ten reports in sending order and records what has been filed and what came
+back. Two notes sit under it — [docs/09](docs/09-upstream-report.md) for the camera reports and
+[docs/26](docs/26-upstream-container-stop.md) for the container-stop patches.
+
+Two rules from that note are worth having here, because both were learned the expensive way:
+
+- **One concern per report, one concern per commit.** [#2389](https://github.com/waydroid/waydroid/pull/2389)
+  was closed unmerged with the entire review being *"impossible to review"* — 28 files in one
+  commit. Our patches are 12 and 33 lines.
+- **Anything we ship for ourselves stays ours.** The sensors IIO backend, the Wi-Fi daemon, the
+  `ILight` server, the removable-media mechanism and mDNS reflection are this project's output, not
+  upstream submissions; they ship as RPMs and DEBs. Only defects in Waydroid, its images or its own
+  packaging go into the queue.
+
 ## Picking this up again
 
 Start with [docs/06-next-session.md](docs/06-next-session.md) — current state, the immediate next
