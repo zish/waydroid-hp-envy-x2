@@ -8,10 +8,16 @@ The text of each, exactly as sent:
 | **B** | [android_external_minigbm#3](https://github.com/waydroid/android_external_minigbm/issues/3) | [artifacts/upstream/minigbm-issue.md](../artifacts/upstream/minigbm-issue.md) |
 | **A** | [waydroid#2339 (comment)](https://github.com/waydroid/waydroid/issues/2339#issuecomment-5554520688) | [artifacts/upstream/2339-comment.md](../artifacts/upstream/2339-comment.md) |
 | **C** | [#3 (comment)](https://github.com/waydroid/android_external_minigbm/issues/3#issuecomment-5859257287) 2026-09-27 | [artifacts/upstream/minigbm-3-reply.md](../artifacts/upstream/minigbm-3-reply.md) |
+| **D** | [#2339 (comment)](https://github.com/waydroid/waydroid/issues/2339#issuecomment-5900800585) 2026-09-29 | [artifacts/upstream/2339-reply-2.md](../artifacts/upstream/2339-reply-2.md) |
 
 A and B were posted by the user on 2026-09-05, B first so A could link to it. Verified after the fact
 via the public API: the comment body carries the real issue URL, not the `<LINK TO ISSUE B>`
 placeholder.
+
+**D is the 2026-09-29 reply to two comments on #2339 that this note had never read** — see
+[the two outside reports](#2026-09-29-two-outside-reports-on-2339-that-this-note-had-missed) below.
+Posted from this box, fetched back and diffed: identical apart from the trailing newline GitHub
+appends (7083 bytes sent, 7084 returned).
 
 C is the 2026-09-27 reply to the first outside report of the same bug, posted from this box once
 `gh auth login --web` made that possible — see
@@ -190,6 +196,57 @@ just attempt the post: the refusal is explicit and harmless.
 One thing genuinely improved regardless of the token: because the repo is public, a reply can
 **link** the patch and the build script instead of pasting a diff into a comment body. Both were
 offered that way in the 2026-09-27 reply, and all three URLs were confirmed to return 200 first.
+
+## 2026-09-29: two outside reports on #2339 that this note had missed
+
+This note tracked #3 and its own comment A on #2339, and never re-read #2339 itself. It has three
+comments, and the two that are not ours both matter.
+
+**@mcarraglia, 2026-06-30** — Arch/CachyOS, Raptor Lake iGPU, ProXtend UVC webcam. Reports
+`GBM-MESA-WRAPPER: Failed to map the buffer` *and* `ExtCamDevSsn@3.4: format conversion failed!`,
+confirmed at both MJPG and forced YUYV 640x480.
+
+**This retires a hedge that has stood since 2026-09-05.** The section above says of the original
+reporter: *"Their post carries no `Failed to map the buffer` line, so 'their deeper cause is
+identical' stays an inference."* mcarraglia's does carry it, on different hardware with a different
+camera. **Upgraded from inference to cross-hardware confirmation.** Their 640x480 repro also
+separates this from the >720p conversion failure in [docs/11](11-camera-facing.md), which produces
+the identical second line from an unrelated cause.
+
+**@overcookedlobster, 2026-09-17** — Ubuntu, Intel iGPU, v4l2loopback. The substantive one, and
+partly at odds with us.
+
+They wrote a `gbmprobe.c` that `dlopen`s the guest `libgbm_mesa.so` and calls the stable gbm ABI
+with gralloc out of the path: `YV12`, `YU12`, `NV12` and `9997` all fail, `AR24` and `R8` succeed.
+That reproduces [docs/07](07-phase1-android-mesa.md) with a cleaner harness than phase 1 used —
+phase 1 tested `YVU420`, `NV12`, `YUYV` and `FLEX_YCbCr_420`, so the sets overlap in three formats
+and each adds one.
+
+**Where we disagree.** They conclude the R8 fallback cannot carry a camera — "the app would
+GL-sample a grayscale, stride-mismatched image" — and route around it by transplanting
+`minigbm_intel` from WayDroid-ATV, which then aborts SurfaceFlinger with
+`Unable to generate SkSurface` because this image's Mesa cannot render Intel-allocated buffers.
+[docs/08](08-camera-fixed.md) is a working camera on that exact fallback path, so the transplant
+appears to be work the bug does not require.
+
+**What reply D does and does not claim.** It states the measurement and stops there: our
+verification client is Open Camera and theirs is CameraX, and nothing here establishes which path
+Open Camera's preview takes through the buffer, so it does not assert that a CameraX
+`ImageAnalysis` stream is equally happy with an R8-backed flexible-YUV buffer. It asks them to
+apply #3's patch and test, which settles it on the hardware and with the app that motivated the
+concern — and asks them to drop the map clamp while they are there, which is the
+[still-open question](#still-open-is-the-map-clamp-actually-needed) this note has carried since
+2026-09-05.
+
+It also volunteers a phase-1 finding that cuts in their favour: Mesa *can* import a 3-plane
+`YVU420` view of a dmabuf even though it cannot allocate one, and mapping that segfaults. The
+multi-plane route is closed one step further in than the import boundary.
+
+**Two of our own items were independently corroborated** in their comment, which is worth noting
+because both are on [docs/57](57-upstream-queue.md)'s queue: the HAL hardcodes
+`LENS_FACING_EXTERNAL` (rank 7), and they add two edges we had not recorded —
+`kSupportedFourCCs` is only `{MJPEG, Z16}`, and `kMaxBytesPerPixel` rejects v4l2loopback's stock
+4 B/px MJPEG.
 
 ## Checklist
 
