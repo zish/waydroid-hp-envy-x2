@@ -464,6 +464,13 @@ string Android reports through the sensors HAL, so changing it changes observabl
      surface. **No `bigtab01` and no `syshlt` remains anywhere in app or daemon code.**
    - **The six hardcoded `jmelanso` paths** (item 5 below) are in these build scripts, which are
      the files moving. Cheapest to fix during the move.
+   **Versioning is designed, in [docs/58](58-api-versioning.md).** The split is what creates the
+   problem — once each APK has its own cadence, the app and its daemon stop moving together — so the
+   daemon package version, the API version and the app version become three independent numbers,
+   with the app and daemon negotiating an API range at `auth`. Two findings there bear on this item:
+   the likelier field failure is the app being *ahead* of the daemon, not behind, because F-Droid
+   updates in the background while an RPM waits for `dnf`; and `waydroid-mediad` cannot negotiate at
+   all, being fire-and-forget broadcasts, so its payload becomes append-only instead.
    **Two decisions still open**, both recorded in [docs/57](57-upstream-queue.md)'s sibling
    discussion rather than settled here: whether the host-side code that supports an app (e.g.
    `artifacts/bluetooth/waydroid-btd` and `packaging/mods/btd.mod` for Bluetooth) travels *into*
