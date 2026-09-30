@@ -162,14 +162,87 @@ Cross-cutting:
 10. A line in each `.mod` changelog whenever `API_MAX` moves, since that is the only place a user
     can find out that an app update is now required.
 
-## Decisions still open
+## The compatibility policy, settled 2026-09-30
 
-- **Does `api_min` ever rise?** Keeping it at 1 forever is the friendliest policy and the most
-  expensive to maintain, because every format the daemon has ever spoken stays in the code. A policy
-  like "support the previous two API versions" is cheaper and needs stating now, since it determines
-  whether step 2 above is a branch or a dispatch table.
-- **Is the F-Droid target our own repository or f-droid.org?** The prompt's URL depends on it, and
-  that is the other decision still open from [docs/53](53-release-readiness.md) item 2.
-- **Does the app-too-new screen offer a downgrade?** F-Droid can install an older APK. Offering it
-  would recover the common failure without touching the host, at the cost of telling users to move
-  backwards.
+**The app carries the compatibility, not the daemon. `api_min = api_max - 2`.**
+
+Which side carries it decides which failure disappears, and they are not equally likely:
+
+| Compatibility lives in | The failure it removes | How often that failure happens |
+|---|---|---|
+| **the app** — wide `api_min` | app ahead of daemon | **the common one**: F-Droid updates in the background |
+| the daemon — low `api_min` | app behind daemon | the rare one: needs a user who stopped updating apps |
+
+So an app speaking API 5 also speaks 4 and 3, and it works against any daemon released in that
+window without anybody doing anything. The daemon's `api_min` rises only when keeping an old format
+alive becomes genuinely unmaintainable, which is a deliberate act with a changelog line.
+
+**A trailing window of two, on a single integer, is the whole rule** — there is no semver here to
+take "major versions" from, and mapping one onto the other would only add a translation step to get
+wrong.
+
+### The refusal screen is a last resort, not the mechanism
+
+With the app trailing by two, no-overlap should be rare, and the design goal is that the screen is
+almost never shown. What should happen far more often is **graceful degradation**: if an app can
+speak 5 but the daemon tops out at 3, it connects at 3 and hides whatever 4 and 5 added. Refusing
+outright is correct only when the ranges do not intersect at all.
+
+That is worth stating because it changes step 7: the app does not merely *record* the agreed version,
+it gates features on it.
+
+### No downgrade button
+
+Tempting, and wrong, for one reason that overrides the rest: **F-Droid's auto-update would push the
+user straight back into the break.** A downgrade is not a stable state unless they also turn off
+updates for that app, so the button would hand out a loop and call it a fix. Android's downgrade
+handling is the secondary objection — same signing key, but a lower `versionCode` needs
+`allowDowngrade`, and an older app may not read the newer app's stored data.
+
+It stays as a *documented* escape hatch for the one case that has no other answer: a host that cannot
+be updated at all, because the distro has not packaged the newer daemon yet. That belongs in the
+user docs, not behind a button.
+
+## Publishing: f-droid.org, and CI cannot deploy to it
+
+Settled 2026-09-30: **f-droid.org**, for the discovery and the update path an own repository does not
+give. One correction to how this gets built, because it changes the CI design:
+
+**You do not deploy to f-droid.org.** Submission is a merge request against the `fdroiddata` GitLab
+repository carrying a `metadata/<applicationId>.yml`; F-Droid's own buildserver then fetches a
+**tagged commit** of the app's repository and builds it. No APK is ever pushed. Publication runs
+roughly 24–48 hours behind the metadata merge.
+
+So CI's job is not deployment. It is: make the tag F-Droid builds from, and make that build
+reproducible.
+
+| Step | Where |
+|---|---|
+| tag `v<versionName>` on the app repo — F-Droid requires the tag to match the manifest | app repo CI |
+| build, sign with the release key from Actions secrets, publish a GitHub release | app repo CI |
+| `metadata/com.systemhalted.<app>.yml` with `Binaries:` pointing at that release asset, plus `AllowedAPKSigningKeys` | one-time MR to `fdroiddata`, then a version bump per release |
+| build from source, compare against our binary, publish ours if it reproduces | F-Droid buildserver |
+
+`Binaries:` is what keeps **our** signature on the published APK rather than F-Droid's, and that
+matters beyond tidiness: if F-Droid signs and we also ever serve the same application id ourselves,
+Android refuses the cross-update and users are stranded on whichever they installed first.
+
+### The real risk is the build, not the pipeline
+
+F-Droid's buildserver can build a non-Gradle project — `build:` takes arbitrary shell, `output:` is a
+glob to the resulting APK, `sudo:` can install dependencies — so the hand-rolled
+`aapt2`/`kotlinc`/`d8` scripts are not disqualifying. Two things are unproven and should be settled
+before the first merge request rather than during review:
+
+- **`kotlinc` is not part of a standard Android build image.** Ours is fetched by `build.sh --deps`
+  from a GitHub release; F-Droid builds are network-restricted after the source fetch, so that
+  download is the thing most likely to fail. Either `sudo:` installs a distro Kotlin compiler, or the
+  app repos move to Gradle for the F-Droid path, which is a real cost against the no-Gradle decision
+  every one of these apps was built on.
+- **Reproducibility needs deterministic packaging** — zip timestamps and ordering — and the
+  toolchain is already pinned hard (cmdline-tools `11076708`, Kotlin `2.0.21`, build-tools `34.0.0`,
+  `android-33`), which is the hard part already done.
+
+An own F-Droid repository — `fdroid update` in CI, served from GitHub Pages — remains the cheap
+interim while those two are settled, and is what the [docs/53](53-release-readiness.md) debug-keystore
+blocker has to be fixed for either way. It is not the destination.
