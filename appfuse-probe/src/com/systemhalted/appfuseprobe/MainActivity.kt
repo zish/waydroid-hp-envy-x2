@@ -2,7 +2,7 @@
  * Copyright 2026 Jeremy Melanson
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
-package lan.syshlt.appfuseprobe
+package com.systemhalted.appfuseprobe
 
 import android.app.Activity
 import android.graphics.Typeface

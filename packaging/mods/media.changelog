@@ -1,7 +1,7 @@
 * Wed Sep 30 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
 - BREAKING, and it needs the matching app: the broadcast action is now
   waydroid.ext.media.VOLUME_MOUNTED / _UNMOUNTED, where it was
-  lan.syshlt.bigtab01.media.* (and briefly com.systemhalted.bigtab01.media.*
+  com.systemhalted.bigtab01.media.* (and briefly com.systemhalted.bigtab01.media.*
   while the app ids were being corrected). The old name put one laptop on one
   private network into the public intent surface of an app about to be
   published; the new one names the host/container channel instead.

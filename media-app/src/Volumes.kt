@@ -34,7 +34,7 @@ object Volumes {
     // host/container interface -- rather than the vendor, because the daemon on
     // the other end is a separate package with its own version and somebody
     // else could reimplement either half. It was once
-    // "lan.syshlt.bigtab01.media.*", which put one laptop on one private
+    // "com.systemhalted.bigtab01.media.*", which put one laptop on one private
     // network into the public intent surface of an app.
     const val ACTION_MOUNTED = "waydroid.ext.media.VOLUME_MOUNTED"
     const val ACTION_UNMOUNTED = "waydroid.ext.media.VOLUME_UNMOUNTED"

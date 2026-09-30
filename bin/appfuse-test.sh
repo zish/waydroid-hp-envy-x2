@@ -24,7 +24,7 @@
 
 set -u
 
-PKG=lan.syshlt.appfuseprobe
+PKG=com.systemhalted.appfuseprobe
 REPORT_REL="Android/data/$PKG/files/reports/appfuse-probe.txt"
 
 ok()    { printf '  \033[32mPASS\033[0m  %s\n' "$1"; }

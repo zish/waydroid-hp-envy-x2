@@ -437,7 +437,7 @@ string Android reports through the sensors HAL, so changing it changes observabl
      published APK signed with a throwaway key cannot be un-published, and losing the keystore
      breaks updates for every installed user.
    - ~~**`pw-app` does not share the others' application id.**~~ **Settled 2026-09-29, in
-     `pw-app`'s favour.** The other six were `lan.syshlt.*` and are now `com.systemhalted.*`: 52
+     `pw-app`'s favour.** The other six were `com.systemhalted.*` and are now `com.systemhalted.*`: 52
      files, the four nested source trees moved with `git mv`, and all six APKs rebuilt and their
      ids read back out with `aapt2 dump packagename`. `pw-app` was already correct and is
      untouched. An application id is permanent once published, which is why this was worth doing
@@ -455,7 +455,7 @@ string Android reports through the sensors HAL, so changing it changes observabl
      owner's rule is that only application ids carry the domain, and this string is a contract
      between an RPM and an APK rather than something either one owns. Naming the channel —
      the `waydroid-ext` host/container interface, matching the RPM prefix already in use — survives
-     either half being reimplemented by somebody else. It had been `lan.syshlt.bigtab01.media.*`,
+     either half being reimplemented by somebody else. It had been `com.systemhalted.bigtab01.media.*`,
      which put one laptop on one private LAN into the public intent surface of an app.
      The same rule retired the last other instance: `waydroid-btd`'s `org.bluez.Agent1` object path
      is now `/waydroid/ext/btd/agent`, where the app-id rename had briefly left it at
