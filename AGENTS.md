@@ -475,6 +475,95 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    `waydroid-ext-btd` but the app is not; no BLE GATT. See
    [docs/50-bluetooth.md](docs/50-bluetooth.md).
 
+9. **AppFuse — `openProxyFileDescriptor` for apps that synthesise their bytes.** **Added
+   2026-09-24 at the owner's request; diagnosed the same day, fixed, packaged, deployed and
+   verified 2026-09-25. `waydroid-ext-appfuse` 1.0.0 is layered and live on bigtab01 — the
+   tenth `waydroid-ext-*` package on that machine.**
+   AppFuse is how an app serves a *real* file descriptor for content it has no file for:
+   `vold` mounts a FUSE filesystem at `/mnt/appfuse/<uid>_<mountId>` and the **app itself**
+   answers the protocol through a `ProxyFileDescriptorCallback`. Every `DocumentsProvider`
+   that synthesises content needs it — cloud clients, archive browsers, MTP hosts, encrypted
+   vaults. Such an app installs and browses perfectly and then fails the moment anything
+   opens a document. **This is not the FUSE from goal 6**; that is MediaProvider serving
+   `/storage/emulated/0` from a lower directory on the host, and it always worked, which is
+   part of why this misleads.
+   **The fault was met in a real project, not constructed**: `../crippy`, an encrypted-vault
+   `DocumentsProvider`, browsed correctly and failed **every** `openDocument` with
+   `IllegalStateException: Failed to mount`, `vold` logging `Failed to mount
+   /mnt/appfuse/<uid>_<id>: Invalid argument`.
+   **The cause was the host's SELinux policy, and three identifiers were missing, not one.**
+   `vold` asks `mount(2)` for `context="u:object_r:app_fuse_file:s0"` and
+   `fscontext=u:object_r:app_fusefs:s0` — read out of this machine's own
+   `/var/lib/waydroid/rootfs/system/bin/vold` — and a MAINLINE Waydroid runs against the
+   *host's* policy, not Android's. Both **types** are Android-only, *and so is the SELinux
+   **user** `u`*: `u:object_r:fusefs_t:s0` is invalid here with a type Fedora certainly has.
+   Declaring the two types alone would still have returned `EINVAL`.
+   **The fix is [artifacts/appfuse/waydroid_appfuse.cil](artifacts/appfuse/waydroid_appfuse.cil)**
+   — a host CIL module of declarations plus **exactly one `allow` rule**, installed by
+   [artifacts/appfuse/install.sh](artifacts/appfuse/install.sh). Nothing inside the Android
+   image is touched. It needs no unit and no boot-time loader, unlike
+   [docs/42](docs/42-backlight-selinux.md): `semodule -i` persists it to
+   `/etc/selinux/targeted/active/modules/`, so it survives a reboot by itself. **No container
+   restart** — `vold` mounts on demand, so the next call already uses the new policy and the
+   kiosk never drops.
+   **Every line of it is load-bearing, proven by removal**, and the two failure modes are
+   different from each other, which is the useful part: dropping `(typeattributeset file_type
+   …)` gets `IOException: FuseUnavailableMountException` — the mount *succeeds* and the app
+   still cannot use it — while dropping the one `(associate)` rule goes back to `Failed to
+   mount`. A first draft carried four `container_runtime_t` rules and a wide file/dir access
+   set; **all of it was redundant**, because that domain already holds those permissions
+   through the base policy's attribute-based rules. Assigning `file_type` and
+   `filesystem_type` is what makes existing rules apply to the new types, and it does the work
+   the explicit rules would only have duplicated, less safely.
+   **The trap here is worth more than the fix: `ausearch` is completely clean for this.** A
+   context that cannot be *parsed* never becomes an AVC, so the audit subsystem has nothing to
+   say and the obvious first move gives the wrong answer. The kernel does say it, in `dmesg`:
+   `SELinux: security_context_str_to_sid (u:object_r:app_fuse_file:s0) failed with errno=-22`.
+   That is `EINVAL`. This is not a `dontaudit` like [docs/42](docs/42-backlight-selinux.md)'s
+   sysfs write or [docs/35](docs/35-wifi-stage5.md)'s binder `transfer` — it is *pre-audit*.
+   Different mechanism, same wrong first answer.
+   **Verified twice.** [appfuse-probe/](appfuse-probe) is a probe app that calls the one API
+   under suspicion and nothing else — deliberately not a `DocumentsProvider`, so a failure has
+   one possible owner — and it passes 8 of 8 correctness checks and 8 of 8 simultaneous fds,
+   measuring a 128 KiB maximum `onRead`. Then the real app, by A/B: crippy's `openDocument`
+   serves its 4096-byte document, `semodule -r` puts it back to `Failed to mount`, `semodule
+   -i` restores it. Drive both with [bin/appfuse-test.sh](bin/appfuse-test.sh).
+   **Two findings about the probe itself.** Its first version was measuring the **page cache**
+   — the 200 random preads ran after a sequential read had pulled the whole file in, so they
+   proved the bytes right but not that random access reached FUSE; the cold-fd check that
+   fixes it is the one that matters. And `appfuse-test.sh` was being **eaten by its own
+   `ausearch`**: delivered to `sh -s` on stdin, a command that reads stdin consumes the rest of
+   the script, and the symptom is not an error but the script stopping mid-run and **exiting
+   0**. Every stdin-touching command in it now has `</dev/null`.
+   **Packaged as `waydroid-ext-appfuse`** ([packaging/mods/appfuse.mod](packaging/mods/appfuse.mod)),
+   `noarch`, rpmlint landing on exactly the `backlight` baseline. The module **must not load
+   from an RPM `%post`** — on an rpm-ostree host a scriptlet runs against the compose and never
+   reaches the booted system, which is how `waydroid-ext-backlight` was found doing nothing on
+   its first real install — so it loads from `waydroid-appfuse-policy.service` at boot. That
+   loader is idempotent by CIL hash rather than module name, and it **verifies** rather than
+   trusting `semodule`'s exit status: it writes each context vold needs to
+   `/sys/fs/selinux/context`, which needs no privilege and no setools, and `seinfo` is
+   installed on neither machine.
+   **Layered on 2026-09-25**, and the migration is the first where the shadow trap was set
+   deliberately and watched to fire: the policy had been installed by hand into `/usr/local`
+   first, so the machine entered the transaction already shadowed, and `FragmentPath` really was
+   `/etc/systemd/system/…` with `PATH` resolving to `/usr/local/bin` until the hand-placed files
+   were removed. Both warning branches fired — identical copies warn and stop, a differing one
+   adds *they DIFFER* and `--verify` exits 3. Only the files were removed, byte-compared and
+   backed up first, **not** `install.sh --uninstall`, which would have run `semodule -r` and
+   broken AppFuse for the gap; the module stayed loaded throughout. `LiveCommit b0adde8d…`
+   equals the pending `Commit`. Note `systemctl is-enabled` says **`disabled`** and that is
+   correct — the enable symlink ships under `/usr/lib`, not `/etc`, and `multi-user.target`
+   `Wants` the unit. Full record in [packaging/README.md](packaging/README.md).
+   **Still open**: the boot unit has only been exercised by `systemctl restart`, never by an
+   actual boot. **Write access is untested**, everything so far being
+   `MODE_READ_ONLY`, so `onWrite` and `onFsync` have never run here; crippy's own instrumented
+   suite has not been watched turning green, which needs adb-over-TCP enabled in the container;
+   and only this one image has been tested (LineageOS 20 / API 33 / x86_64 / MAINLINE). Also
+   rejected and recorded in case the policy route ever closes: byte-patching the option string
+   out of `vold`.
+   See [docs/55-appfuse.md](docs/55-appfuse.md).
+
 **Screen brightness — DONE, and not on the list above.** Added at the owner's request on
 2026-09-09, between Wi-Fi Stage 5 and removable media. Android's brightness slider now drives the real
 panel backlight. The machine has **no ambient light sensor** — the ITE8350 declares only five

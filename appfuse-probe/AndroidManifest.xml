@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AppFuse Probe - does StorageManager.openProxyFileDescriptor() work in this
+  container, and if it does, does the fd behave like a file? Goal 9; see
+  docs/55-appfuse.md.
+
+  Same house style as the other probes: depends on NOTHING but the platform. No
+  AndroidX, no Compose, no coroutines, no Gradle. See build.sh.
+
+  No permissions are declared, and none are needed. openProxyFileDescriptor is
+  available to any app, and the report goes to this app's own external files
+  directory. That is deliberate: the probe must run with exactly the privileges
+  an ordinary app has, or its answer would not be about ordinary apps.
+
+  minSdkVersion is 26 because that is the API level openProxyFileDescriptor was
+  added in - the floor for the feature itself, not a preference.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="lan.syshlt.appfuseprobe"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="33" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:launchMode="singleTop"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

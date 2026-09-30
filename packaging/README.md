@@ -152,6 +152,7 @@ plain — and asserts the harness reaches the right verdict on each.
 | `hw-envyx2` | yes | yes | **yes** | same, plus `no-%check-section` — a metapackage has nothing to check |
 | `wifi-sync` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
 | `dexopt` | yes | yes | **yes** | plus `non-etc-or-var-file-marked-as-conffile` — **written, not shipped**, see below |
+| `appfuse` | yes | yes | **yes** | yes — the backlight baseline exactly: `no-signature`, `invalid-url Source0`, `no-%check-section`, `no-manual-page-for-binary` |
 
 ### The seven host packages added 2026-09-27
 
@@ -767,6 +768,65 @@ migration rather than treating it as a formality.
   `systemctl restart` to do it; see the note under the second migration for why `start` did
   nothing.
 - The container was never restarted and the kiosk session survived the whole migration.
+
+### Fourth migration — AppFuse, done 2026-09-25
+
+`waydroid-ext-appfuse` 1.0.0 is installed and live, which makes **ten** `waydroid-ext-*`
+packages layered on bigtab01. `LiveCommit b0adde8d…` equals the pending deployment's `Commit`,
+so the running system is again already what the next boot lands on and nothing is owed.
+
+`rpm-ostree install --apply-live` took the deployment `Diff` from *2 upgraded, 4 added* to
+*2 upgraded, 5 added* — this package and nothing else. No other layered package was pulled
+forward, unlike the first migration, where re-resolving the layer moved 71 of them.
+
+**This is the first migration where the shadow trap was set deliberately and watched to
+fire.** The policy had been installed by hand into `/usr/local` while the fix was being
+developed, so the machine went into the transaction already shadowed, and the loader's
+untested warning path was the thing being tested:
+
+```
+note: using /usr/local/share/waydroid-appfuse/waydroid_appfuse.cil, which shadows
+      the packaged /usr/share/waydroid-appfuse/waydroid_appfuse.cil
+```
+
+Both branches were exercised. With the two files byte-identical it warns and says nothing
+more; with one deliberately altered it adds *"and they DIFFER — the packaged policy is not
+the one in force"* and `--verify` exits **3**, naming both hashes. That is the path that
+silently defeated `backlight` 1.0.2 after a migration, and it now has a test behind it rather
+than an argument.
+
+Measured before removing anything, which is the evidence that the trap is real and not
+theoretical:
+
+| | before removal | after removal |
+|---|---|---|
+| `FragmentPath` | `/etc/systemd/system/…` | `/usr/lib/systemd/system/…` |
+| loader on `PATH` | `/usr/local/bin/waydroid-appfuse-policy` | `/usr/sbin/waydroid-appfuse-policy`, owned by the package |
+
+Removed after confirming both hand-placed files were **byte-identical** to the packaged ones,
+and backed up first to `~jmelanso/waydroid-handplaced-appfuse-2026-09-25.tar.gz` (5 entries):
+the `/usr/local` CIL and loader, the `/etc/systemd/system` unit and its enable symlink. Only
+the *files* were removed — not `install.sh --uninstall`, which would have run `semodule -r`
+and broken AppFuse for the gap. The module stayed loaded throughout, so no `openDocument` ever
+failed during the migration.
+
+`appfuse` 1.0.0 cost no policy rebuild. The packaged CIL is byte-identical to the one loaded by
+hand (`9d41a43c…`), so the stamp already matched, `semodule` was not re-run, and the loader
+reports *already loaded and current* with both of vold's contexts accepted. `is-enabled` says
+`disabled`, which is the reporting artefact recorded above — `multi-user.target` Wants the unit,
+and `systemctl restart` gives `Result=success`.
+
+Verified afterwards: `bin/appfuse-test.sh` passes end to end (8 of 8 correctness checks, 8 of 8
+simultaneous fds, 128 KiB maximum `onRead`), and crippy's real `openDocument` serves its
+4096-byte document through the packaged policy. `systemctl --failed` lists only
+`systemd-remount-fs`, failing since 2026-09-12 and ordinary read-only-root behaviour.
+
+**One wording nit found and not fixed.** On the drift report the loader calls the CIL it would
+load "packaged" even when the selected file is a `/usr/local` shadow, so the DIFFER case reads
+`loaded <a>, packaged <b>` where `<b>` is the hand-staged file. The preceding warning already
+names which file is in use, so it is confusing rather than wrong. It is inherited verbatim from
+`waydroid-backlight-policy`, which has it too, and fixing it in one and not the other would be
+worse than leaving both. Worth a coordinated one-word change next time either is versioned.
 
 ## What was deployed on bigtab01 before that — audited 2026-09-15
 

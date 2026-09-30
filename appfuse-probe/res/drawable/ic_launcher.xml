@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A document with a descriptor threaded through it: bytes that have no file behind
+     them arriving as an ordinary fd. Vector drawable, so no density buckets. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp"
+    android:viewportWidth="48" android:viewportHeight="48">
+    <path android:fillColor="#004D40"
+        android:pathData="M0,0h48v48h-48z" />
+    <path android:fillColor="#B2DFDB"
+        android:pathData="M13,8 h14 l8,8 v18 h-22 z" />
+    <path android:fillColor="#004D40"
+        android:pathData="M27,8 l8,8 h-8 z" />
+    <path android:strokeColor="#FFD54F" android:strokeWidth="3"
+        android:fillColor="#00000000" android:strokeLineCap="round"
+        android:pathData="M6,40 L42,40" />
+    <path android:fillColor="#FFD54F"
+        android:pathData="M36,35 L44,40 L36,45 z" />
+</vector>

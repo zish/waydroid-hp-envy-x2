@@ -1,0 +1,20 @@
+* Fri Sep 25 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Teaches the host's SELinux policy the three identifiers vold's
+  AppFuse mount asks for, so StorageManager.openProxyFileDescriptor() works and
+  apps whose documents are generated rather than stored can open them.
+- Three identifiers, not two: both types are Android-only and so is the SELinux
+  user `u`, which is the part easy to miss -- u:object_r:fusefs_t:s0 is invalid
+  on a Fedora host with a type Fedora certainly has, so declaring the types
+  alone still returns EINVAL.
+- Declarations plus exactly one allow rule, each proven load-bearing by removal.
+  A first draft's four container_runtime_t rules and wide file access were all
+  redundant: assigning the file_type and filesystem_type attributes is what
+  makes the base policy's existing rules apply to the new types.
+- Loaded from a boot-time unit rather than only from %%post, because on an
+  rpm-ostree host a scriptlet runs against the compose and the policy never
+  reaches the booted system -- the lesson waydroid-ext-backlight learned on its
+  first real install.
+- The loader verifies rather than assuming: it writes each context vold needs to
+  /sys/fs/selinux/context and reports what the kernel refuses to parse. semodule
+  exiting 0 is not evidence the fix is in force, and a parse failure produces no
+  AVC at all, so ausearch stays silent while dmesg carries the reason.
