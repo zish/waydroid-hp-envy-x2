@@ -1,3 +1,18 @@
+* Wed Sep 30 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
+- BREAKING, and it needs the matching app: the broadcast action is now
+  waydroid.ext.media.VOLUME_MOUNTED / _UNMOUNTED, where it was
+  lan.syshlt.bigtab01.media.* (and briefly com.systemhalted.bigtab01.media.*
+  while the app ids were being corrected). The old name put one laptop on one
+  private network into the public intent surface of an app about to be
+  published; the new one names the host/container channel instead.
+- The action is a contract between this daemon and the APK, and a mismatch is
+  SILENT: `am broadcast` reports result=0 and fires nothing, with no error in
+  logcat or anywhere else. So this release and waydroid-ext-media-app must be
+  deployed together. A stale app on a new daemon shows no notifications and
+  looks like a broken receiver.
+- The app id it broadcasts to also changed, to com.systemhalted.removablemedia,
+  which is what the eject-marker path is built from.
+
 * Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First package. Host-side removable media for Waydroid's Android: USB sticks,
   SD cards and optical data discs mounted on the host at

@@ -49,8 +49,8 @@
             android:name=".VolumeReceiver"
             android:exported="true">
             <intent-filter>
-                <action android:name="com.systemhalted.bigtab01.media.VOLUME_MOUNTED" />
-                <action android:name="com.systemhalted.bigtab01.media.VOLUME_UNMOUNTED" />
+                <action android:name="waydroid.ext.media.VOLUME_MOUNTED" />
+                <action android:name="waydroid.ext.media.VOLUME_UNMOUNTED" />
             </intent-filter>
         </receiver>
     </application>

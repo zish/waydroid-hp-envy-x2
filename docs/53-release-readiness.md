@@ -449,11 +449,19 @@ string Android reports through the sensors HAL, so changing it changes observabl
      on bigtab01 are now *different applications* as far as Android is concerned: the daemons will
      address the new ids and the old packages will sit there orphaned, so that migration starts
      with uninstalling them.
-     **Still wrong, and not from this change:** the removable-media broadcast action is
-     `com.systemhalted.bigtab01.media.VOLUME_MOUNTED`. It matches on both sides so it works, but it
-     names one laptop in the public intent surface of an app about to be published. It wants to be
-     `com.systemhalted.media.VOLUME_*` before the first tag — a two-line change in
-     `media-app/src/Volumes.kt`, its manifest, and `waydroid-mediad`.
+     ~~**Still wrong, and not from this change:** the removable-media broadcast action names one
+     laptop.~~ **Fixed 2026-09-30**, and not the way this entry proposed. The action is now
+     **`waydroid.ext.media.VOLUME_MOUNTED` / `_UNMOUNTED`**, not `com.systemhalted.media.*`: the
+     owner's rule is that only application ids carry the domain, and this string is a contract
+     between an RPM and an APK rather than something either one owns. Naming the channel —
+     the `waydroid-ext` host/container interface, matching the RPM prefix already in use — survives
+     either half being reimplemented by somebody else. It had been `lan.syshlt.bigtab01.media.*`,
+     which put one laptop on one private LAN into the public intent surface of an app.
+     The same rule retired the last other instance: `waydroid-btd`'s `org.bluez.Agent1` object path
+     is now `/waydroid/ext/btd/agent`, where the app-id rename had briefly left it at
+     `/com/systemhalted/btd/agent`. Internal — BlueZ registers whatever path it is handed and
+     nothing outside the daemon names it — but it was the only private domain left in the D-Bus
+     surface. **No `bigtab01` and no `syshlt` remains anywhere in app or daemon code.**
    - **The six hardcoded `jmelanso` paths** (item 5 below) are in these build scripts, which are
      the files moving. Cheapest to fix during the move.
    **Two decisions still open**, both recorded in [docs/57](57-upstream-queue.md)'s sibling

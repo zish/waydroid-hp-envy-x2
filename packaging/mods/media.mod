@@ -61,7 +61,7 @@
 # be the vendored binary docs/54-no-vendored-binaries.md rules out.
 # media-app/build.sh --install is the delivery mechanism.
 
-VERSION=1.0.0
+VERSION=1.1.0
 RELEASE=1
 KIND=host
 ARCH=noarch

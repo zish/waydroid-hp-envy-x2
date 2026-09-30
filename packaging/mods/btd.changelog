@@ -1,3 +1,18 @@
+* Wed Sep 30 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
+- Follows the app id rename: DEFAULT_PACKAGE is com.systemhalted.bluetooth,
+  where it was lan.syshlt.bluetooth. This is load-bearing rather than cosmetic --
+  the daemon writes the app's connection profile into <data>/data/<package>/
+  files/btd.json, so a wrong constant means the app can never find the daemon.
+  1.0.0 on a host with the renamed app logs "lan.syshlt.bluetooth is not
+  installed yet; will keep offering the profile", forever.
+- Installing this retires the interim /etc/systemd/system/waydroid-btd.service.d/
+  package.conf drop-in that passed --package to bridge the gap. Remove the
+  drop-in in the same transaction, not before.
+- The org.bluez.Agent1 object path is now /waydroid/ext/btd/agent, where it was
+  /lan/syshlt/btd/agent. Internal: BlueZ registers whatever path it is given and
+  nothing outside this daemon names it. Renamed so no private LAN domain is left
+  anywhere in the D-Bus surface.
+
 * Tue Sep 22 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First package. Host-side BlueZ management for Waydroid's Android, exporting
   an org.bluez.Agent1 so pairing prompts can be answered from inside the

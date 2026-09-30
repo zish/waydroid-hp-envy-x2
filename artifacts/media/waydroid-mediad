@@ -407,7 +407,7 @@ def make_notifier(enabled):
     Failure is never fatal -- the mount is useful whether or not anything in
     Android is listening yet.
     """
-    action = "com.systemhalted.bigtab01.media.VOLUME_%s"
+    action = "waydroid.ext.media.VOLUME_%s"
     package = "com.systemhalted.removablemedia"
 
     def notify(event, target, dev):

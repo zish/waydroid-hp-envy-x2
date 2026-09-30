@@ -22,8 +22,22 @@ import android.provider.DocumentsContract
  */
 object Volumes {
 
-    const val ACTION_MOUNTED = "com.systemhalted.bigtab01.media.VOLUME_MOUNTED"
-    const val ACTION_UNMOUNTED = "com.systemhalted.bigtab01.media.VOLUME_UNMOUNTED"
+    // These two strings are a contract with the host daemon, not an internal
+    // detail: waydroid-mediad builds the same action from the same literal, and
+    // if the two ever disagree the failure is silent -- `am broadcast` reports
+    // result=0 and fires nothing, with no error anywhere. Change them in
+    // artifacts/media/waydroid-mediad, this file, and AndroidManifest.xml
+    // together or not at all.
+    //
+    // Namespaced under waydroid.ext rather than under this app's own
+    // application id, deliberately. It names the channel -- the waydroid-ext
+    // host/container interface -- rather than the vendor, because the daemon on
+    // the other end is a separate package with its own version and somebody
+    // else could reimplement either half. It was once
+    // "lan.syshlt.bigtab01.media.*", which put one laptop on one private
+    // network into the public intent surface of an app.
+    const val ACTION_MOUNTED = "waydroid.ext.media.VOLUME_MOUNTED"
+    const val ACTION_UNMOUNTED = "waydroid.ext.media.VOLUME_UNMOUNTED"
 
     private const val CHANNEL_ID = "removable-media"
     private const val PREFS = "volumes"
