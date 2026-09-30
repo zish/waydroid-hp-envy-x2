@@ -30,16 +30,16 @@ The service now records the session process's start time (field 22 of `/proc/<pi
 
 Run against a live container on Fedora 44 Sway Atomic, Waydroid 1.6.3, on 2026-09-29.
 
-**Commit 1, end to end.** From `RUNNING / RUNNING`, with the session started so that its process outlives the container:
+**Commit 1, end to end.** Two runs from the same starting state — `RUNNING / RUNNING`, with the session started so that its process outlives the container — one with the shipped CLI and one with the patched one:
 
-| | before patch | after patch |
+| | shipped CLI | patched CLI |
 |---|---|---|
 | `waydroid status` | `Session: RUNNING / Container: STOPPED` | `Session: STOPPED` |
-| `GetSession` | populated dict, `pid 159807` | `a{ss} 0` |
-| session process | alive | gone — `SIGUSR1` delivered and handled |
+| `GetSession` | populated dict, still naming the session pid | `a{ss} 0` |
+| session process | alive | gone, so the `SIGUSR1` was delivered |
 | next `waydroid session start` | `Session is already running` | succeeds, `RUNNING / RUNNING` |
 
-The host is rpm-ostree with a read-only `/usr`, so the patched tree was run from a copy rather than installed; `rpm -V waydroid` afterwards reports no content difference on any file.
+The host is rpm-ostree with a read-only `/usr`, so the patched tree was run from a copy rather than installed; `rpm -V waydroid` afterwards reports mtime differences only (`.......T.`), with no digest difference on any file.
 
 **Commit 2.** `pid_start_time()` unit-tested, including the case the parse exists for. A child process renamed itself via `prctl(PR_SET_NAME)` to `ev) il ((name` — spaces and unbalanced parentheses. Because a process's start time is fixed at creation, the value read while `comm` was still plain is the oracle:
 
