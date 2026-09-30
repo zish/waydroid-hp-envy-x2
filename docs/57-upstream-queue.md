@@ -39,7 +39,7 @@ zero-layout failure and not rank 6 below.
 | | What | State |
 |---|---|---|
 | [minigbm#3](https://github.com/waydroid/android_external_minigbm/issues/3) | the gbm import defect | Open, unlabelled, 2 comments, no maintainer engagement 24 days on. Our 2026-09-27 reply asked the outside reporter for two things — the `.so` hashes and a clamp-free test — and neither has come back |
-| container stop | [docs/26](26-upstream-container-stop.md), two patches | **Being submitted as a PR.** Re-verified 2026-09-29: still unclaimed, both patches still apply cleanly to `main` at `c78a305a38a9` |
+| container stop | [docs/26](26-upstream-container-stop.md), two patches | **Submitted 2026-09-30** as [#2434](https://github.com/waydroid/waydroid/issues/2434) (issue) and [#2435](https://github.com/waydroid/waydroid/pull/2435) (PR). Runtime-tested on bigtab01 first, which corrected two claims the drafts had wrong |
 | [#2389](https://github.com/waydroid/waydroid/pull/2389) review comment | [artifacts/upstream/comment-2389.md](../artifacts/upstream/comment-2389.md) | **Retired.** The PR was closed unmerged 2026-09-26. The observation is kept for if that hardening is re-proposed; the `GetSession` contract it protects is why [docs/25](25-waydroid-in-cage.md)'s wrapper probes `NameHasOwner` |
 
 **#2389's closure is the most useful thing upstream told us this month, and it was four words.**

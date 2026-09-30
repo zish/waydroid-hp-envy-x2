@@ -188,8 +188,25 @@ on the bus rather than inferring "no service" from a failed `GetSession`.
 
 ## Status
 
-**Runtime-tested 2026-09-29 and being submitted.** Nothing has been posted to GitHub yet at the time
-of writing; the issue and PR bodies below were rewritten against what the test measured.
+**Submitted 2026-09-30.**
+
+| | |
+|---|---|
+| issue | [waydroid#2434](https://github.com/waydroid/waydroid/issues/2434) |
+| PR | [waydroid#2435](https://github.com/waydroid/waydroid/pull/2435) — `Fixes #2434`, 2 commits, 2 files, +41/-4, both commits GPG-verified |
+| base | `main`, head `zish:container-stop-via-dbus` from a fork made the same day |
+
+**No CI ran, and that is expected rather than a problem.** `gh pr checks` reports no checks on the
+branch: GitHub holds workflows on a pull request from a first-time contributor until a maintainer
+approves the run, which is also why the PR sits at `mergeable_state: unstable` with no conflict.
+
+The issue was reordered before posting, at the owner's prompting, on the reasonable worry that
+[#2389](https://github.com/waydroid/waydroid/pull/2389) died of unreviewability. That diagnosis was
+wrong — #2389 was closed for a 28-file single commit, and nobody remarked on its prose — but the
+question was worth asking, because the two sections the runtime test added had gone in at the top.
+A reader met *"you might not reproduce this"* and *"the message varies"* before learning what was
+broken. The order is now Summary, What happens, Why, How to reproduce, Two error messages, fix,
+versions, and the issue opens with a two-sentence summary it previously lacked. 845 words to 736.
 
 | file | what |
 |---|---|

@@ -2,7 +2,7 @@ Title: tools: route "waydroid container stop" through the container service
 
 ---
 
-Fixes #<ISSUE>
+Fixes #2434
 
 **Two commits, two files, +41/-4.** One concern each; the second is independent and can be dropped on its own.
 
