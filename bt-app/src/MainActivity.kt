@@ -132,6 +132,29 @@ class MainActivity : Activity(), BtClient.Listener {
         scheduleRender()
     }
 
+    override fun onApiUnsupported(mismatch: ApiVersion.Mismatch) {
+        // Terminal, not transient: the client has stopped reconnecting, so the
+        // status line must not say "Reconnecting" and the dialog is the only
+        // thing that explains why nothing is happening.
+        live = false
+        status = mismatch.title()
+        scheduleRender()
+        showApiMismatch(mismatch)
+    }
+
+    private fun showApiMismatch(mismatch: ApiVersion.Mismatch) {
+        if (isFinishing) return
+        val builder = AlertDialog.Builder(this)
+            .setTitle(mismatch.title())
+            .setMessage(mismatch.detail())
+            .setCancelable(true)
+            .setNegativeButton("Close", null)
+        mismatch.actionLabel()?.let { label ->
+            builder.setPositiveButton(label) { _, _ -> mismatch.act(this) }
+        }
+        builder.show()
+    }
+
     override fun onEvent(event: JSONObject) {
         when (event.optString("ev")) {
             "ready", "reset" -> {

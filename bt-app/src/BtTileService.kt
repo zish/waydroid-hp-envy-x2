@@ -105,6 +105,16 @@ class BtTileService : TileService(), BtClient.Listener {
         // put an error string.
     }
 
+    override fun onApiUnsupported(mismatch: ApiVersion.Mismatch) {
+        // A tile has no room to explain and nowhere to put a button, so it says
+        // which half is behind and stops. The app itself has the full screen.
+        live = false
+        paint(
+            Tile.STATE_UNAVAILABLE,
+            if (mismatch.hostIsBehind) "Host service too old" else "Update this app"
+        )
+    }
+
     override fun onEvent(event: JSONObject) {
         when (event.optString("ev")) {
             "ready", "reset" -> {

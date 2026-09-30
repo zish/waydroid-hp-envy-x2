@@ -407,6 +407,21 @@ def make_notifier(enabled):
     Failure is never fatal -- the mount is useful whether or not anything in
     Android is listening yet.
     """
+    # COMPATIBILITY IS APPEND-ONLY HERE, and it has to be, because this is a
+    # broadcast and not a connection (docs/58). There is no reply channel, so
+    # this daemon can never learn what the app understands, cannot negotiate a
+    # version the way waydroid-btd and waydroid-pwd do at auth, and cannot
+    # prompt anybody to update. The rules that follow from that:
+    #
+    #   * Add extras freely. An app ignores what it does not recognise.
+    #   * NEVER remove, rename or repurpose one. A repurposed extra is the worst
+    #     case: an old app reads it and acts confidently on the wrong meaning.
+    #   * A change that genuinely breaks old receivers needs a NEW ACTION NAME,
+    #     so both can be emitted during a transition and old and new apps
+    #     coexist. A version field cannot help -- nobody is listening to it.
+    #
+    # An "api" extra is carried anyway. It costs nothing and lets a receiver log
+    # or refuse; it just cannot flow back this way.
     action = "waydroid.ext.media.VOLUME_%s"
     package = "com.systemhalted.removablemedia"
 

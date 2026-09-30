@@ -1,3 +1,21 @@
+* Wed Sep 30 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
+- API versioning (docs/58). This daemon now speaks a declared range of wire
+  formats -- API 1 to 1 today -- and agrees one with the app at auth instead of
+  announcing a number nothing read. **No app update is required by this
+  release**: an app that sends no range is taken to speak API 1, which is what
+  every app built before negotiation existed speaks.
+- A refusal is machine-readable: err=api_unsupported plus reason, both ranges,
+  and this package's name and version, so the app can tell "update the app" from
+  "update the host package" and name what is installed.
+- PACKAGE_VERSION is stamped at build time by %install and verified there. A
+  repo checkout reports "0-dev", which is honest about being unpackaged.
+- The connection profile carries api_min/api_max and host_package_version, so
+  the app can read the range before it opens a socket. Note host_package rather
+  than package: "package" already means the ANDROID app id in waydroid-pwd's
+  profile, and one name for two things would have been a trap.
+- The org.bluez.Agent1 path moved to /waydroid/ext/btd/agent in 1.0.1; noted
+  here because nothing outside the daemon names it and it is easy to miss.
+
 * Wed Sep 30 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
 - Follows the app id rename: DEFAULT_PACKAGE is com.systemhalted.bluetooth,
   where it was com.systemhalted.bluetooth. This is load-bearing rather than cosmetic --

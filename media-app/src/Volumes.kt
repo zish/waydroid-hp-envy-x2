@@ -36,6 +36,11 @@ object Volumes {
     // else could reimplement either half. It was once
     // "com.systemhalted.bigtab01.media.*", which put one laptop on one private
     // network into the public intent surface of an app.
+    // There is no version negotiation on this path and there cannot be: a
+    // broadcast has no reply channel, so the daemon can never learn what this
+    // app understands (docs/58). Compatibility is therefore append-only --
+    // extras get added, never removed or repurposed -- and a genuine break
+    // needs a new action name rather than a version field.
     const val ACTION_MOUNTED = "waydroid.ext.media.VOLUME_MOUNTED"
     const val ACTION_UNMOUNTED = "waydroid.ext.media.VOLUME_UNMOUNTED"
 

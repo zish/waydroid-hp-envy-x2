@@ -43,6 +43,15 @@ class PwClient(private val profile: Profile, private val listener: Listener) {
         fun onDisconnected(reason: String)
         fun onEvent(event: JSONObject)
         fun onReply(id: Int, reply: JSONObject)
+
+        /**
+         * The daemon and this app share no wire format.
+         *
+         * Terminal: the client stops reconnecting, because retrying against a
+         * daemon we cannot talk to is spam and nothing will change until one
+         * side is updated. See docs/58.
+         */
+        fun onApiUnsupported(mismatch: ApiVersion.Mismatch)
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -53,6 +62,17 @@ class PwClient(private val profile: Profile, private val listener: Listener) {
     @Volatile private var socket: Socket? = null
 
     @Volatile var connected = false
+        private set
+
+    /**
+     * The wire format in force, agreed at auth.
+     *
+     * 1 until a daemon says otherwise, which is also what a daemon built before
+     * negotiation existed implies by not answering. Gate anything added after
+     * API 1 on this rather than on the app's own version: the daemon may be
+     * older than the app and still perfectly usable.
+     */
+    @Volatile var api = 1
         private set
 
     fun start() {
@@ -94,8 +114,10 @@ class PwClient(private val profile: Profile, private val listener: Listener) {
                 // whatever the UI asked for would deadlock a fresh connection.
                 writeLine(
                     sock,
-                    JSONObject().put("id", 0).put("cmd", "auth")
-                        .put("token", profile.token).toString()
+                    ApiVersion.declare(
+                        JSONObject().put("id", 0).put("cmd", "auth")
+                            .put("token", profile.token)
+                    ).toString()
                 )
                 connected = true
                 main.post { listener.onConnected() }
@@ -129,8 +151,31 @@ class PwClient(private val profile: Profile, private val listener: Listener) {
             main.post { listener.onEvent(msg) }
         } else {
             val id = msg.optInt("id", -1)
+            if (id == 0 && consumedAuthReply(msg)) return
             main.post { listener.onReply(id, msg) }
         }
+    }
+
+    /**
+     * Handle the auth reply's version half. True when it was consumed here.
+     *
+     * Clearing `running` is what makes the refusal terminal, and it also
+     * suppresses report()'s onDisconnected -- which would otherwise paint
+     * "disconnected ..." straight over the screen explaining why we stopped.
+     */
+    private fun consumedAuthReply(reply: JSONObject): Boolean {
+        val mismatch = ApiVersion.Mismatch.from(reply)
+        if (mismatch != null) {
+            running = false
+            main.post { listener.onApiUnsupported(mismatch) }
+            closeSocket()
+            return true
+        }
+        if (reply.optBoolean("ok", false)) {
+            // Absent on a daemon older than negotiation, which means API 1.
+            api = reply.optInt("api", 1)
+        }
+        return false
     }
 
     private fun writer() {

@@ -42,7 +42,7 @@
 # vendored binary docs/54 rules out. pw-app/build.sh --install is the delivery
 # mechanism, as bt-app/build.sh is for Bluetooth.
 
-VERSION=1.2.1
+VERSION=1.3.0
 RELEASE=1
 KIND=host
 ARCH=noarch
@@ -116,8 +116,16 @@ artifacts/pipewire/waydroid-pwd-publish
 artifacts/pipewire/waydroid-pwd-publish.service
 artifacts/pipewire/waydroid-pwd.service"
 
+# The daemon reports its own package version in an API refusal, so the app can
+# say "the host has waydroid-ext-pwd 1.0.2" rather than "the host is too old"
+# (docs/58). The source carries "0-dev" so a repo checkout is honest about
+# being unpackaged; the real number can only come from here, at build time.
 INSTALL='DESTDIR=%{buildroot} PREFIX=%{_prefix} UNITDIR=%{_unitdir} \
-    USERUNITDIR=%{_userunitdir} sh artifacts/pipewire/install.sh'
+    USERUNITDIR=%{_userunitdir} sh artifacts/pipewire/install.sh
+sed -i "s|^PACKAGE_VERSION = .*|PACKAGE_VERSION = \"%{version}-%{release}\"|" \
+    %{buildroot}%{_bindir}/waydroid-pwd
+grep -q "^PACKAGE_VERSION = \"%{version}-%{release}\"$" \
+    %{buildroot}%{_bindir}/waydroid-pwd'
 
 # The policy ships as %doc and never into /etc. Two reasons and both matter: a
 # policy file the package owned would silently change what an already-running

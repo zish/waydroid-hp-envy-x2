@@ -17,7 +17,7 @@
 # its own release cadence and no host dependencies, and coupling them would
 # reissue one every time the other changed.
 
-VERSION=1.0.1
+VERSION=1.1.0
 RELEASE=1
 KIND=host
 ARCH=noarch
@@ -74,8 +74,16 @@ SOURCES="artifacts/bluetooth/install.sh
 artifacts/bluetooth/waydroid-btd
 artifacts/bluetooth/waydroid-btd.service"
 
+# The daemon reports its own package version in an API refusal, so the app can
+# say "the host has waydroid-ext-btd 1.0.2" rather than "the host is too old"
+# (docs/58). The source carries "0-dev" so a repo checkout is honest about
+# being unpackaged; the real number can only come from here, at build time.
 INSTALL='DESTDIR=%{buildroot} PREFIX=%{_prefix} UNITDIR=%{_unitdir} \
-    sh artifacts/bluetooth/install.sh'
+    sh artifacts/bluetooth/install.sh
+sed -i "s|^PACKAGE_VERSION = .*|PACKAGE_VERSION = \"%{version}-%{release}\"|" \
+    %{buildroot}%{_bindir}/waydroid-btd
+grep -q "^PACKAGE_VERSION = \"%{version}-%{release}\"$" \
+    %{buildroot}%{_bindir}/waydroid-btd'
 
 # No %dir for the state directory: the unit declares StateDirectory=, so
 # systemd creates /var/lib/waydroid-btd with mode 0700 at start and owns its

@@ -1,7 +1,9 @@
 # 58 — Versioning the host daemons and their APIs separately
 
 *Opened 2026-09-30, at the owner's request, ahead of the F-Droid split
-([docs/53](53-release-readiness.md) item 2). Design only — nothing below is built.*
+([docs/53](53-release-readiness.md) item 2). **Built and verified on hardware the same day** —
+`waydroid-ext-btd` 1.1.0 and `waydroid-ext-pwd` 1.3.0, with both apps. See
+[What was built](#what-was-built-and-what-it-measured) at the end.*
 
 The problem the split creates: once each APK lives in its own repository with its own release
 cadence, the app and the daemon it talks to stop moving together. F-Droid updates an APK in the
@@ -137,7 +139,53 @@ Its compatibility rule is therefore a discipline rather than a handshake:
 The eject path is the one part with a return channel — the app drops a marker file the daemon polls
 — and it is a filename, so the same append-only rule covers it.
 
-## What needs building
+## What was built, and what it measured
+
+Shipped 2026-09-30 as `waydroid-ext-btd` 1.1.0 and `waydroid-ext-pwd` 1.3.0, both deployed to
+bigtab01, with `bt-app` and `pw-app` rebuilt and installed.
+
+**The daemon half, measured on the wire** against the live `btd` at API 1–1, as an app would connect:
+
+```
+no range at all (a pre-negotiation app)    -> OK  agreed api=1  daemon=1-1
+1-1  exactly the daemon's range            -> OK  agreed api=1
+1-3  app newer, ranges overlap             -> OK  agreed api=1
+3-5  app far ahead of the daemon           -> REFUSED app_too_new   daemon=waydroid-ext-btd 1.1.0-1
+0-0  app below the daemon's floor          -> REFUSED app_too_old
+5-2  inverted, a client bug                -> REFUSED app_range_invalid
+garbage instead of ints                    -> OK  agreed api=1
+```
+
+The first line is the one that mattered: **no installed app broke**, because absence of a range is
+read as API 1. The refusals carry `waydroid-ext-btd 1.1.0-1`, which is the build-time stamp working
+and is what makes the "update the host" screen able to name what is installed.
+
+**The app half, measured with a probe standing in for the daemon.** The apps' side could not be
+proved against the real daemon, because a daemon at 1–1 cannot produce a refusal an app at 1–1 would
+receive. So `waydroid-btd` was stopped and a listener put on its port, which recorded what the app
+actually sent:
+
+```
+raw: {"id":0,"cmd":"auth","token":"…","api_min":1,"api_max":1}
+```
+
+and then answered with a fabricated `app_too_old` claiming a 7–9 daemon. The app took it with no
+crash buffer entry, stayed alive, and **did not reconnect when the real daemon came back** — which is
+the refusal being terminal, by design.
+
+**One consequence of that worth knowing, found by testing rather than reasoning.** Because the
+refusal clears `running`, an app that has been refused stays refused until it is reopened — even
+after the user fixes the host. For the app-too-new case that is the likelier one, they will upgrade
+the host package and then find the app still saying the host is too old. The cheap alternative is to
+retry on a long backoff, minutes rather than seconds, so it heals itself without spamming the
+daemon's log. **Not done**, because it is a behavioural choice rather than a bug, and it belongs to
+whoever decides how the screen should feel.
+
+The `mediad` half needed no code: the append-only rule is now written at both ends, in
+`waydroid-mediad`'s notifier and in [Volumes.kt](../media-app/src/Volumes.kt), beside the constants
+somebody would edit.
+
+## What needed building
 
 Per TCP daemon (`btd`, `pwd`):
 

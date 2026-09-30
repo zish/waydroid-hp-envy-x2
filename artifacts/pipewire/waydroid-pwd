@@ -100,7 +100,36 @@ import sys
 import threading
 import time
 
-PROTOCOL_VERSION = 1
+# ---- versioning ----------------------------------------------------------
+#
+# Three numbers that are not the same number, per docs/58-api-versioning.md:
+#
+#   PACKAGE_VERSION  this RPM/DEB. Stamped at build time by the spec's
+#                    %install; a repo checkout reports "0-dev", which is
+#                    honest rather than wrong.
+#   API_MIN/API_MAX  the wire formats this daemon speaks. Bumping API_MAX is
+#                    a format change. Raising API_MIN drops old apps and needs
+#                    a line in packaging/mods/pwd.changelog, because that is
+#                    the only place a user can learn an app update became
+#                    mandatory.
+#
+# This range is pwd's own and has nothing to do with btd's. The two protocols
+# evolve for unrelated reasons; a shared number would force a bump on one
+# whenever the other changed and make both changelogs lie.
+#
+# API_MIN stays at 1 deliberately. Backward compatibility lives in the APP,
+# which carries api_min = api_max - 2: the app is the half F-Droid updates
+# silently, so a wide range there removes the failure that will actually
+# happen -- an app running ahead of a host package nobody has run dnf for.
+PACKAGE_NAME = "waydroid-ext-pwd"
+PACKAGE_VERSION = "0-dev"
+API_MIN = 1
+API_MAX = 1
+
+# Kept as the name older replies used for the agreed version. New clients read
+# "api"; this is here so a pre-negotiation app sees what it always saw.
+PROTOCOL_VERSION = API_MAX
+
 DEFAULT_PORT = 7713
 DEFAULT_PACKAGE = "com.systemhalted.patchbay"
 PROFILE_NAME = "profile.json"
@@ -185,6 +214,42 @@ FALSE_WORDS = ("no", "false", "off", "0", "deny", "disabled")
 def log(message):
     sys.stderr.write("waydroid-pwd: %s\n" % message)
     sys.stderr.flush()
+
+
+def api_range(msg):
+    """The wire-format range a client claims, from its auth message.
+
+    Absence is a declaration and not an error. An app that sends no range
+    speaks API 1 -- which is exactly what every app built before negotiation
+    existed speaks -- so this daemon can gain negotiation without a flag day
+    and without any installed app changing. docs/58 has the reasoning.
+
+    Anything that is not a plain int falls back to 1 rather than raising: a
+    malformed range is a client bug, and refusing the connection over it would
+    turn a typo into an unreachable daemon.
+    """
+    def field(key):
+        value = msg.get(key, 1)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 1
+        return value
+    return field("api_min"), field("api_max")
+
+
+def negotiate_api(lo, hi):
+    """Agree a wire format, or name which side is behind.
+
+    Returns (agreed, None) or (None, reason). The reason is what lets the app
+    tell "update the app" from "update the host package" without parsing
+    English, and those two send the user to completely different places.
+    """
+    if hi < lo:
+        return None, "app_range_invalid"
+    if lo > API_MAX:
+        return None, "app_too_new"
+    if hi < API_MIN:
+        return None, "app_too_old"
+    return min(hi, API_MAX), None
 
 
 def run(argv, timeout=15):
@@ -892,6 +957,10 @@ class Client(object):
         self.conn = conn
         self.peer = "%s:%d" % peer[:2]
         self.authed = not server.require_auth
+        # The wire format agreed at auth. 1 until then, because that is what a
+        # client sending no range is entitled to assume, and because a handler
+        # reached before auth must still have a number to branch on.
+        self.api = 1
         self.alive = True
         self.connected_at = time.monotonic()
         self.outbox = queue.Queue(maxsize=OUTBOX_LIMIT)
@@ -917,8 +986,12 @@ class Client(object):
             out["id"] = msg["id"]
         self.send(out)
 
-    def fail(self, msg, error):
+    def fail(self, msg, error, **fields):
+        # **fields carries a machine-readable failure alongside the human
+        # string. The version refusal needs it: an app cannot choose between
+        # "update yourself" and "update the host package" from prose.
         out = {"ok": False, "error": str(error)}
+        out.update(fields)
         if msg.get("id") is not None:
             out["id"] = msg["id"]
         self.send(out)
@@ -1346,9 +1419,27 @@ class Server(object):
             log("%s presented a bad token" % client.peer)
             client.close()
             return
-        client.reply(msg, version=PROTOCOL_VERSION,
-                     policy=self.policy.as_json())
-        client.send({"ev": "ready", "version": PROTOCOL_VERSION,
+
+        lo, hi = api_range(msg)
+        agreed, reason = negotiate_api(lo, hi)
+        if reason is not None:
+            client.fail(
+                msg, "no common API version",
+                err="api_unsupported", reason=reason,
+                daemon={"api_min": API_MIN, "api_max": API_MAX,
+                        "package": PACKAGE_NAME, "version": PACKAGE_VERSION},
+                app={"api_min": lo, "api_max": hi})
+            log("%s speaks API %d-%d, this daemon speaks %d-%d (%s)"
+                % (client.peer, lo, hi, API_MIN, API_MAX, reason))
+            client.close()
+            return
+        client.api = agreed
+
+        # "version" is the agreed number under the name older replies used, so
+        # a pre-negotiation app is told what it has always been told.
+        client.reply(msg, api=agreed, api_min=API_MIN, api_max=API_MAX,
+                     version=agreed, policy=self.policy.as_json())
+        client.send({"ev": "ready", "api": agreed, "version": agreed,
                      "policy": self.policy.as_json(),
                      "ready": self.ready,
                      "objects": self.graph.snapshot(),
@@ -2026,6 +2117,13 @@ def main():
         publisher = ProfileWriter(
             os.path.join(args.state_dir, PROFILE_NAME),
             {
+                # The range goes in the profile as well as the handshake so the
+                # app can see it before it opens a socket -- it already parses
+                # this file to find the daemon at all.
+                "api_min": API_MIN,
+                "api_max": API_MAX,
+                "host_package": PACKAGE_NAME,
+                "host_package_version": PACKAGE_VERSION,
                 "version": PROTOCOL_VERSION,
                 "host": args.listen,
                 "port": args.port,

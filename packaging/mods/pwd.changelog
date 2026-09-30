@@ -1,3 +1,14 @@
+* Wed Sep 30 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.3.0-1
+- API versioning (docs/58), the same mechanism waydroid-ext-btd 1.1.0 gained,
+  with its own independent range -- API 1 to 1 today. The two protocols evolve
+  for unrelated reasons, so a shared number would force a bump on one whenever
+  the other changed. **No app update is required by this release**: an app that
+  sends no range is taken to speak API 1.
+- A refusal is machine-readable: err=api_unsupported plus reason, both ranges,
+  and this package's name and version.
+- PACKAGE_VERSION is stamped at build time by %install and verified there.
+- The profile carries api_min/api_max, host_package and host_package_version.
+
 * Tue Sep 29 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.2.1-1
 - Documentation only: no change to the daemon, the units, the policy or the
   payload. The bump exists because docs/56-pipewire-control.md ships as %%doc and
