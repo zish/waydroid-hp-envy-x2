@@ -4,7 +4,9 @@ Title: tools: route "waydroid container stop" through the container service
 
 Fixes #<ISSUE>
 
-`waydroid container stop` calls `container_manager.stop()` directly, in the CLI's own process, rather than asking the service that owns the container. Three things only the service can do are therefore skipped: clearing the session it tracks in `args.session`, quitting its hardware-manager thread, and serialising the teardown against a session stopping concurrently. The visible result is `Session: RUNNING / Container: STOPPED` and `Already tracking a session` on the next `waydroid session start`. The issue has the detail.
+**Two commits, two files, +41/-4.** One concern each; the second is independent and can be dropped on its own.
+
+`waydroid container stop` calls `container_manager.stop()` directly, in the CLI's own process, rather than asking the service that owns the container. Three things only the service can do are therefore skipped: clearing the session it tracks in `args.session`, quitting its hardware-manager thread, and serialising the teardown against a session stopping concurrently. The visible result is `Session: RUNNING / Container: STOPPED`, and `Session is already running` on the next `waydroid session start`. The issue has the detail.
 
 ### Commit 1 — route through the service
 
