@@ -26,8 +26,40 @@ The service now records the session process's start time (field 22 of `/proc/<pi
 
 ### Testing
 
-- Both patches apply cleanly to `main` and both files parse.
-- `pid_start_time()` cross-checked against `awk '{print $22}' /proc/<pid>/stat`: matches for live pids, stable across reads, differs between processes, `None` for a dead pid.
+Run against a live container on Fedora 44 Sway Atomic, Waydroid 1.6.3, on 2026-09-29.
+
+**Commit 1, end to end.** From `RUNNING / RUNNING`, with the session started so that its process outlives the container:
+
+| | before patch | after patch |
+|---|---|---|
+| `waydroid status` | `Session: RUNNING / Container: STOPPED` | `Session: STOPPED` |
+| `GetSession` | populated dict, `pid 159807` | `a{ss} 0` |
+| session process | alive | gone — `SIGUSR1` delivered and handled |
+| next `waydroid session start` | `Session is already running` | succeeds, `RUNNING / RUNNING` |
+
+The host is rpm-ostree with a read-only `/usr`, so the patched tree was run from a copy rather than installed; `rpm -V waydroid` afterwards reports no content difference on any file.
+
+**Commit 2.** `pid_start_time()` unit-tested, including the case the parse exists for. A child process renamed itself via `prctl(PR_SET_NAME)` to `ev) il ((name` — spaces and unbalanced parentheses. Because a process's start time is fixed at creation, the value read while `comm` was still plain is the oracle:
+
+```
+phase 1 comm is plain              PASS 'python3'
+phase 1 correct == naive           PASS 3083431 vs 3083431
+phase 2 comm is hostile            PASS 'ev) il ((name'
+start time unchanged               PASS 3083431 vs 3083431
+naive parse now WRONG              PASS naive=1 truth=3083431
+stable across reads                PASS
+differs between processes          PASS
+dead pid -> None                   PASS
+nonexistent pid -> None            PASS
+```
+
+Note `awk '{print $22}'` is *not* a valid oracle here — it splits on whitespace, so it is the naive parser and returns `1` alongside it. That is the whole reason for splitting on the last `)`.
+
+**What was not exercised.** Commit 2's guard runs in the service process, and the service was the unpatched one throughout — so the recording at `do_start()` and the stale-pid branch itself were not run live. Reaching that branch requires a pid to be reused, which is not something a test can arrange on demand. The guard is written to degrade to current behaviour when the recorded value is absent (`getattr(..., None)` then signal anyway), so an upgrade across a running service cannot regress.
+
+- Both patches apply cleanly to `main` at `c78a305a38a9` **and** to the installed 1.6.3 tree.
 - `helpers.ipc.DBusContainerService` confirmed reachable from the `tools/__init__.py` namespace with no added import.
 
-**Not runtime-tested**: exercising it means stopping a live container, which the machine this was found on could not spare at the time. Reviewers should treat the behavioural claims as read from the code, which is where they came from.
+### One thing reviewers should know before reproducing
+
+The bad state clears itself if the session process exits with the container, which is what happens under a normal desktop or kiosk session: `session_manager`'s `Disconnected` handler calls `stop_container(quit_session=False)` and the service reaches `del args.session`. To see the fault, the session process has to survive — start the session over ssh against an existing compositor. Both behaviours were measured on the same host. The issue has the detail.

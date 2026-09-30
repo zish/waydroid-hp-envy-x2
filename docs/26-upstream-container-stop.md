@@ -88,18 +88,89 @@ adds a caller to that path, which is why the guard travels with it.
 The same hazard is why [25](25-waydroid-in-cage.md)'s wrapper releases a leftover session with
 `Stop(false)` over busctl instead of `waydroid session stop`.
 
-## Tested, and not
+## Tested on hardware, 2026-09-29
 
-- both patches apply cleanly to `main`; both files parse
-- `pid_start_time()` cross-checked against `awk '{print $22}' /proc/<pid>/stat` — matches for live
-  pids, stable across reads, differs between processes, `None` for a dead one. Splitting on the last
-  `)` rather than on whitespace is what makes a `comm` containing spaces or parentheses safe; **that
-  specific case was not exercised**, the shell available refused to fake the process name
-- `helpers.ipc.DBusContainerService` resolves from the `tools/__init__.py` namespace on the host
+~~**Not runtime-tested.**~~ Run against a live container on bigtab01 the evening of 2026-09-29, at
+the owner's go-ahead. `/usr` is read-only on an rpm-ostree host, so the patched tree was run from a
+copy at `/var/tmp` — `sudo python3 <copy>/waydroid.py container stop`, which works because
+`/usr/bin/waydroid` is a symlink into `/usr/lib/waydroid` and Python puts the *resolved* script
+directory on `sys.path[0]`. `PYTHONPATH` cannot shadow that, which is why a copy rather than an
+env var. Afterwards `rpm -V waydroid` reported mtime deltas only, no content difference on any file.
 
-**Not runtime-tested.** Exercising it means stopping a live container, and the host had a session in
-use. The behavioural claims are read from the code, which is where they came from. The natural time to
-run it is alongside the first real cage login, which needs a logout anyway.
+**Both patches apply cleanly to the installed 1.6.3 as well as to `main`** at `c78a305a38a9`.
+
+**The bug reproduces, and `GetSession` states it exactly.** After an unpatched
+`sudo waydroid container stop`: `Session: RUNNING / Container: STOPPED`, and the service still
+returns a populated session dict with `pid 159807`. `"session" in args` is still true.
+
+**Commit 1 works end to end.** Same starting state, patched CLI: `Session: STOPPED`,
+`GetSession -> a{ss} 0`, the session process gone (so `SIGUSR1` was delivered and handled), and the
+next `waydroid session start` reached `RUNNING / RUNNING` with no wedge.
+
+### The test found two things the drafts had wrong
+
+**1. The wedge is conditional, and the ordinary case self-heals.** The first attempt appeared to
+disprove the whole report: `GetSession` came back `a{ss} 0` a minute after the stop. The reason is
+`session_manager.py:34`, which registers a `Disconnected` handler calling
+`stop_container(quit_session=False)` — the service then reaches `del args.session` at
+`container_manager.py:270`. So when the session process dies with the container, which is what a
+desktop or cage session does because the stop takes Android and `waydroid show-full-ui` with it,
+**the state clears itself.**
+
+Reproducing the fault needs a session process that *survives* — the ssh-started case
+[docs/24](24-graceful-logout.md) describes. Done here with a headless `WLR_BACKENDS=headless sway`
+providing `wayland-1` and `waydroid session start` under `setsid`. Then the bad state persisted
+until `waydroid session stop`.
+
+**This was nearly fatal to the submission.** A maintainer testing it the obvious way would have
+watched it clear itself and closed the report. Both the issue and the PR now state the condition
+up front.
+
+**2. The error message in the issue was wrong for the common case.** The draft showed
+`Already tracking a session`. What actually appears is **`Session is already running`** — because the
+surviving session process still owns `id.waydro.Session`, so `session_manager`'s own guard fires
+before anything reaches the container service's `do_start`. The two messages are two different
+residues:
+
+| left behind | message |
+|---|---|
+| session process alive, owns `id.waydro.Session` | `Session is already running` — measured |
+| bus name released but `args.session` not cleared (e.g. `SIGKILL`) | `Already tracking a session` — read from the code |
+
+The distinction was already in this note's own patch rationale — it is why patch 1 passes
+`quit_session=True` rather than `False` — and the issue text contradicted it anyway.
+
+### `pid_start_time()`, including the case that was never exercised
+
+~~**that specific case was not exercised**, the shell available refused to fake the process name~~ —
+**done.** `prctl(PR_SET_NAME)` renames a process where `argv[0]` cannot, so a child was renamed to
+`ev) il ((name`: spaces plus an unbalanced parenthesis.
+
+The oracle needed care. **`awk '{print $22}'` is not ground truth** — it splits on whitespace, so it
+*is* the naive parser, and against a hostile `comm` it returns `1` right alongside a naive Python
+split. The first version of this test used awk as the oracle and reported a failure that was really
+awk being wrong. Since a process's start time is fixed at creation, the fix is to read it while
+`comm` is still plain — where whitespace splitting provably agrees — and again after the rename:
+
+```
+phase 1 comm is plain              PASS 'python3'
+phase 1 correct == naive           PASS 3083431 vs 3083431
+phase 2 comm is hostile            PASS 'ev) il ((name'
+start time unchanged               PASS 3083431 vs 3083431
+naive parse now WRONG              PASS naive=1 truth=3083431
+stable across reads                PASS
+differs between processes          PASS
+dead pid -> None                   PASS
+nonexistent pid -> None            PASS
+```
+
+**Still not exercised:** commit 2's guard runs in the *service* process, and the service was the
+unpatched one throughout, so the recording at `do_start()` and the stale-pid branch never ran live.
+Reaching that branch needs a pid reuse, which a test cannot arrange on demand. The guard degrades to
+current behaviour when the recorded value is absent, so an upgrade across a running service cannot
+regress — which is the property that matters and is visible in the code.
+
+`helpers.ipc.DBusContainerService` resolves from the `tools/__init__.py` namespace on the host.
 
 ## Also staged
 
@@ -117,7 +188,8 @@ on the bus rather than inferring "no service" from a failed `GetSession`.
 
 ## Status
 
-Drafted, not submitted. Nothing has been posted to GitHub.
+**Runtime-tested 2026-09-29 and being submitted.** Nothing has been posted to GitHub yet at the time
+of writing; the issue and PR bodies below were rewritten against what the test measured.
 
 | file | what |
 |---|---|
