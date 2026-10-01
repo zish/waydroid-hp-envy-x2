@@ -488,16 +488,20 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    [docs/48-battery-frozen-and-netd-stale.md](docs/48-battery-frozen-and-netd-stale.md).
    **And the mitigation has now failed once, which raises the priority of this goal.** On
    2026-10-01 a cold boot wedged on the LineageOS animation for an hour with
-   `waydroid-restartd` installed and running. Its circuit breaker is **8 kills in 300 s** and one
-   zygote restart wedges **eight services at once** — `idmap2d`, `zygote`, `audioserver`,
-   `cameraserver`, `media`, `netd`, `vendor.audio-hal`, `zygote_secondary` — so the entire budget
-   went in **2.6 seconds**, the breaker stood down for an hour with `zygote` still stuck, and
-   `system_server` crash-looped **212 times** starting 11 s later. The breaker guards against a
-   ping-pong *loop* and cannot distinguish one from a wide *cascade*; on this image it will
-   therefore fire on the first cascade essentially every time. Four candidate fixes are listed in
-   [docs/61](docs/61-restartd-breaker-boot-loop.md) — raise the budget (the
-   `WAYDROID_RESTARTD_MAX_KILLS` knob already exists), count cascades rather than kills, repair
-   `zygote` first because its wedge is the only fatal one, or do this goal and make the kill work.
+   `waydroid-restartd` installed and running. Its signalling **worked** — init reaped what it
+   signalled — but one zygote restart puts **eight services** into `STOPPING` at once (`idmap2d`,
+   `zygote`, `audioserver`, `cameraserver`, `media`, `netd`, `vendor.audio-hal`,
+   `zygote_secondary`), and the mutual `onrestart` edges this cgroup problem creates re-wedged a
+   brand-new zygote **1.9 s** after its predecessor was reaped, 1.1 s after `netd` was killed. Its
+   circuit breaker (**8 kills in 300 s**) fired on that, which was **not** a false positive — it is
+   what a non-converging repair looks like. The fault is what happens next: it stands down for
+   3600 s, leaving the machine wedged with `zygote` among the still-stuck, and `system_server`
+   crash-looped **212 times** starting 11 s later. Recovery was a container restart (24.8 s), which
+   is the repair that works because it does not depend on cgroups the container never created.
+   [docs/61](docs/61-restartd-breaker-boot-loop.md) lists four preventions — escalate to a
+   container restart instead of standing down, a host-side boot watchdog on `sys.boot_completed`,
+   repair `zygote` first, or do this goal — and **explicitly does not recommend raising
+   `WAYDROID_RESTARTD_MAX_KILLS`**, since a bigger budget may only buy a longer storm.
    **None are implemented.** Note also that the same incident presents with
    [docs/51](docs/51-pid-namespace-32bit-cliff.md)'s exact symptom and its documented red-herring
    stack, and was misdiagnosed as it before three checks separated them: no Watchdog kills, the

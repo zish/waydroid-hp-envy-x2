@@ -6,11 +6,13 @@ Neither turned out to be in the part of the stack it appeared to be in, and the 
 root cause with goal 7.
 
 > **The mitigation this document produced can stand down exactly when it is needed.**
-> `waydroid-restartd`'s circuit breaker is 8 kills in 300 s, and one zygote restart wedges eight
-> services at once — so on 2026-10-01 it spent its whole budget in 2.6 s, stood down for an hour
-> with `zygote` still stuck, and `system_server` crash-looped 212 times starting 11 s later. The
-> breaker guards against a ping-pong *loop* and cannot tell one from a wide *cascade*. See
-> [61-restartd-breaker-boot-loop.md](61-restartd-breaker-boot-loop.md).
+> On 2026-10-01 `waydroid-restartd` was running and its signalling worked — init reaped what it
+> signalled — but the mutual `onrestart` edges this document's goal-7 cause creates re-wedged
+> zygote 1.9 s after it was reaped, 1.1 s after `netd` was killed. Its circuit breaker (8 kills in
+> 300 s) fired on that genuinely non-converging repair, then stood down for 3600 s with `zygote`
+> still stuck, and `system_server` crash-looped 212 times starting 11 s later. The fault is not
+> that the breaker fired but that standing down leaves a wedged boot wedged; the repair that works
+> is a container restart. See [61-restartd-breaker-boot-loop.md](61-restartd-breaker-boot-loop.md).
 
 ## One-paragraph summary
 
