@@ -699,6 +699,42 @@ and packaged copies differ only by the install prefix. The hand-placed
 it is the only remaining route to the previously-known-good path, and deleting
 the fallback before understanding the failure is the wrong order.
 
+> **Small spike, 2026-10-01: removed anyway, at the owner's call.** The 135 s
+> death is still unexplained, so the ordering argument above was overruled rather
+> than satisfied — the owner's reasoning being that a greeter offering one
+> session beats keeping a fallback for a fault nobody can reproduce, and that a
+> broken packaged entry is theirs to fix.
+>
+> Checked before deleting, because the claim that the two differ "only by the
+> install prefix" turned out to be nearly but not quite true. `diff` on the two
+> `waydroid-cage-session` scripts shows three lines, and two of them are
+> comments — but the third is `GRACEFUL_EXIT=`, which the packaged script points
+> at `/usr/bin/waydroid-graceful-exit`. That matters because `graceful-exit` is
+> one of the five components still running its hand-placed copy, so the packaged
+> cage session could have been referencing a file that was never installed. It is
+> installed: `/usr/bin/waydroid-graceful-exit` exists, is owned by
+> `waydroid-ext-graceful-exit-1.0.0-1`, and differs from the `/usr/local` copy by
+> one comment line. So the whole packaged chain is present —
+> `/usr/share/wayland-sessions/waydroid-cage.desktop` →
+> `/usr/bin/waydroid-cage-session` → `/usr/bin/waydroid-graceful-exit`.
+>
+> `sudo rm /etc/wayland-sessions/waydroid-cage.desktop`. `/etc/wayland-sessions`
+> is now empty and the greeter offers one Waydroid session. The running session
+> was unaffected, as expected — the entry is read at greeter start, not held
+> open. Reconstructible from this file if it is ever wanted:
+>
+> ```ini
+> [Desktop Entry]
+> Name=Waydroid in Cage
+> Comment=Log in directly to Waydroid in a cage session.
+> Exec=cage -s -- /usr/local/bin/waydroid-cage-session
+> Type=Application
+> ```
+>
+> **Untested in the way that matters**: nobody has logged out and back in since.
+> The packaged script is the one both of this boot's logins already used, so the
+> risk is the `.desktop` entry itself rather than what it launches.
+
 ### A latent bug in the guard above, found by the restart
 
 The session came back on **`wayland-0`**, where it had been `wayland-1`.
