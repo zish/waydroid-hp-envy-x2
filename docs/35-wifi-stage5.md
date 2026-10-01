@@ -403,6 +403,13 @@ names.
 
 ## What is still open
 
+**Worked through on 2026-09-30 — see [59](59-wifi-stage5-polish.md).** Four of the items below are
+closed and the entries are annotated in place. Two of the four closed by measurement rather than
+code, and one of them is a warning worth carrying forward: the "signal strength Android's UI
+believes" line turned out to be hiding a conversion that was wrong by up to 10 dB, and the reason
+nothing here caught it is that every check in this document only ever asked whether the RSSI was a
+plausible negative number.
+
 Stage 5 items not yet done, from [29](29-wifi-plan.md) and [34](34-wifi-second-radio.md):
 
 - **Scan staleness after repeated daemon restarts** — the false trail above. Not the radio;
@@ -410,8 +417,14 @@ Stage 5 items not yet done, from [29](29-wifi-plan.md) and [34](34-wifi-second-r
 - **The rtw88 wedge still has no automatic trigger.** This session did not observe it, and the one
   candidate turned out to be something else. `bin/wifi-radio-reset.sh` remains manual, and the
   `nmcli connection up` discriminator remains mandatory before running it.
-- Signal strength and state transitions that Android's UI believes.
-- **Saved networks synced both ways — and the obvious wiring for it is probably wrong.**
+- ~~Signal strength and state transitions that Android's UI believes.~~ **DONE, and it found a
+  bug — `NmBackend` was converting NM's `Strength` with `quality/2 - 100`, which is wrong by up
+  to 10 dB and was 8.5 dB wrong at this machine's signal level. The exact inverse is
+  `-100 + 3*quality/5`. See [59](59-wifi-stage5-polish.md).**
+- ~~**Saved networks synced both ways — and the obvious wiring for it is probably wrong.**~~
+  **DONE, and the suspicion below was correct: `removeNetwork` fires on every reconnect. The
+  measurement took one grep of the journal, because `--verbose` had already recorded it. The reap
+  is in `waydroid-wifi-sync`. See [59](59-wifi-stage5-polish.md).**
   `NmBackend::forget()` is fully implemented and **nothing calls it**, so a network forgotten in
   Android leaves its `"<ssid> (Waydroid)"` profile — PSK included — sitting in NetworkManager. The
   tempting fix is to call it from `ISupplicantStaIface.removeNetwork`, and that looks wrong on
@@ -423,12 +436,17 @@ Stage 5 items not yet done, from [29](29-wifi-plan.md) and [34](34-wifi-second-r
   this seam and the answer is a host-side reconciler comparing `cmd wifi list-networks` against the
   `(Waydroid)` profiles — the same shape as the nudge. A leftover PSK on the host after the user
   said "forget" is the part that makes this worth doing rather than deferring.
-- **P2P, SoftAP, RTT and NAN may already be handled** and need checking rather than building: the
+- ~~**P2P, SoftAP, RTT and NAN may already be handled**~~ **CONFIRMED: they are.
+  `pm list features | grep wifi` prints one line and `get-softap-supported-features` is empty.
+  Nothing to build — [59](59-wifi-stage5-polish.md).** Need checking rather than building: the
   Stage 0 overlay declares only `android.hardware.wifi`, so `android.hardware.wifi.direct`,
   `.rtt` and `.aware` are absent and Android should already consider them unsupported. Confirm with
   `pm list features | grep wifi` before writing code.
-- The wrong-password path is still unproven, `getConnectionCapabilities` still reports all-unknown,
-  and `Wpa2Wpa3Psk` still maps to `wpa-psk` — all unchanged from [34](34-wifi-second-radio.md).
+- The wrong-password path is still unproven. `getConnectionCapabilities` now reports
+  `channelBandwidth` and **UNKNOWN technology is a conclusion, not a gap** — NM's `MaxBitrate` is
+  the AP's advertised capability, not the negotiated PHY. And `Wpa2Wpa3Psk` → `wpa-psk` was
+  **correct all along**: NM documents `wpa-psk` as "WPA2 + WPA3 personal" and `sae` as WPA3 only,
+  so that flag comes off. See [59](59-wifi-stage5-polish.md).
 
 ## `bin/wifi-test.sh`
 

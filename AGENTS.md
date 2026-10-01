@@ -162,7 +162,8 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    working notification path for a low-battery warning or anything else. See
    [docs/41-battery-cutoff.md](docs/41-battery-cutoff.md).
 4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** **In progress: Stages 0 and 2–5
-   largely done; some Stage 5 polish outstanding.** The whole Android Wi-Fi framework was already present and dormant in
+   done, Stage 5's polish list worked through on 2026-09-30; a handful of intermittent faults
+   remain.** The whole Android Wi-Fi framework was already present and dormant in
    the image (`com.android.wifi` APEX, `wificond`); what was missing was the feature XML, a
    supplicant, and any vendor HAL. Direct hardware access was considered and **rejected**: `wlp1s0`
    is this machine's only network interface, so handing `phy0` to the container costs the host its
@@ -234,13 +235,50 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    Android service in this container can be restarted** — six were wedged. Mitigated by
    `artifacts/restartd/`; the real fix is goal 7. See
    [docs/48-battery-frozen-and-netd-stale.md](docs/48-battery-frozen-and-netd-stale.md).
+   **Stage 5's polish list was worked through on 2026-09-30, and the headline is a bug that had
+   been live since Stage 3 while every test passed.** `NmBackend` converted NM's 0..100 `Strength`
+   to dBm with `quality/2 - 100`, which assumes NM's range is −100..−50 dBm; it is −100..−40, so the
+   error was 0 dB at the bottom of the scale and **10 dB at the top**. Android was being told
+   −71 dBm on a link nl80211 measured at −62. Nothing caught it because every check only asked
+   whether the number was a plausible negative one — including Stage 3's, which compared against
+   NM's `SIGNAL` column, the *input* to the broken function. The correct inverse,
+   `-100 + 3*quality/5`, is **exact**: 0 errors over all 61 dBm values NM can represent and over 13
+   field observations, where the old form was wrong on 58 and on 13 of them. It was not cosmetic —
+   this image's `ScoringParams` are `rssi2=-83:-80:-73:-60`, so a link 1 dB shy of *good* was being
+   reported 1.5 dB above *insufficient*, and an ordinary fade crosses that.
+   **`NmBackend::forget()`'s missing caller did not belong where everyone expected.**
+   [docs/35](docs/35-wifi-stage5.md) said to measure before building anything, and the journal had
+   already answered it: `removeNetwork` fired four times in one boot on a network that was never
+   forgotten and was still connected, each time followed seconds later by `addNetwork` — it is part
+   of the ordinary reconnect cycle. Wiring `forget()` there would have deleted the profile the host
+   is administered over every time Wi-Fi was used. The reap went into `waydroid-wifi-sync` instead,
+   keyed on the daemon's **deterministic UUIDv5** and not on the `" (Waydroid)"` label, which also
+   fixed two pre-existing name-based ownership tests in that script. Five synthetic-network tests
+   pass, including the mass-reap refusal, which exists because our profile can be the last copy of a
+   passphrase Android has lost.
+   **Two items closed by measurement rather than code.** `pm list features | grep wifi` prints one
+   line, so P2P, RTT and NAN are already unsupported and `get-softap-supported-features` is empty;
+   and `technology` in `getConnectionCapabilities` stays UNKNOWN because NM's `MaxBitrate` is the
+   AP's advertised capability, not the negotiated PHY — proven by APs advertising 1170 Mb/s on a
+   20 MHz 2.4 GHz channel, which is impossible. `channelBandwidth` *is* now reported, and the
+   framework's side of both was disassembled out of this image's own `service-wifi.jar` rather than
+   assumed. `Wpa2Wpa3Psk` → `wpa-psk` turned out to be correct all along: NM's own man page says
+   `wpa-psk` is "WPA2 + WPA3 personal" while `sae` is WPA3 only, so the flag comes off it. See
+   [docs/59-wifi-stage5-polish.md](docs/59-wifi-stage5-polish.md).
    **Still open**: the T3U wedge has no automatic trigger (and `nmcli connection up` remains the
-   mandatory discriminator before reprobing — it saved a wasted reprobe this session);
+   mandatory discriminator before reprobing), and the adapter is not plugged into this machine any
+   more, so there was nothing to observe;
    the host's link dropped twice for ~10 minutes on 2026-09-18 while Android sat in its
    failed-validation retry loop on the same radio, uninvestigated and a caution about
-   [docs/38](docs/38-wifi-primary-radio.md)'s single-radio arrangement;
-   `NmBackend::forget()` is implemented but nothing calls it, so forgetting a network in Android
-   leaves its PSK in NetworkManager; and signal/state fidelity in Android's UI is unreviewed.
+   [docs/38](docs/38-wifi-primary-radio.md)'s single-radio arrangement — the RSSI error above is a
+   plausible contributor and nothing more;
+   scan staleness after repeated daemon restarts is still undiagnosed;
+   the wrong-password path is still unproven;
+   **packet counters and link-layer stats are all zero**, so the score is driven by RSSI alone —
+   `getLinkLayerStats` needs a vendor HAL, and `iw station dump` sees the 782 tx / 864 rx packets
+   Android reports as 0;
+   Rx link speed is reported as Tx, because NM exposes one `Bitrate`;
+   and `technology` needs a few hundred lines of nl80211 the daemon does not link today.
 5. **Audio — direct ALSA as a selectable backend, and eventually a DAW-grade HAL.**
    **Added 2026-09-11 at the owner's request; scoped, nothing built.** Two phases.
    **Phase 1 is a backend choice** — `--audio-backend {auto,alsa,pulse,none}`, probed before Android

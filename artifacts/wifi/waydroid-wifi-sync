@@ -69,11 +69,6 @@ if ! flock -n 9 2>/dev/null; then
 	exit 0
 fi
 
-if [ ! -r "$SHARE_CONF" ]; then
-	log "no $SHARE_CONF -- nothing is opted in, so there is nothing to do"
-	exit 0
-fi
-
 # Not a sync target if Android is not up; a fresh boot will be caught by the
 # next timer tick, and acting mid-boot races WifiConfigStore's own load.
 booted=$(ash getprop sys.boot_completed | head -1 | tr -d '[:space:]')
@@ -83,11 +78,25 @@ if [ "$booted" != "1" ]; then
 fi
 
 # ----------------------------------------------------------------- allow-list
-
+#
+# READ BEFORE THE REAP BUT GATED AFTER IT.  The two halves of this script have
+# different scopes, and the allow-list governs only one of them.  Importing
+# host-owned profiles into Android, and deleting them when Android forgets them,
+# is opt-in because those profiles belong to the machine's owner.  The daemon's
+# own "(Waydroid)" projections are ours outright, so reaping a stale one needs
+# nobody's permission -- and gating the reap behind the allow-list would mean a
+# host with nothing opted in, which is the default, never reaps anything.
+#
+# So the list is parsed here, because `nodelete` has to be able to protect an
+# SSID in both halves, and the early exit on an absent or empty one moves down
+# past the reap.
 # A line is an SSID, optionally followed by whitespace and the word "nodelete".
 # Everything before that keyword is the SSID, so an SSID with spaces still works.
 NODELETE=()
 WANTED=()
+# Readable-check inline, because the exit on an absent file is now down past the
+# reap: without this, a host with nothing opted in -- the default -- would emit a
+# redirection error on every run before reaching the message that explains it.
 while IFS= read -r line; do
 	line=${line%%#*}
 	line=${line#"${line%%[![:space:]]*}"}
@@ -104,7 +113,7 @@ while IFS= read -r line; do
 		WANTED+=("$line")
 		;;
 	esac
-done < "$SHARE_CONF"
+done < <([ -r "$SHARE_CONF" ] && cat "$SHARE_CONF")
 
 # Marked "nodelete": share it with Android, but never let a forget in Android
 # remove the host's profile.  The right setting for any network the host itself
@@ -116,14 +125,14 @@ nodelete_contains() {
 	for s in ${NODELETE[@]+"${NODELETE[@]}"}; do [ "$s" = "$1" ] && return 0; done
 	return 1
 }
-if [ "${#WANTED[@]}" -eq 0 ]; then
-	log "$SHARE_CONF names no networks"
-	exit 0
-fi
 
+# The ${a[@]+...} guard matches nodelete_contains() above. It used to be
+# unnecessary here because the "names no networks" exit sat between the parse and
+# this function; that exit is now below the reap, so an empty WANTED can reach
+# this under `set -u`.
 wanted_contains() {
 	local s
-	for s in "${WANTED[@]}"; do [ "$s" = "$1" ] && return 0; done
+	for s in ${WANTED[@]+"${WANTED[@]}"}; do [ "$s" = "$1" ] && return 0; done
 	return 1
 }
 
@@ -171,6 +180,150 @@ android_has() {
 	printf '%s\n' "$ANDROID_LIST" | grep -qxF "$1"
 }
 
+# ------------------------------------ stale (Waydroid) projection -> NM delete
+#
+# A network forgotten in Android leaves the daemon's own profile behind, PSK
+# included.  Nothing reaped it: waydroid-wifid's NmBackend::forget() does
+# exactly this job and NOTHING CALLS IT, because the seam that looks like the
+# place to call it from is not one.
+#
+# ISupplicantStaIface.removeNetwork is the tempting hook and it is the wrong
+# one.  Measured on bigtab01, one boot, --verbose, on a network that was never
+# forgotten and was still connected at the end of it:
+#
+#   20:45:56 removeNetwork(1)
+#   20:46:51 addNetwork() -> id 2      <- 55 s later, same SSID
+#   20:47:14 removeNetwork(2)
+#   20:47:22 addNetwork() -> id 3
+#   21:50:20 removeNetwork(3)
+#   21:50:28 addNetwork() -> id 4
+#
+# Android clears the supplicant's network list as part of the ORDINARY connect
+# cycle -- the shim holds one network at a time -- so removeNetwork fires on
+# every reconnect and never on a forget.  Wiring forget() there would have
+# deleted the saved profile every time Wi-Fi was used, and under the
+# primary-radio configuration of docs/38-wifi-primary-radio.md that profile is
+# the one the host is administered over.  The signal does not exist at that
+# seam, so the reconciliation happens here instead.
+#
+# OWNERSHIP IS BY UUID, NOT BY NAME, for the reason NmBackend.cpp's
+# connectionId() spells out at length: connection.id is a display string, the
+# desktop GUI can rename it and NM does not require it to be unique, so
+# somebody naming a profile "coffeeshop (Waydroid)" would hand this function
+# write access to it.  The daemon derives its UUIDs as RFC 4122 v5 over a fixed
+# namespace and the SSID, reproducible from nothing but the SSID -- so we
+# reproduce it and compare.  A profile whose UUID we can regenerate is ours;
+# nothing else is, whatever it is called.
+
+# The namespace from NmBackend::connectionUuid().  Changing it here orphans
+# every profile the daemon has made, exactly as changing it there would.
+WAYDROID_UUID_NS='\x7f\x86\x2e\xff\x2c\xb3\x41\xe0\xad\xa9\x31\x51\x20\x0e\xf9\x7f'
+
+waydroid_uuid() {
+	local h b6 b8
+	h=$( { printf '%b' "$WAYDROID_UUID_NS"; printf '%s' "$1"; } |
+	     sha1sum | cut -d' ' -f1 )
+	# Version 5 into the high nibble of byte 6 and the RFC 4122 variant into
+	# byte 8 -- the same two lines as the daemon's digest[6] and digest[8].
+	b6=$(printf '%02x' "$(( (0x${h:12:2} & 0x0f) | 0x50 ))")
+	b8=$(printf '%02x' "$(( (0x${h:16:2} & 0x3f) | 0x80 ))")
+	printf '%s-%s-%s%s-%s%s-%s\n' \
+		"${h:0:8}" "${h:8:4}" "$b6" "${h:14:2}" \
+		"$b8" "${h:18:2}" "${h:20:12}"
+}
+
+# Ours iff the UUID is the one the daemon would have derived for this SSID.
+is_ours() {
+	[ "$1" = "$(waydroid_uuid "$2")" ]
+}
+
+# A wiped WifiConfigStore.xml makes every projection look forgotten at once, and
+# honouring that is worse here than in the host-owned half: once Android has
+# lost a passphrase, our profile holds THE LAST COPY OF IT.  A mass reap would
+# destroy the user's passwords rather than merely unshare a network.  So this
+# gets its own budget rather than a share of MAX_FORGETS_PER_RUN -- one person
+# forgetting one network must not be rationed against the other half's activity,
+# and a reset has to refuse in both halves independently.
+MAX_REAPS_PER_RUN="${MAX_REAPS_PER_RUN:-1}"
+
+stale=()
+while IFS= read -r uuid; do
+	[ -n "$uuid" ] || continue
+	ssid=$(nmcli -g 802-11-wireless.ssid connection show "$uuid" 2>/dev/null)
+	[ -n "$ssid" ] || continue
+	is_ours "$uuid" "$ssid" || continue
+	android_has "$ssid" && continue
+	if nodelete_contains "$ssid"; then
+		log "\"$ssid\" is gone from Android, but it is marked nodelete;" \
+		    "leaving our profile alone"
+		continue
+	fi
+	stale+=("$uuid|$ssid")
+done < <(nmcli -t -f UUID,TYPE connection show 2>/dev/null |
+         awk -F: '$2 == "802-11-wireless" { print $1 }')
+
+if [ "${#stale[@]}" -gt "$MAX_REAPS_PER_RUN" ]; then
+	log "${#stale[@]} of our profiles have no network in Android -- that is a" \
+	    "reset, not somebody forgetting a network, and ours may be the last" \
+	    "copy of those passphrases. Deleting nothing."
+	for e in ${stale[@]+"${stale[@]}"}; do log "  (${e#*|})"; done
+else
+	for e in ${stale[@]+"${stale[@]}"}; do
+		uuid=${e%%|*}
+		ssid=${e#*|}
+
+		# The active guard is the whole safety story for our own profiles, and
+		# it is enough BECAUSE they are autoconnect=no projections: NM will
+		# never raise one by itself, so a profile that is not up right now is
+		# not something the host is relying on.
+		#
+		# canDelete()'s default-route guard is deliberately NOT applied here.
+		# Under docs/38's primary-radio configuration every profile of ours is
+		# pinned to the interface carrying the host's default route, so that
+		# guard would refuse every reap there is -- the feature would install,
+		# log nothing and do nothing, on the machine it was written for.
+		active=$(nmcli -t -f UUID,DEVICE connection show --active 2>/dev/null |
+		         awk -F: -v u="$uuid" '$1 == u { print $2 }')
+		if [ -n "$active" ]; then
+			log "\"$ssid\" is gone from Android, but our profile is active on" \
+			    "$active; leaving it"
+			continue
+		fi
+
+		# An autoconnect=yes profile is one somebody has promoted out of being
+		# a projection, so it is no longer ours to reap even though the UUID
+		# still says we made it.
+		auto=$(nmcli -g connection.autoconnect connection show "$uuid" 2>/dev/null)
+		if [ "$auto" = "yes" ]; then
+			log "\"$ssid\" is gone from Android, but our profile has" \
+			    "autoconnect=yes; somebody has adopted it, so leaving it"
+			continue
+		fi
+
+		cid=$(nmcli -g connection.id connection show "$uuid" 2>/dev/null)
+		log "\"$ssid\" is gone from Android; reaping our stale profile, which" \
+		    "still holds its passphrase"
+		if nmcli connection delete "$uuid" >/dev/null 2>&1; then
+			log "  deleted NM profile \"${cid:-$uuid}\""
+		else
+			log "  could not delete NM profile \"${cid:-$uuid}\""
+		fi
+	done
+fi
+
+# ------------------------------------------------------------- the opt-in gate
+#
+# Everything past here concerns HOST-OWNED profiles, which are opt-in.  The reap
+# above is not, which is why this exit is here and not at the top of the script.
+if [ ! -r "$SHARE_CONF" ]; then
+	log "no $SHARE_CONF -- nothing is opted in, so the host-owned half has" \
+	    "nothing to do"
+	exit 0
+fi
+if [ "${#WANTED[@]}" -eq 0 ]; then
+	log "$SHARE_CONF names no networks"
+	exit 0
+fi
 # ------------------------------------------------- Android forget -> NM delete
 #
 # THIS RUNS BEFORE THE IMPORT, AND THE ORDER IS LOAD-BEARING.
@@ -237,10 +390,15 @@ elif [ "${#forgotten[@]}" -gt 0 ]; then
 			[ -n "$uuid" ] || continue
 			s=$(nmcli -g 802-11-wireless.ssid connection show "$uuid" 2>/dev/null)
 			[ "$s" = "$ssid" ] || continue
+			# The daemon's own projection, not a host-owned profile. The
+			# reap above already handled it, on a rule of its own. Tested by
+			# UUID and not by the " (Waydroid)" suffix: the suffix is a label
+			# anyone can change, so a host profile somebody happened to name
+			# that way was being spared from a deletion the owner opted into,
+			# and a projection somebody renamed was being deleted by the wrong
+			# half of the script under the wrong rules.
+			is_ours "$uuid" "$ssid" && continue
 			cid=$(nmcli -g connection.id connection show "$uuid" 2>/dev/null)
-			case "$cid" in
-			*" (Waydroid)") continue ;;   # the daemon's own; not ours to reap
-			esac
 			canDelete "$uuid" "$ssid" || continue
 			if nmcli connection delete "$uuid" >/dev/null 2>&1; then
 				log "  deleted NM profile \"$cid\""
@@ -291,10 +449,8 @@ while IFS= read -r uuid; do
 	# Never import the daemon's own projection of an Android network. It exists
 	# because Android already knows that network, so importing it would be a
 	# loop -- and its credentials came FROM Android in the first place.
-	cid=$(nmcli -g connection.id connection show "$uuid" 2>/dev/null)
-	case "$cid" in
-	*" (Waydroid)") continue ;;
-	esac
+	# By UUID, for the reason given in the reap above.
+	is_ours "$uuid" "$ssid" && continue
 
 	km=$(nmcli -g 802-11-wireless-security.key-mgmt connection show "$uuid" 2>/dev/null)
 	sectype=$(android_sectype "$km")

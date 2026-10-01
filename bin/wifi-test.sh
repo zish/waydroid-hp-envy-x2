@@ -229,6 +229,113 @@ BAD=$(sh_ 'logcat -d -t 400' |
       grep -cE 'Failed to setup iface in wificond|Could not get IClientInterface|No wiphy is found')
 chk "failures since the last mode-manager start" 0 "$BAD"
 
+# ----------------------------------------------------------- Stage 5 polish
+#
+# Does the RSSI Android believes match the one the host measures?
+#
+# This check exists because the answer was NO for the whole of stages 2-5 and
+# nothing noticed: NmBackend converted NM's Strength with quality/2 - 100, which
+# assumes NM's range is -100..-50, and it is -100..-40. The error was 0 dB at
+# the bottom of the scale and 10 dB at the top -- so every check that only
+# looked for "a plausible negative number" passed throughout.
+#
+# NM's mapping is quality = 100 - (int)(100 * |clamp(dBm,-100,-40)+40| / 60),
+# whose exact integer inverse is -100 + 3*quality/5. Verified against nl80211 on
+# 13 distinct APs, same-scan pairing, exact on every one. See docs/59.
+echo "### does Android's RSSI match the host's?"
+# SAMPLED, NOT READ ONCE, and the first version of this check got that wrong.
+#
+# Two things move between the two readings. Android refreshes WifiInfo on its own
+# poll, and -- the bigger one -- NM's Strength for the CONNECTED AP lags, which
+# is a finding in its own right (docs/59). A single pair disagreed by 6 dB on a
+# correctly-working daemon, which is drift and not a bug.
+#
+# So the discriminator is not "do they differ" but "does Android's value equal
+# quality/2 - 100 EXACTLY, every time". That is a deterministic formula, and
+# matching it repeatedly is the signature of the old binary. One agreement inside
+# tolerance is enough to pass; neither verdict from a handful of samples is a
+# WARN, because drift can produce it and a false FAIL here is worse than silence.
+DEV=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null |
+      awk -F: '$2 == "wifi" { print $1; exit }')
+RMATCH=0; ROLD=0; RN=0; RLAST=""
+for _ in 1 2 3 4; do
+  QUAL=$(nmcli -t -f IN-USE,SIGNAL device wifi list --rescan no ifname "$DEV" 2>/dev/null |
+         awk -F: '/^\*/ { print $2; exit }')
+  ARSSI=$(sh_ 'cmd wifi status' | grep -o 'RSSI: -[0-9]*' | head -1 |
+          grep -o '\-[0-9]*')
+  [ -n "$QUAL" ] && [ -n "$ARSSI" ] || { sleep 2; continue; }
+  RN=$(( RN + 1 ))
+  WANT=$(( -100 + 3 * QUAL / 5 ))
+  OLD=$(( QUAL / 2 - 100 ))
+  D=$(( ARSSI - WANT )); [ "$D" -lt 0 ] && D=$(( -D ))
+  RLAST="Android ${ARSSI} dBm, host Strength $QUAL means ${WANT} dBm"
+  [ "$D" -le 3 ] && RMATCH=$(( RMATCH + 1 ))
+  # Only counts as the old formula's signature when the two forms disagree;
+  # at the bottom of the scale they coincide and prove nothing.
+  [ "$ARSSI" = "$OLD" ] && [ "$OLD" != "$WANT" ] && ROLD=$(( ROLD + 1 ))
+  sleep 2
+done
+if [ "$RN" -eq 0 ]; then
+  say "WARN not associated, or no RSSI reported -- nothing to compare"
+elif [ "$RMATCH" -gt 0 ]; then
+  say "OK   $RLAST ($RMATCH of $RN samples agreed)"
+elif [ "$ROLD" -eq "$RN" ]; then
+  say "FAIL $RLAST"
+  say "     and all $RN samples were exactly quality/2-100, so the daemon"
+  say "     predates the Stage 5 RSSI fix or an old binary is running"
+  FAIL=1
+else
+  say "WARN $RLAST -- no sample agreed within 3 dB, but none matched the old"
+  say "     quality/2-100 form either. NM's Strength for the connected AP lags,"
+  say "     so re-run before believing this."
+fi
+
+# Has a forgotten network left its passphrase behind on the host?
+#
+# The daemon writes a profile per network Android connects to and NOTHING used
+# to remove it, so forgetting a network in Android left its PSK in
+# NetworkManager indefinitely. waydroid-wifi-sync reaps them now. Ownership is
+# tested the way the daemon defines it -- an RFC 4122 v5 UUID over a fixed
+# namespace and the SSID -- and not by the " (Waydroid)" label, which anyone can
+# rename. See docs/59.
+echo "### is any of the daemon's profiles stale?"
+if ! command -v sha1sum >/dev/null 2>&1; then
+  say "WARN sha1sum is missing, so profile ownership cannot be checked here"
+else
+  NS='\x7f\x86\x2e\xff\x2c\xb3\x41\xe0\xad\xa9\x31\x51\x20\x0e\xf9\x7f'
+  wuuid() {
+    local h b6 b8
+    h=$( { printf '%b' "$NS"; printf '%s' "$1"; } | sha1sum | cut -d' ' -f1 )
+    b6=$(printf '%02x' "$(( (0x${h:12:2} & 0x0f) | 0x50 ))")
+    b8=$(printf '%02x' "$(( (0x${h:16:2} & 0x3f) | 0x80 ))")
+    printf '%s-%s-%s%s-%s%s-%s\n' "${h:0:8}" "${h:8:4}" "$b6" "${h:14:2}" \
+      "$b8" "${h:18:2}" "${h:20:12}"
+  }
+  # Same positional parse as waydroid-wifi-sync: an SSID may contain spaces, an
+  # id and a security type never do, so first and last fields are unambiguous.
+  SAVED=$(sh_ 'cmd wifi list-networks' |
+          awk 'NR > 1 && NF >= 3 { $1 = ""; $NF = ""; sub(/^[ \t]+/, "");
+                                   sub(/[ \t]+$/, ""); if ($0 != "") print }' |
+          sort -u)
+  STALE=0
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    sd=$(nmcli -g 802-11-wireless.ssid connection show "$u" 2>/dev/null)
+    [ -n "$sd" ] || continue
+    [ "$u" = "$(wuuid "$sd")" ] || continue
+    printf '%s\n' "$SAVED" | grep -qxF "$sd" && continue
+    say "FAIL \"$sd\" is not saved in Android but our profile still holds its PSK"
+    STALE=$(( STALE + 1 ))
+  done < <(nmcli -t -f UUID,TYPE connection show 2>/dev/null |
+           awk -F: '$2 == "802-11-wireless" { print $1 }')
+  if [ "$STALE" -gt 0 ]; then
+    say "     run: sudo waydroid-wifi-sync"
+    FAIL=1
+  else
+    say "OK   every profile of ours matches a network Android still has saved"
+  fi
+fi
+
 echo "### verdict"
 if [ "$FAIL" = 0 ]; then echo "  PASS"; else echo "  FAIL"; fi
 exit $FAIL

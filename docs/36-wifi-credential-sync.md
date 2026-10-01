@@ -242,6 +242,17 @@ journalctl -u waydroid-wifi-sync -n 20
 the same thing more quietly. **Shipped with nothing opted in**, so it does nothing until someone
 decides what to share.
 
+## A second half, added 2026-09-30
+
+This script now also reaps **the daemon's own `(Waydroid)` profiles** when Android no longer has the
+SSID saved — a different job from the one above, under different rules, and the reason it lives here
+is that the machinery was already right. Notably it forced a **reordering**: the allow-list gate used
+to be the first thing the script did, and the reap must run without one, because an empty allow-list
+is the default and our projections exist regardless. It also found that this script's two
+`*" (Waydroid)")` name tests were the wrong identity, for the reason
+[NmBackend.cpp](../wifi/NmBackend.cpp)'s `connectionId()` gives; both are now UUID tests. See
+[59-wifi-stage5-polish.md](59-wifi-stage5-polish.md).
+
 ## Still not done
 
 - **A passphrase changed on the host does not reach a network Android already has** — by choice, see
@@ -251,6 +262,8 @@ decides what to share.
 - **Nothing reconciles the reverse direction for networks Android adds**: those still create a
   `(Waydroid)` profile through the daemon, which remains a projection rather than a host-owned
   network. Whether an Android-added network should become a first-class host profile is a policy
-  question nobody has answered yet.
+  question nobody has answered yet. What *is* answered as of 2026-09-30 is the end of that
+  projection's life: forgetting the network in Android now removes it, rather than leaving the PSK
+  behind forever.
 - `Bss::known` is still dead. It could now carry "the host has a profile for this" into the scan
   result, but Android has no use for the bit, so there is nothing to spend it on.

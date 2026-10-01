@@ -61,6 +61,7 @@
 
 #include <gbinder.h>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -163,6 +164,24 @@ private:
      */
     int32_t mReportedState = -1;
     bool mConnecting = false;           /* select() called, not yet resolved */
+
+    /*
+     * The channel width the host last reported, cached from onHostLinkEvent so
+     * that getConnectionCapabilities() does not have to ask the backend.
+     *
+     * CACHED RATHER THAN FETCHED, AND THE REASON IS A DATA RACE.  Transaction
+     * handlers run on a binder thread -- see the note on requestCredentialSync()
+     * -- while link events arrive on the GLib main loop.  NmBackend::state()
+     * goes through wifiDevicePath(), which WRITES mDevPath and can rewrite
+     * mIfname when the radio has been renamed under us, so calling it from a
+     * handler races those strings against the main loop.  The event already
+     * carries everything wanted here and arrives before Android asks, since the
+     * COMPLETED we send from that same event is what makes it ask.
+     *
+     * Atomic because the two threads are genuinely different ones; it is one
+     * int and needs nothing heavier.
+     */
+    std::atomic<int32_t> mChannelWidthMhz{0};
 };
 
 } /* namespace wifi */

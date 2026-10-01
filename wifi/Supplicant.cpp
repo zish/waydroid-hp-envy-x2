@@ -864,11 +864,63 @@ Supplicant::handleStaIface(GBinderRemoteRequest* req, guint code, int* status)
          * Arrays are different again: listInterfaces() above writes a LENGTH
          * there, not a marker, because createTypedArray() is length-prefixed.
          */
+        /*
+         * technology STAYS UNKNOWN, AND THAT IS A CONCLUSION RATHER THAN A GAP.
+         *
+         * It wants the PHY the station NEGOTIATED -- HT, VHT, HE, EHT -- and
+         * NetworkManager does not have that. The only candidate it exposes is
+         * AccessPoint.MaxBitrate, which is the AP's ADVERTISED CAPABILITY and
+         * not a rate on this link. Measured on bigtab01, every AP in range:
+         *
+         *     freq=2422  bw=20  MaxBitrate=1170000   NTGRBH_E0C2500D818B
+         *     freq=2462  bw=20  MaxBitrate=1170000   f48fc5
+         *     freq=2412  bw=20  MaxBitrate= 540000   Harpoapt
+         *
+         * 1170 Mb/s on a 20 MHz channel at 2.4 GHz is not a slow link being
+         * reported optimistically, it is physically impossible -- so the number
+         * is the AP's best case across all its radios and widths, and cannot be
+         * inverted into a PHY. Nor would the AP's capability answer the
+         * question if it could: the technology is the MINIMUM of the AP's and
+         * the station's, and this machine's card is a 2x2 HT/VHT Broadwell-era
+         * part that will negotiate VHT against the HE AP above. Reporting HE
+         * from the beacon would be wrong on exactly the networks where the
+         * field matters.
+         *
+         * The value is available from nl80211 -- NL80211_STA_INFO_TX_BITRATE's
+         * RATE_INFO flags are what `iw link` prints as "MCS 15 short GI" -- so
+         * this is a missing 300 lines of netlink, not missing information. It is
+         * NOT worth faking in the meantime: UNKNOWN makes
+         * ThroughputPredictor.predictThroughput() fall back to a floor, which is
+         * visible in `dumpsys wifi` as a flat txTput=10,rxTput=10, whereas a
+         * wrong standard makes it predict confidently and wrongly.
+         *
+         * channelBandwidth is different and IS reported: NM's
+         * AccessPoint.Bandwidth is the operating width from the HT/VHT/HE
+         * operation IE, which is a real property of the channel in use.
+         *
+         * The framework's side of both was read out of this image's
+         * service-wifi.jar rather than assumed --
+         * SupplicantStaIfaceHalAidlImpl.getChannelBandwidth() maps 1..4
+         * identically, 7 to CHANNEL_WIDTH_320MHZ and everything else to
+         * CHANNEL_WIDTH_20MHZ, so the wire value is WifiChannelWidthInMhz.
+         * See docs/59-wifi-stage5-polish.md.
+         */
+        int32_t bandwidth = 0;          /* WifiChannelWidthInMhz.WIDTH_20 */
+        switch (mChannelWidthMhz.load()) {
+        case 40:  bandwidth = 1; break;          /* WIDTH_40 */
+        case 80:  bandwidth = 2; break;          /* WIDTH_80 */
+        case 160: bandwidth = 3; break;          /* WIDTH_160 */
+        case 320: bandwidth = 7; break;          /* WIDTH_320 */
+        default:  bandwidth = 0; break;          /* 20, and "host did not say" */
+        }
+        GDEBUG("getConnectionCapabilities() -> technology UNKNOWN, "
+               "channelBandwidth %d", bandwidth);
+
         GBinderLocalReply* reply = beginReply(mStaIface, &writer, status);
         gbinder_writer_append_int32(&writer, 1);         /* non-null marker */
         gbinder_writer_append_int32(&writer, 4 + 5 * 4); /* parcelable size */
         gbinder_writer_append_int32(&writer, 0);        /* technology UNKNOWN */
-        gbinder_writer_append_int32(&writer, 0);        /* channelBandwidth 20 */
+        gbinder_writer_append_int32(&writer, bandwidth);
         gbinder_writer_append_int32(&writer, 1);        /* max tx streams */
         gbinder_writer_append_int32(&writer, 1);        /* max rx streams */
         gbinder_writer_append_int32(&writer, 0);        /* legacyMode UNKNOWN */
@@ -1351,6 +1403,10 @@ Supplicant::onHostLinkEvent(const LinkState& st, LinkEvent ev)
 
     GDEBUG("host link event: %s (associated=%d)", linkEventName(ev),
            st.associated);
+
+    /* Cached for getConnectionCapabilities(); see the member's note. Only while
+     * associated -- a width from a link that has gone is not a width. */
+    mChannelWidthMhz.store(st.associated ? st.channelWidthMhz : 0);
 
     switch (ev) {
     case LinkEvent::Associating:

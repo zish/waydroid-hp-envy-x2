@@ -294,8 +294,12 @@ evidence rather than proof. Two consequences if it holds:
   the file has uncommitted work from another session referencing `docs/36-packaging.md` and
   `docs/37-brightness.md`, which are themselves untracked, so committing it would cite files that
   do not exist. It needs a pass once that work lands.
-- **`/etc/waydroid-wifid.conf` on the host has the new value but the old commentary.** The installer
-  writes that file only when absent, so updating the repo template does not propagate to a host that
-  already has one.
-- **Signal and state fidelity in Android's UI remains unreviewed**, unchanged from
-  [35-wifi-stage5.md](35-wifi-stage5.md).
+- ~~**`/etc/waydroid-wifid.conf` on the host has the new value but the old commentary.**~~ **DONE
+  2026-09-30** — hand-copied after confirming the `WAYDROID_WIFID_ARGS` line was already identical,
+  previous file kept as `/etc/waydroid-wifid.conf.bak-20260930`. The installer still writes that
+  file only when absent, so the next template edit will need the same treatment.
+- ~~**Signal and state fidelity in Android's UI remains unreviewed**~~ **REVIEWED 2026-09-30, and
+  the signal half was wrong by up to 10 dB** — see
+  [59-wifi-stage5-polish.md](59-wifi-stage5-polish.md). The state half holds up; what is left is
+  that packet counters and link-layer stats are all zero for want of a vendor HAL, and Rx link
+  speed is reported as Tx because NM exposes one `Bitrate`.

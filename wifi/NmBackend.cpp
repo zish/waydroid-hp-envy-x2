@@ -886,6 +886,51 @@ NmBackend::startScan()
     return true;
 }
 
+static int32_t
+rssiFromQuality(guint32 quality)
+{
+    /*
+     * NM reports Strength as 0..100, Android wants dBm.  This is the EXACT
+     * inverse of NM's own nm_wifi_utils_level_to_quality(), which is
+     *
+     *     quality = 100 - (int)(100.0 * |clamp(dBm, -100, -40) + 40| / 60.0)
+     *
+     * so the representable range is -100..-40 dBm and the step is 3/5 dBm per
+     * quality point.  Inverting it gives -100 + 3 * quality / 5, and C's
+     * truncating division lands on the same value NM truncated away.
+     *
+     * IT USED TO BE quality / 2 - 100, WHICH IS WRONG EVERYWHERE BUT 0.
+     * That mapping assumed the range was -100..-50, so its slope was 1/2
+     * instead of 3/5 and it read low by quality/10 dB -- 0 dB at the bottom of
+     * the range, 10 dB at the top.  Measured on bigtab01 against nl80211 by
+     * pairing NM's Strength with `iw dev wlp1s0 scan dump`'s signal FROM THE
+     * SAME SCAN (pairing across scans measures nothing but the signal moving):
+     *
+     * Both columns below are the INTEGER results, i.e. what each form of this
+     * function actually returned, not the real-valued mapping:
+     *
+     *     NM  iw dBm   q/2-100   -100+3q/5
+     *      7     -96    -97  -1     -96  +0
+     *     20     -88    -90  -2     -88  +0
+     *     40     -76    -80  -4     -76  +0
+     *     70     -58    -65  -7     -58  +0
+     *     72     -57    -64  -7     -57  +0
+     *
+     * 13 distinct APs, every one of them exact under this form and every one
+     * wrong under the old one.  The cost of the old form was not cosmetic:
+     * this machine's AP sits at about -62 dBm and Android was being told -71,
+     * and `dumpsys wifi`'s ScoringParams on this image are
+     * rssi2=-83:-80:-73:-60 (exit:entry:sufficient:good).  So a link 1 dB shy
+     * of "good" was reported 1.5 dB above "insufficient", 11 dB from the
+     * threshold at which the framework gives up on the network -- turning an
+     * ordinary fade into a teardown.  See docs/59-wifi-stage5-polish.md.
+     */
+    if (quality > 100) {
+        quality = 100;
+    }
+    return -100 + (int32_t) (3 * quality) / 5;
+}
+
 static Security
 securityFromFlags(guint32 flags, guint32 wpa, guint32 rsn)
 {
@@ -983,18 +1028,7 @@ NmBackend::scanResults()
 
         bss.freqMhz = (int32_t) propUint(path, NM_AP, "Frequency");
 
-        /*
-         * NM reports Strength as 0..100, Android wants dBm.  This is the
-         * inverse of NM's own wifi_utils nm_wifi_utils_level_to_quality()
-         * approximation; it is a mapping, not a measurement, and it is one of
-         * the things that would improve if a future backend read the RSSI
-         * from nl80211 directly.
-         */
-        guint32 quality = propUint(path, NM_AP, "Strength");
-        if (quality > 100) {
-            quality = 100;
-        }
-        bss.rssiDbm = (int32_t) (quality / 2) - 100;   /* 0 -> -100, 100 -> -50 */
+        bss.rssiDbm = rssiFromQuality(propUint(path, NM_AP, "Strength"));
 
         guint32 apFlags  = propUint(path, NM_AP, "Flags");
         guint32 wpaFlags = propUint(path, NM_AP, "WpaFlags");
@@ -1584,13 +1618,16 @@ NmBackend::state()
     }
 
     st.freqMhz = (int32_t) propUint(ap.c_str(), NM_AP, "Frequency");
-    guint32 quality = propUint(ap.c_str(), NM_AP, "Strength");
-    if (quality > 100) {
-        quality = 100;
-    }
-    st.rssiDbm = (int32_t) (quality / 2) - 100;
+    st.rssiDbm = rssiFromQuality(propUint(ap.c_str(), NM_AP, "Strength"));
     st.txRateKbps = (int32_t) propUint(ap.c_str(), NM_AP, "MaxBitrate");
     st.rxRateKbps = st.txRateKbps;
+
+    /*
+     * NM 1.44 added AccessPoint.Bandwidth, in MHz, from the HT/VHT/HE operation
+     * IE the supplicant parsed.  Absent on older NM, which propUint reports as
+     * 0 -- the same thing channelWidthMhz means by "do not know".
+     */
+    st.channelWidthMhz = (int32_t) propUint(ap.c_str(), NM_AP, "Bandwidth");
     return st;
 }
 

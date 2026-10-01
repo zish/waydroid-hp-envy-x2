@@ -94,6 +94,16 @@ struct LinkState {
     int32_t     txRateKbps = 0;
     int32_t     rxRateKbps = 0;
     std::string ipv4;
+
+    /*
+     * The width of the channel the AP is operating on, in MHz; 0 if the host
+     * does not know.  The AP's width and not the station's: a station may
+     * negotiate narrower, and no host interface here reports what it settled
+     * on.  Close enough to be worth reporting and not close enough to call a
+     * measurement -- see the note on technology in
+     * Supplicant.cpp's getConnectionCapabilities.
+     */
+    int32_t     channelWidthMhz = 0;
 };
 
 /*
