@@ -15,7 +15,7 @@ you to anything else and updating it does not disturb anything else.
 > deb has been published yet. If you are here now, you are reading the plan and the
 > engineering notes, not a download page.
 
-## Read these two pages first
+## Read these pages first
 
 They are short, and between them they cover every way these packages can appear broken when
 nothing is wrong with them:
@@ -28,6 +28,12 @@ nothing is wrong with them:
 - **[Custom Waydroid LXC configuration](docs/user/lxc-config.md)** — what the host daemons need
   from the container's configuration, which of those files Waydroid regenerates behind your
   back, and what breaks if your setup differs.
+- **[Installing these packages on an rpm-ostree host](docs/user/ostree.md)** — only if your host
+  is Silverblue, Kinoite, Sericea or CoreOS. An installed package does not take effect until the
+  next boot, and the step in between is finalized *during shutdown* — so a hard power-off
+  discards it with no error, and a later clean reboot does not rescue it. Also covers why
+  replacing a locally-installed package needs one combined transaction, and why a hand-placed
+  file in `/etc` or `/usr/local` can leave a correctly installed package entirely unused.
 
 ## What there is
 
