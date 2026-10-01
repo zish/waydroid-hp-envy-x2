@@ -5,6 +5,13 @@ showing "connected to vidiot" with no internet while the host could ping `8.8.8.
 Neither turned out to be in the part of the stack it appeared to be in, and the second one shares a
 root cause with goal 7.
 
+> **The mitigation this document produced can stand down exactly when it is needed.**
+> `waydroid-restartd`'s circuit breaker is 8 kills in 300 s, and one zygote restart wedges eight
+> services at once — so on 2026-10-01 it spent its whole budget in 2.6 s, stood down for an hour
+> with `zygote` still stuck, and `system_server` crash-looped 212 times starting 11 s later. The
+> breaker guards against a ping-pong *loop* and cannot tell one from a wide *cascade*. See
+> [61-restartd-breaker-boot-loop.md](61-restartd-breaker-boot-loop.md).
+
 ## One-paragraph summary
 
 Both faults are the same *shape*: something inside the container that cannot be refreshed. The

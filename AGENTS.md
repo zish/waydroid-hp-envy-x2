@@ -486,6 +486,23 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    is worth remembering the next time one of those misbehaves after a framework restart. Mitigated,
    not fixed, by `artifacts/restartd/`; this goal is the real fix. See
    [docs/48-battery-frozen-and-netd-stale.md](docs/48-battery-frozen-and-netd-stale.md).
+   **And the mitigation has now failed once, which raises the priority of this goal.** On
+   2026-10-01 a cold boot wedged on the LineageOS animation for an hour with
+   `waydroid-restartd` installed and running. Its circuit breaker is **8 kills in 300 s** and one
+   zygote restart wedges **eight services at once** — `idmap2d`, `zygote`, `audioserver`,
+   `cameraserver`, `media`, `netd`, `vendor.audio-hal`, `zygote_secondary` — so the entire budget
+   went in **2.6 seconds**, the breaker stood down for an hour with `zygote` still stuck, and
+   `system_server` crash-looped **212 times** starting 11 s later. The breaker guards against a
+   ping-pong *loop* and cannot distinguish one from a wide *cascade*; on this image it will
+   therefore fire on the first cascade essentially every time. Four candidate fixes are listed in
+   [docs/61](docs/61-restartd-breaker-boot-loop.md) — raise the budget (the
+   `WAYDROID_RESTARTD_MAX_KILLS` knob already exists), count cascades rather than kills, repair
+   `zygote` first because its wedge is the only fatal one, or do this goal and make the kill work.
+   **None are implemented.** Note also that the same incident presents with
+   [docs/51](docs/51-pid-namespace-32bit-cliff.md)'s exact symptom and its documented red-herring
+   stack, and was misdiagnosed as it before three checks separated them: no Watchdog kills, the
+   32-bit audio HAL alive, container PIDs nowhere near the cliff. See
+   [docs/61-restartd-breaker-boot-loop.md](docs/61-restartd-breaker-boot-loop.md).
 
 8. **Bluetooth — managing the host's BlueZ from an Android app.** **Added 2026-09-21 at the
    owner's request; built, working and proven the same day — the owner paired a Galaxy S24 Ultra

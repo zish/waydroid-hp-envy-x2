@@ -5,6 +5,15 @@ animated boot logo." Nothing had restarted. The container and the cage session w
 old and had never stopped. What had happened is that the container's PID namespace counter walked
 past **65535**, and every 32-bit process in the image has been unable to start since.
 
+> **A different cause produces this same symptom — read this before assuming the PID cliff.**
+> On 2026-10-01 a cold boot wedged on the LineageOS animation with the `DisplayModeDirector` /
+> `getRefreshRateInHbmHdr` stack below, and it was **not** this document: no Watchdog kills, the
+> 32-bit audio HAL alive, highest container PID 14963. It was
+> [docs/48](48-battery-frozen-and-netd-stale.md)'s wedged-services mechanism with
+> `waydroid-restartd`'s circuit breaker standing down mid-repair. Three checks separate them, and
+> `init.svc.<name>` reading `stopping` on several services at once is the tell for the other one.
+> See [61-restartd-breaker-boot-loop.md](61-restartd-breaker-boot-loop.md).
+
 ## One-paragraph summary
 
 32-bit bionic cannot represent a thread id above 65535 in `pthread_mutex_t`, and aborts the process
