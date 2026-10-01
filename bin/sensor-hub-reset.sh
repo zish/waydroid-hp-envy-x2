@@ -143,8 +143,20 @@ fi
 # with the session. The result is the SDDM greeter and no way back without a
 # physical login. bin/camera-test.sh did exactly this on 2026-09-30 and cost a
 # trip to the machine; the same guard is here so --restart cannot repeat it.
-export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
-       DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+# THE DISPLAY IS NOT ALWAYS wayland-1. This used to hardcode it, and the number
+# is just the order cage got its socket: it was wayland-1 when this was written
+# and wayland-0 after the session was restarted on 2026-09-30. So honour an
+# inherited WAYLAND_DISPLAY, then look for whatever socket is actually there, and
+# only fall back to a literal for the error message.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
+if [ -z "${WAYLAND_DISPLAY:-}" ] || [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+	for _s in "$XDG_RUNTIME_DIR"/wayland-[0-9]*; do
+		case "$_s" in *'*'*) continue ;; esac
+		[ -S "$_s" ] && { WAYLAND_DISPLAY=${_s##*/}; break; }
+	done
+fi
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 if [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
 	echo "### REFUSING --restart: no Wayland compositor at" \
 	     "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" >&2

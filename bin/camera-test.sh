@@ -20,8 +20,19 @@
 # exactly this and the script carried no guard, so the guard is now here.
 set -u
 LABEL="${1:-test}"
-export XDG_RUNTIME_DIR=/run/user/1000
-export WAYLAND_DISPLAY=wayland-1
+# THE DISPLAY IS NOT ALWAYS wayland-1. This used to hardcode it, and the number
+# is just the order cage got its socket: it was wayland-1 when this was written
+# and wayland-0 after the session was restarted on 2026-09-30. So honour an
+# inherited WAYLAND_DISPLAY, then look for whatever socket is actually there, and
+# only fall back to a literal for the error message.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
+if [ -z "${WAYLAND_DISPLAY:-}" ] || [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+	for _s in "$XDG_RUNTIME_DIR"/wayland-[0-9]*; do
+		case "$_s" in *'*'*) continue ;; esac
+		[ -S "$_s" ] && { WAYLAND_DISPLAY=${_s##*/}; break; }
+	done
+fi
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 
 # Refuse rather than warn. The failure is unrecoverable without physical access,
 # so a prompt nobody is there to read is worse than an exit.

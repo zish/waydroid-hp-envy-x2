@@ -627,6 +627,66 @@ Those two are the only scripts in `bin/` that perform the disruption — swept r
 one-off. The rest only mention it in comments. **Safe over ssh**: `wifi-test.sh`,
 `battery-test.sh`, `sensors-test.sh`, `brightness-test.sh`.
 
+### Two session losses, one of them mine, and a duplicate session entry
+
+The second loss is not explained and is recorded here unfinished rather than
+guessed at.
+
+`waydroid-cage-session` logs every start and end, and this boot has three events:
+
+```
+21:15:41  starting Waydroid on wayland-0
+21:15:43  Android is up (container: RUNNING)
+21:24:54  session ended after 553s      <- bin/camera-test.sh, my fault
+21:45:31  starting Waydroid on wayland-0
+21:45:33  Android is up (container: RUNNING)
+21:47:46  session ended after 135s      <- unexplained
+```
+
+The 135 s one was **not** the cage script's decision. It printed only
+`session ended after 135s`, and both of the lines that precede its `kill -TERM`
+— `Android has shut down; releasing the session` and `ending the session` — are
+absent, which means the `kill -0 "$child"` guard failed: the
+`waydroid session start` session manager **had already exited on its own**. The
+`Stopping container` the container service logged at 21:47:45 is it reacting, not
+causing. So the loop ended on its `while kill -0 "$child"` condition and the
+script wound up correctly after its child died.
+
+What killed the session manager is unknown. The one correlation: it exited about
+230 ms after an ssh login for uid 1000, and `/etc/pam.d/sshd` carries
+`pam_namespace.so` — `/run/user/1000` seen over ssh contains `bus`, `pipewire-0`
+and `systemd` but **no `wayland-0`**, so an ssh session genuinely gets a
+different mount namespace than the compositor's. That is a lead and not a
+finding; the 21:15 session survived nine minutes of far heavier ssh traffic.
+
+**The actionable part is a duplicate session entry, which this install created:**
+
+```
+/usr/share/wayland-sessions/waydroid-cage.desktop   Exec=... /usr/bin/waydroid-cage-session
+    rpm: waydroid-ext-cage-1.0.0
+/etc/wayland-sessions/waydroid-cage.desktop         Exec=... /usr/local/bin/waydroid-cage-session
+    rpm: unowned (hand-placed)
+```
+
+Two entries for one session, so the greeter can offer it twice and which script
+runs depends on which is picked. Both logins this boot took the packaged
+`/usr/bin` one, and the 553 s session proves that script works — the hand-placed
+and packaged copies differ only by the install prefix. The hand-placed
+`.desktop` is the one to remove, but **not while the 135 s death is unexplained**:
+it is the only remaining route to the previously-known-good path, and deleting
+the fallback before understanding the failure is the wrong order.
+
+### A latent bug in the guard above, found by the restart
+
+The session came back on **`wayland-0`**, where it had been `wayland-1`.
+`camera-test.sh` had `export WAYLAND_DISPLAY=wayland-1` hardcoded, and the guard
+added earlier in this document inherited it — so the guard would have refused
+even from inside a healthy session, and the script could not have reached the
+compositor either. Both scripts now honour an inherited `WAYLAND_DISPLAY`, then
+look for whatever `wayland-[0-9]*` socket actually exists, and only fall back to
+a literal for the error message. The number is just the order cage got its
+socket; nothing guarantees it.
+
 ## Running it
 
 ```bash
