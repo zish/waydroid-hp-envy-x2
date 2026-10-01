@@ -312,8 +312,13 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    the read-only ostree `/usr` — so install-then-restart reports success and runs the old code. It
    cost a wrong conclusion mid-session; the tell was a log string, not a version. A reversible
    systemd drop-in stands in for a test, and is on bigtab01 now running a binary byte-identical to
-   `waydroid-ext-wifid-1.1.0`, which is **built and deliberately not deployed** — `rpm-ostree`
-   wants a reboot and this is a kiosk host.
+   `waydroid-ext-wifid-1.1.0`, which is **installed as a staged deployment and pending a reboot** as
+   of 2026-10-01. Replacing an already-layered *local* package needs the uninstall and install in
+   one `rpm-ostree` transaction — a plain `install` fails to depsolve against the layered copy,
+   which is itself a commandline request. `db diff` shows one change and no kernel movement, and
+   the staged `/usr/bin/waydroid-wifid` is byte-identical to the binary tested on the host. The
+   drop-in stays through the reboot on purpose, as a fallback to an identical binary, so the
+   `/usr/local` copy is what runs until it is removed.
    See [docs/60-wifi-nl80211.md](docs/60-wifi-nl80211.md).
    **Still open**: the host's link dropped twice for ~10 minutes on 2026-09-18 while Android sat in
    its failed-validation retry loop on the same radio, uninvestigated and a caution about
