@@ -528,6 +528,75 @@ migrating them is a small job plus a post-reboot check each; `media` must not be
 rebuilt from current source, and until then the shadowing is the only thing keeping removable media
 working. That the protection is accidental is the point — nothing would have reported it.
 
+## After the reboot: everything landed, and three test scripts were lying
+
+The deployment booted clean. All **24** `waydroid-ext` packages are installed, the **packaged units
+are the ones in effect** (`/usr/lib/systemd/system/...`, not `/etc`), and `waydroid-wifid` runs as
+`/usr/bin/waydroid-wifid` owned by `waydroid-ext-wifid-1.0.1-1.x86_64`. The only failed unit is
+`systemd-remount-fs`, which has failed since 2026-09-12 and is ordinary read-only-root behaviour.
+
+The overlay reconciled to **exactly** what was predicted: 9 of 9 owned files at the expected hashes,
+**both derive rows included** — so `battery` 2.0.0 and `camera-hal` 2.0.0 really did reconstruct
+their binaries out of `vendor.img`, patch them, and land on the hashes the hand-placed copies had.
+The four Widevine files came through unchanged and nothing was lost. Confirmed from *inside* the
+container, which is the only place that counts: the health HAL there hashes to `a8401c14…`, the
+derive's recorded result.
+
+`bin/wifi-test.sh` passes end to end, and the RSSI check agreed **4 of 4 samples** running from the
+packaged binary. The battery poll timer is armed on the mechanism docs/48 demands —
+`clockid: 7`, `it_interval: (60, 0)` out of `/proc/<pid>/fdinfo` — and the `RLIMIT_NICE` spam
+docs/40 is about is 4 lines this boot against the ~1,000,000 it was.
+
+### Three test scripts reported a working machine as broken
+
+This is the part worth carrying forward, because none of the three failures was in the thing being
+tested and two of them had been silently wrong for days.
+
+**`bin/battery-test.sh` had `PATCHED_MD5` pinned to the three-byte patch.** docs/48 added two more
+bytes on 2026-09-18 and nobody updated the constant, so from that day the script's *first* check
+declared a correctly patched machine broken and `exit 1`ed — which meant every check below it
+stopped running, and the message blamed the overlay not being live. Proved by reconstruction: all
+five patches against the stock image give the md5 the machine actually has, and the pinned value is
+reproduced by applying only the three at `0x6730`, `0x6731`, `0x6732`.
+
+The fix is not a new constant. A hash of a patched binary cannot be maintained by hand — it moves
+whenever the patch set does — and the thing that knows the patch set is `waydroid-ext-battery`'s
+manifest, which records the result hash the reconciler itself verifies against. The script now reads
+the expected hash from there and only falls back to a pinned value on a host with no package.
+
+**`bin/sensors-test.sh` pointed at `/usr/local/bin/waydroid-sensord`**, a path the 2026-09-24
+migration deleted. Section 4 ran a non-existent command with stderr sent to `/dev/null`, printed
+nothing at all, set `FAIL=1` from the exit status, and the script closed with `FAILURES -- see above`
+with no failure above it. Every sensor check passed throughout. Resolved with `command -v` now, and
+it says so loudly if the daemon cannot be found. With that fixed the suite reports **ALL PASS**,
+self-test included.
+
+**`bin/wifi-test.sh` tested survival-across-reboot with `systemctl is-enabled`**, and this one is
+*our* doing — it broke the moment the packaged unit took over. `is-enabled` defines "enabled" as a
+symlink under `/etc`, and these packages deliberately ship theirs inside
+`/usr/lib/systemd/system/<target>.wants/` because a `%post` running `systemctl enable` on an ostree
+host executes against the compose. So the script warned that the daemon would not survive a reboot
+while reading that off a daemon which just had. It now asks whether a target *wants* the unit, which
+is true for both layouts. Its sibling check was pinned to `/usr/local/bin/waydroid-wifi-nudge`,
+which this session's own migration moved.
+
+**The common shape: a check that cannot distinguish "the thing is broken" from "I am looking in the
+wrong place."** All three failed in the safe-looking direction — a false alarm rather than a false
+pass — but a suite that cries wolf stops being read, and `battery-test.sh` exiting 1 on its first
+check hid eleven real comparisons behind it.
+
+### Still shadowed, on purpose
+
+`media`, `cage`, `graceful-exit`, `android-power` and `hw-ite8350` still run their hand-placed
+copies. Verified that this is working as intended: `waydroid-mediad.service` resolves to
+`/etc/systemd/system/` and is active, so removable media is unaffected by the stale `media` 1.0.0
+sitting inert beside it.
+
+One tidy left: `nice-limit.conf` now exists twice, hand-placed in
+`/etc/systemd/system/waydroid-container.service.d/` and packaged in
+`/usr/lib/systemd/system/waydroid-container.service.d/`. They are byte-identical and drop-ins merge,
+so `LimitNICE=40` is applied either way; the `/etc` copy is simply redundant now.
+
 ## Running it
 
 ```bash

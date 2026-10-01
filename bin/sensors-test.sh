@@ -16,7 +16,13 @@
 # --stimulate launches Open Camera first, which subscribes to more of them.
 set -u
 
-DAEMON=/usr/local/bin/waydroid-sensord
+# Resolved, not pinned. This said /usr/local/bin/waydroid-sensord, and the
+# 2026-09-24 migration to waydroid-ext-sensord moved the binary to /usr/bin and
+# deleted that path. Section 4 then ran a non-existent command with stderr sent
+# to /dev/null, printed nothing at all, set FAIL=1 from its exit status, and the
+# script closed with "FAILURES -- see above" above which there was no failure.
+# Every sensor check passed throughout. Found 2026-09-30.
+DAEMON=$(command -v waydroid-sensord 2>/dev/null || echo /usr/bin/waydroid-sensord)
 IIO=/sys/bus/iio/devices
 FAIL=0
 STIMULATE=0
@@ -107,8 +113,16 @@ note "$EXTRA additional sensors synthesised by Android from these"
 echo "### 4. daemon self-test against live hardware"
 # Runs a second, independent instance: it only reads sysfs and never touches
 # binder, so it cannot disturb the one serving Android.
-"$DAEMON" --selftest 2>/dev/null | sed 's/^/  /'
-[ "${PIPESTATUS[0]}" = 0 ] || FAIL=1
+# Say so when the daemon cannot be found, rather than failing mutely: an empty
+# section followed by a bare "FAILURES" is the least useful output this script
+# could produce, and it is what it produced for six days.
+if [ ! -x "$DAEMON" ]; then
+  echo "  FAIL  no waydroid-sensord executable found (tried PATH and $DAEMON)"
+  FAIL=1
+else
+  "$DAEMON" --selftest 2>&1 | sed 's/^/  /'
+  [ "${PIPESTATUS[0]}" = 0 ] || FAIL=1
+fi
 
 echo "### 5. do Android's values match the host's IIO nodes?"
 # Take the newest event Android recorded for each sensor, and bracket it with a

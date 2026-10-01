@@ -67,16 +67,33 @@ unconfined_t)
   FAIL=1 ;;
 esac
 
-if systemctl is-enabled --quiet waydroid-wifid.service 2>/dev/null; then
-  say "OK   waydroid-wifid.service is enabled, so it survives a reboot"
+# DO NOT TEST THIS WITH `systemctl is-enabled`. It used to, and from the moment
+# waydroid-ext-wifid was installed it called a working setup broken.
+#
+# `is-enabled` defines "enabled" as a symlink under /etc. The packages
+# deliberately ship theirs inside /usr/lib/systemd/system/<target>.wants/
+# instead, because on an rpm-ostree host a %post running `systemctl enable`
+# executes against the compose and not the booted system (packaging/README.md).
+# systemd honours those symlinks for activation and `is-enabled` still answers
+# "disabled" -- so the old check reported that the daemon would not survive a
+# reboot while reading that very sentence off a daemon that just had.
+#
+# The question is whether a target wants the unit, which is true for both
+# layouts, so ask that and fall back to is-enabled for a hand-installed host.
+if systemctl show -p Wants --value multi-user.target 2>/dev/null |
+       tr ' ' '\n' | grep -qx 'waydroid-wifid.service' ||
+   systemctl is-enabled --quiet waydroid-wifid.service 2>/dev/null; then
+  say "OK   multi-user.target wants waydroid-wifid.service, so it survives a reboot"
 else
-  say "WARN waydroid-wifid.service is not enabled -- the daemon will not come"
+  say "WARN nothing wants waydroid-wifid.service -- the daemon will not come"
   say "     back after a reboot. Install it with: wifi/build.sh --install --unit"
 fi
-if [ -x /usr/local/bin/waydroid-wifi-nudge ]; then
-  say "OK   waydroid-wifi-nudge is installed"
+# Resolved rather than pinned to /usr/local/bin, which is where it lived until
+# waydroid-ext-wifid took it over and moved it to /usr/bin.
+if NUDGE=$(command -v waydroid-wifi-nudge 2>/dev/null) && [ -x "$NUDGE" ]; then
+  say "OK   waydroid-wifi-nudge is installed ($NUDGE)"
 else
-  say "WARN no waydroid-wifi-nudge. After a daemon restart Android's own"
+  say "WARN no waydroid-wifi-nudge on PATH. After a daemon restart Android's own"
   say "     SelfRecovery quota (2/hour, and one restart spends 2-3) leaves"
   say "     Wi-Fi switched off with nothing to turn it back on. See docs/35."
 fi
