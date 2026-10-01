@@ -10,11 +10,14 @@
 
 #pragma once
 
+#include "Nl80211.h"
 #include "WifiBackend.h"
 
 #include <gio/gio.h>
 
+#include <atomic>
 #include <map>
+#include <mutex>
 #include <utility>
 
 namespace waydroid {
@@ -39,12 +42,13 @@ public:
     bool disconnect() override;
     bool forget(const std::string& ssid) override;
     LinkState state() override;
+    bool radioCapabilities(RadioCaps& out) override;
     void onLinkEvent(
         std::function<void(const LinkState&, LinkEvent)> cb) override;
 
     std::vector<std::string> devices() override;
     bool selectDevice(const std::string& spec) override;
-    std::string selectedDevice() const override { return mIfname; }
+    std::string selectedDevice() const override;
 
     void macAddress(uint8_t out[6]) override;
 
@@ -66,6 +70,22 @@ private:
 
     /* Resolve the Wi-Fi device object path for mIfname, "" if none. */
     std::string wifiDevicePath();
+
+    /*
+     * Overwrite the measurements in `st` with the radio's own, where nl80211
+     * reported them.  See the long note at the definition: NM stays the backend
+     * and this replaces only what NM cannot measure or measures worse.
+     */
+    void overlayNl80211(LinkState& st);
+
+    /* Open nl80211 and cache the radio's capabilities; never fatal. */
+    void startNl80211();
+
+    /*
+     * Re-resolve mIfindex from mIfname.  Call with mDevLock held, every time
+     * mIfname changes -- the binder threads read the result and never the name.
+     */
+    void refreshIfindex();
 
     /*
      * Every Wi-Fi device NM knows about, as (object path, interface name).
@@ -121,6 +141,54 @@ private:
         const gchar* path, const gchar* iface, const gchar* signal,
         GVariant* params, gpointer user);
     void deviceStateChanged(guint32 newState, guint32 oldState, guint32 reason);
+
+    /*
+     * nl80211, for the things NM structurally cannot answer: the negotiated PHY,
+     * the RX bitrate as distinct from TX, the packet counters, and an RSSI that
+     * is the driver's dBm rather than NM's polled 0..100 quality.  See
+     * Nl80211.h.  Optional throughout -- every value it supplies has the NM
+     * fallback that was in service before it existed.
+     */
+    Nl80211 mNl;
+
+    /*
+     * The kernel interface index of the selected radio, or 0.
+     *
+     * ATOMIC, AND THAT IS THE WHOLE POINT.  nl80211 calls are made from binder
+     * transaction handlers, i.e. on binder threads, and an int is the only thing
+     * this class can hand them without sharing something the main loop mutates.
+     * Passing mIfname instead would reintroduce the data race docs/59 recorded,
+     * because wifiDevicePath() rewrites that string when the radio is renamed.
+     *
+     * Written only where mIfname is written, and always under mDevLock.
+     */
+    std::atomic<int> mIfindex{0};
+
+    /* The radio's capabilities, read once at init(); see radioCapabilities(). */
+    RadioCaps mCaps;
+
+    /*
+     * Guards mIfname, mDevPath, mSelectorMac and mIfindex.
+     *
+     * THE RACE THIS CLOSES, AND WHY IT IS A LOCK AND NOT A HANDOFF.  Transaction
+     * handlers run on binder threads while link events arrive on the GLib main
+     * loop, and wifiDevicePath() WRITES mDevPath and can rewrite mIfname -- so
+     * getMacAddress, connect, disconnect and state all raced two std::strings
+     * against the main loop.  docs/59 recorded this as open and called it a
+     * design question rather than a patch, so here is the design, stated:
+     *
+     * The alternative -- handlers post work to the main loop and wait -- can
+     * DEADLOCK here, and that is what settles it.  The main loop itself calls
+     * into Android: it sends COMPLETED to the supplicant callback from
+     * onHostLinkEvent.  A binder thread blocking on the main loop while the main
+     * loop blocks on a binder transaction is a cycle with no timeout on it.  A
+     * mutex has no such cycle, because nothing held under it ever waits on
+     * another thread of ours -- only on D-Bus and on netlink, which are both
+     * timeout-bounded calls to another process.
+     *
+     * Recursive because selectDevice() holds it across wifiDevicePath().
+     */
+    std::recursive_mutex mDevLock;
 
     GDBusConnection* mBus = nullptr;
     std::string mIfname;                 /* selected host interface, e.g. wlp1s0 */

@@ -32,6 +32,13 @@
 # and libgbinder as the only runtime dependencies -- all already on bigtab01 as
 # Waydroid's own dependencies.
 #
+# nl80211 deliberately adds NOTHING to that list.  Nl80211.cpp talks to the
+# kernel over a raw AF_NETLINK socket using only <linux/nl80211.h>, which is
+# kernel uAPI and ships with the C library's headers, rather than linking libnl
+# -- which is not even installed on this dev box, and which would have meant two
+# more runtime dependencies, two more .so files for --deps to copy off the host,
+# two more pkg-config names below, and two new RPM Requires.  See Nl80211.h.
+#
 # That is the right answer for a dev box that has to match a host it cannot
 # compile on, and the wrong one inside rpmbuild, which must be offline and must
 # bind against the builder's own libraries.  --rpm is that second build: the same
@@ -271,7 +278,7 @@ fi
 # security fix reaches this daemon only by rebuilding the package, not by
 # upgrading libstdc++.
 
-SRCS=(NativeScanResult.cpp NmBackend.cpp Supplicant.cpp Wificond.cpp service.cpp)
+SRCS=(NativeScanResult.cpp Nl80211.cpp NmBackend.cpp Supplicant.cpp Wificond.cpp service.cpp)
 OBJS=()
 
 echo "== compiling"

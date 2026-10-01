@@ -423,26 +423,49 @@ Worth writing down because the next person to see it will reach for docs/48 firs
 
 ## What is still open
 
+**Worked through on 2026-10-01 — see [60](60-wifi-nl80211.md).** Four of the items below are
+closed and annotated in place, and one of them closed differently than this document expected: the
+packet counters cannot be fixed at the wificond seam at all, because Android never calls the one
+wificond method that carries them. docs/60 also found what made the whole list worth doing — a
+`getDeviceWiphyCapabilities` stub returning null, which makes the framework's throughput predictor
+return 0 before it reads any of the values below.
+
 Unchanged from [docs/35](35-wifi-stage5.md) and [docs/38](38-wifi-primary-radio.md):
 
-- **The rtw88 wedge still has no automatic trigger**, and the T3U is not even plugged into this
-  machine any more, so there was nothing to observe. `bin/wifi-radio-reset.sh` stays manual and the
-  `nmcli connection up` discriminator stays mandatory before running it.
+- ~~**The rtw88 wedge still has no automatic trigger**~~ **CLOSED AS OUT OF SCOPE. The T3U was a
+  back-door management link to bigtab01 during Wi-Fi connectivity testing, not a radio this project
+  intends to drive**, and it is not plugged in any more. The wedge is a fault in a driver for an
+  adapter that is not a supported configuration here. `bin/wifi-radio-reset.sh` stays, scoped to
+  that adapter, and the `nmcli connection up` discriminator stays mandatory before running it. The
+  multi-radio machinery — `--device`, factory-MAC pinning, `carriesHostDefaultRoute()` — is
+  unaffected and still load-bearing. See [60](60-wifi-nl80211.md).
 - **The host's two ~10-minute link drops of 2026-09-18 are still uninvestigated.** The RSSI error
   above is a plausible contributor and nothing more; it is not evidence.
 - **Scan staleness after repeated daemon restarts** — docs/35's false trail, still not diagnosed.
 - **The wrong-password path is still unproven.**
-- **Packet counters and link-layer stats are all zero** — `tx_good`, `tx_retry`, `tx_bad`, `rx_pps`
-  and `bcnCnt` in the score history, against 782 tx / 864 rx packets that `iw station dump` can
-  see. These come from `IWifiStaIface.getLinkLayerStats`, which needs a vendor HAL, so the score is
-  driven by RSSI alone. Newly written down rather than newly true.
-- **Rx link speed is reported as Tx**, because NM exposes one `Bitrate`. Ground truth on the live
-  link was 130 Mb/s tx and 5.5 Mb/s rx.
-- **`technology` needs nl80211**, per above — now scoped rather than vague.
+- ~~**Packet counters and link-layer stats are all zero**~~ **PARTLY CLOSED, AND THIS WAS REALLY
+  TWO ITEMS.** `IClientInterface.getPacketCounters` now reports `NL80211_STA_INFO_TX_PACKETS` and
+  `TX_FAILED` instead of a hardcoded `{0, 0}` — but **Android never calls it on this host**:
+  that call is tied to a link probe and `SendMgmtFrame` has never fired in the daemon's entire
+  journal, so the fix is latent. The `tx_good`/`tx_retry`/`tx_bad`/`rx_pps` columns are the other
+  item and **cannot** be fixed here: they come from `IWifiStaIface.getLinkLayerStats`, which is the
+  vendor HAL this daemon does not serve. See [60](60-wifi-nl80211.md).
+- ~~**Rx link speed is reported as Tx**, because NM exposes one `Bitrate`.~~ **DONE.**
+  `NL80211_STA_INFO_RX_BITRATE` is a separate attribute, so the two are now independent — Android
+  read 144 Mb/s tx against 1 Mb/s rx where it had reported 130 for both. See
+  [60](60-wifi-nl80211.md).
+- ~~**`technology` needs nl80211**, per above — now scoped rather than vague.~~ **DONE, and the
+  scoping was right about the mechanism and wrong about the payoff.** The PHY comes from which MCS
+  attribute the driver sends on `TX_BITRATE`; Android's "Wi-Fi standard" now reads 4 (11N) instead
+  of 0. But reporting it changes nothing on its own, because `getDeviceWiphyCapabilities` was
+  returning null and the predictor gives up on that first. See [60](60-wifi-nl80211.md).
 - **The active-profile guard on the reap is verified by predicate, not end to end.**
-- **`NmBackend` is called from binder threads in three places and is not thread-safe**, per the
-  section above. `getConnectionCapabilities` was kept out of that set; `getMacAddress`, `connect`
-  and `disconnect` are still in it.
+- ~~**`NmBackend` is called from binder threads in three places and is not thread-safe**~~
+  **DONE.** `mIfname`, `mDevPath` and `mSelectorMac` are guarded by a `std::recursive_mutex`, and
+  the nl80211 path shares no mutable state at all — it is keyed by an ifindex in a
+  `std::atomic<int>` rather than by a name. A mutex rather than posting work to the main loop,
+  because the main loop itself calls into Android and waiting on it from a binder thread is a cycle
+  with no timeout. See [60](60-wifi-nl80211.md).
 
 ## Packaged and deployed, and the shadowing nobody had written down
 

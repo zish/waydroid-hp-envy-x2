@@ -1,3 +1,41 @@
+* Thu Oct 01 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
+- Read the radio directly over nl80211 for the four things NetworkManager
+  cannot answer, via a new Nl80211.cpp that talks raw AF_NETLINK and adds no
+  runtime dependency at all -- libnl is not linked and the binary still needs
+  exactly the six libraries 1.0.1 did (docs/60).
+- Report the NEGOTIATED PHY in getConnectionCapabilities, so Android's "Wi-Fi
+  standard" stops reading UNKNOWN. The PHY comes from which MCS attribute the
+  driver sent on NL80211_STA_INFO_TX_BITRATE, which is the negotiated one by
+  construction; NM's only candidate was the AP's advertised MaxBitrate, which
+  measured 1170 Mb/s on a 20 MHz 2.4 GHz channel and so cannot be inverted into
+  a PHY. The enum mapping was disassembled from this image's own
+  service-wifi.jar, not assumed.
+- Answer getDeviceWiphyCapabilities instead of returning null, and this is what
+  makes the PHY work reach anything: ThroughputPredictor.predictThroughput logs
+  "Null device capabilities passed to throughput predictor" and returns 0 as its
+  FIRST act, before looking at the PHY, the width or the streams. Observed
+  firing under 1.0.1 and absent since. Max Supported Tx/Rx Link speed go from
+  -1 to real values, which the framework can only get from here.
+- Report the RX bitrate separately from TX. NM exposes one Bitrate property, so
+  rx had always been reported as tx -- 130 Mb/s for both where the live link was
+  39 tx and 72.2 rx.
+- Take RSSI from NL80211_STA_INFO_SIGNAL rather than inverting NM's 0..100
+  quality. The 1.0.1 inverse is exact and stays as the fallback, but NM polls
+  the associated AP on its own schedule and measured 3 dB low across five
+  consecutive samples; Android now agrees with the driver's dBm on 4 of 4.
+- Report real spatial-stream counts instead of a hardcoded 1x1, which had
+  understated this 2x2 card by half.
+- Report real packet counters in getPacketCounters. Correct but unexercised:
+  Android only asks around a link probe, and SendMgmtFrame has never been
+  called in this daemon's entire journal on this host. The tx_good/tx_bad
+  columns in dumpsys come from getLinkLayerStats, which needs a vendor HAL this
+  daemon does not serve, so those stay zero.
+- Close the data race docs/59 left open as a design question. mIfname, mDevPath
+  and mSelectorMac are now guarded by a recursive mutex, and the nl80211 path is
+  keyed by an atomic ifindex so it shares no mutable state at all. A mutex and
+  not a post-to-the-main-loop handoff, because the main loop itself calls into
+  Android and waiting on it from a binder thread is a cycle with no timeout.
+
 * Wed Sep 30 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
 - Fix the RSSI Android is told. NmBackend converted NetworkManager's 0..100
   Strength with quality/2 - 100, which assumes NM's range is -100..-50 dBm; it

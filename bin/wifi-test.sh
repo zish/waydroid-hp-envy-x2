@@ -256,40 +256,58 @@ chk "failures since the last mode-manager start" 0 "$BAD"
 # the bottom of the scale and 10 dB at the top -- so every check that only
 # looked for "a plausible negative number" passed throughout.
 #
-# NM's mapping is quality = 100 - (int)(100 * |clamp(dBm,-100,-40)+40| / 60),
-# whose exact integer inverse is -100 + 3*quality/5. Verified against nl80211 on
-# 13 distinct APs, same-scan pairing, exact on every one. See docs/59.
-echo "### does Android's RSSI match the host's?"
-# SAMPLED, NOT READ ONCE, and the first version of this check got that wrong.
+# THE REFERENCE MOVED, and this check moved with it. The daemon now reads
+# NL80211_STA_INFO_SIGNAL, so the value Android should agree with is the
+# DRIVER's dBm and no longer anything derived from NM. Comparing against NM's
+# Strength would now be comparing against the worse source: NM polls the
+# associated AP on its own schedule and was measured 3 dB low across five
+# consecutive samples, which is exactly the tolerance this check used to allow.
+# Left as it was, it would have started crying wolf -- the failure docs/59 had
+# to fix in three other scripts. See docs/60.
 #
-# Two things move between the two readings. Android refreshes WifiInfo on its own
-# poll, and -- the bigger one -- NM's Strength for the CONNECTED AP lags, which
-# is a finding in its own right (docs/59). A single pair disagreed by 6 dB on a
-# correctly-working daemon, which is drift and not a bug.
-#
-# So the discriminator is not "do they differ" but "does Android's value equal
-# quality/2 - 100 EXACTLY, every time". That is a deterministic formula, and
-# matching it repeatedly is the signature of the old binary. One agreement inside
-# tolerance is enough to pass; neither verdict from a handful of samples is a
-# WARN, because drift can produce it and a false FAIL here is worse than silence.
+# NM's own mapping is kept below as the fallback path's reference, because a
+# host whose kernel has no nl80211 still falls back to it, and as the regression
+# signature for the pre-Stage-5 formula.
+echo "### does Android's RSSI match the radio's?"
 DEV=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null |
       awk -F: '$2 == "wifi" { print $1; exit }')
-RMATCH=0; ROLD=0; RN=0; RLAST=""
+# SAMPLED, NOT READ ONCE. Android refreshes WifiInfo on its own poll and the
+# link moves, so a single pair can differ by a few dB on a correct daemon. Four
+# samples, and one agreement inside tolerance is enough to pass.
+RMATCH=0; ROLD=0; RNMATCH=0; RN=0; RLAST=""
+HAVE_IW=0; command -v iw >/dev/null 2>&1 && HAVE_IW=1
 for _ in 1 2 3 4; do
-  QUAL=$(nmcli -t -f IN-USE,SIGNAL device wifi list --rescan no ifname "$DEV" 2>/dev/null |
-         awk -F: '/^\*/ { print $2; exit }')
   ARSSI=$(sh_ 'cmd wifi status' | grep -o 'RSSI: -[0-9]*' | head -1 |
           grep -o '\-[0-9]*')
-  [ -n "$QUAL" ] && [ -n "$ARSSI" ] || { sleep 2; continue; }
+  [ -n "$ARSSI" ] || { sleep 2; continue; }
+  IWS=""
+  [ "$HAVE_IW" = 1 ] && [ -n "$DEV" ] &&
+    IWS=$(iw dev "$DEV" link 2>/dev/null | awk '/signal:/ { print $2; exit }')
+  QUAL=$(nmcli -t -f IN-USE,SIGNAL device wifi list --rescan no ifname "$DEV" 2>/dev/null |
+         awk -F: '/^\*/ { print $2; exit }')
   RN=$(( RN + 1 ))
-  WANT=$(( -100 + 3 * QUAL / 5 ))
-  OLD=$(( QUAL / 2 - 100 ))
-  D=$(( ARSSI - WANT )); [ "$D" -lt 0 ] && D=$(( -D ))
-  RLAST="Android ${ARSSI} dBm, host Strength $QUAL means ${WANT} dBm"
-  [ "$D" -le 3 ] && RMATCH=$(( RMATCH + 1 ))
-  # Only counts as the old formula's signature when the two forms disagree;
-  # at the bottom of the scale they coincide and prove nothing.
-  [ "$ARSSI" = "$OLD" ] && [ "$OLD" != "$WANT" ] && ROLD=$(( ROLD + 1 ))
+
+  if [ -n "$IWS" ]; then
+    D=$(( ARSSI - IWS )); [ "$D" -lt 0 ] && D=$(( -D ))
+    RLAST="Android ${ARSSI} dBm, radio ${IWS} dBm"
+    [ "$D" -le 2 ] && RMATCH=$(( RMATCH + 1 ))
+  fi
+  if [ -n "$QUAL" ]; then
+    WANT=$(( -100 + 3 * QUAL / 5 ))
+    OLD=$(( QUAL / 2 - 100 ))
+    [ -z "$IWS" ] && {
+      D=$(( ARSSI - WANT )); [ "$D" -lt 0 ] && D=$(( -D ))
+      RLAST="Android ${ARSSI} dBm, host Strength $QUAL means ${WANT} dBm"
+      [ "$D" -le 3 ] && RMATCH=$(( RMATCH + 1 ))
+    }
+    # Only the old formula's signature when the two forms disagree; at the
+    # bottom of the scale they coincide and prove nothing.
+    [ "$ARSSI" = "$OLD" ] && [ "$OLD" != "$WANT" ] && ROLD=$(( ROLD + 1 ))
+    # Matching NM's quality exactly, repeatedly, while differing from the radio
+    # is the signature of a daemon whose nl80211 overlay is not running.
+    [ -n "$IWS" ] && [ "$ARSSI" = "$WANT" ] && [ "$WANT" != "$IWS" ] &&
+      RNMATCH=$(( RNMATCH + 1 ))
+  fi
   sleep 2
 done
 if [ "$RN" -eq 0 ]; then
@@ -301,10 +319,72 @@ elif [ "$ROLD" -eq "$RN" ]; then
   say "     and all $RN samples were exactly quality/2-100, so the daemon"
   say "     predates the Stage 5 RSSI fix or an old binary is running"
   FAIL=1
+elif [ "$RNMATCH" -eq "$RN" ]; then
+  say "FAIL $RLAST"
+  say "     and all $RN samples were exactly NM's -100+3*quality/5 while the"
+  say "     radio read something else, so the nl80211 overlay is not running"
+  FAIL=1
 else
-  say "WARN $RLAST -- no sample agreed within 3 dB, but none matched the old"
-  say "     quality/2-100 form either. NM's Strength for the connected AP lags,"
-  say "     so re-run before believing this."
+  say "WARN $RLAST -- no sample agreed within tolerance, but the value matched"
+  say "     neither NM's formula nor the old quality/2-100 one. The link moves"
+  say "     between the two reads, so re-run before believing this."
+fi
+
+# Is the daemon reading the radio directly at all?
+#
+# Three of Android's answers are measurements only the radio has, and all three
+# were wrong or absent until the daemon started talking nl80211: the negotiated
+# PHY (reported UNKNOWN), the RX bitrate (reported as the TX one), and the
+# radio's capabilities (reported null, which makes the framework's throughput
+# predictor return 0 before it looks at anything else). See docs/60.
+#
+# The discriminator for RX is that NM has exactly ONE Bitrate property, so a
+# daemon without nl80211 cannot make the two differ -- it reports the same number
+# twice, forever. Equal rates are not proof of a fault on their own, since a
+# symmetric link is possible, so this only reports what it sees unless the PHY
+# is also unknown.
+echo "### is Android getting the radio's own link parameters?"
+WSTD=$(sh_ 'cmd wifi status' | grep -o 'Wi-Fi standard: [0-9]*' | head -1 |
+       grep -o '[0-9]*$')
+WTX=$(sh_ 'cmd wifi status' | grep -o 'Tx Link speed: [0-9]*' | head -1 |
+      grep -o '[0-9]*$')
+WRX=$(sh_ 'cmd wifi status' | grep -o 'Rx Link speed: [0-9]*' | head -1 |
+      grep -o '[0-9]*$')
+WMAXTX=$(sh_ 'cmd wifi status' |
+         grep -o 'Max Supported Tx Link speed: -\?[0-9]*' | head -1 |
+         grep -o '\-\?[0-9]*$')
+if [ -z "$WSTD" ]; then
+  say "WARN not associated, or no WifiInfo -- nothing to check"
+else
+  # 0 is WIFI_STANDARD_UNKNOWN; 1 legacy, 4 11n, 5 11ac, 6 11ax, 8 11be. The
+  # mapping is SupplicantStaIfaceHalAidlImpl.getWifiStandard, disassembled from
+  # this image -- see docs/60.
+  if [ "$WSTD" = 0 ]; then
+    say "FAIL Wi-Fi standard is UNKNOWN, so getConnectionCapabilities is still"
+    say "     reporting technology 0 -- the daemon is not reading nl80211"
+    FAIL=1
+  else
+    say "OK   Wi-Fi standard $WSTD, a real PHY rather than UNKNOWN"
+  fi
+  # Max Supported Tx is -1 until getDeviceWiphyCapabilities answers non-null;
+  # the framework has nowhere else to get it from.
+  if [ -n "$WMAXTX" ] && [ "$WMAXTX" -gt 0 ] 2>/dev/null; then
+    say "OK   max supported Tx $WMAXTX Mb/s, so the radio's capabilities landed"
+  else
+    say "FAIL max supported Tx is ${WMAXTX:-absent}, so"
+    say "     getDeviceWiphyCapabilities is still returning null -- the"
+    say "     framework's throughput predictor gives up before using any of it"
+    FAIL=1
+  fi
+  if [ -n "$WTX" ] && [ -n "$WRX" ]; then
+    if [ "$WTX" = "$WRX" ] && [ "$WSTD" = 0 ]; then
+      say "FAIL Tx and Rx link speed are both $WTX Mb/s and the PHY is unknown,"
+      say "     which is what NM's single Bitrate property looks like"
+      FAIL=1
+    else
+      say "OK   Tx $WTX Mb/s and Rx $WRX Mb/s are reported separately"
+    fi
+  fi
 fi
 
 # Has a forgotten network left its passphrase behind on the host?

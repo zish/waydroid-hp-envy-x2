@@ -56,6 +56,55 @@ enum Cipher {
 
 const char* securityName(Security s);
 
+/*
+ * The PHY a link settled on, in the order they supersede one another so that
+ * "the better of two directions" is a std::max.  Legacy is a real answer -- an
+ * 802.11a/b/g rate with no HT/VHT/HE/EHT descriptor at all, which is what this
+ * machine's RX direction runs at when the AP drops it to CCK.
+ *
+ * This is the NEGOTIATED PHY and not a capability.  It belongs below the
+ * contract because only something holding the radio can know it: an AP's beacon
+ * advertises what the AP can do, and the link runs at the minimum of the two
+ * ends.  See the note on technology in Supplicant.cpp.
+ */
+enum class Phy {
+    Unknown = 0,
+    Legacy  = 1,
+    Ht      = 2,
+    Vht     = 3,
+    He      = 4,
+    Eht     = 5,
+};
+
+const char* phyName(Phy p);
+
+/*
+ * What the host's radio is capable of, as opposed to what the current link
+ * negotiated.
+ *
+ * Separate from LinkState because it is a property of the hardware and does not
+ * change while the daemon runs, and because Android asks for the two through
+ * different interfaces -- this one answers
+ * IWificond.getDeviceWiphyCapabilities, which the framework needs ANSWERED
+ * before it will predict throughput at all.
+ */
+struct RadioCaps {
+    bool valid = false;         /* false means "report null", which is legal */
+
+    bool ht  = false;
+    bool vht = false;
+    bool he  = false;
+    bool eht = false;
+
+    bool width160   = false;
+    bool width80p80 = false;
+    bool width320   = false;
+
+    /* Never 0 when valid: Android multiplies by min(tx, rx). */
+    int32_t maxTxStreams = 1;
+    int32_t maxRxStreams = 1;
+};
+
 /* One access point as the host sees it. */
 struct Bss {
     std::string ssid;
@@ -104,6 +153,33 @@ struct LinkState {
      * Supplicant.cpp's getConnectionCapabilities.
      */
     int32_t     channelWidthMhz = 0;
+
+    /*
+     * The PHY this link negotiated, and the spatial streams each direction is
+     * using.  Unknown/0 when the host cannot say, which is what every backend
+     * that cannot reach the radio directly will report.
+     */
+    Phy         phy = Phy::Unknown;
+    int32_t     txNss = 0;
+    int32_t     rxNss = 0;
+
+    /*
+     * Link counters, as the radio has them.
+     *
+     * 64-bit here because that is the honest width for a counter, even though
+     * the one Android interface that wants them -- IClientInterface
+     * .getPacketCounters -- is int32.  The clamp belongs at that seam, where the
+     * narrow type is, and not in the struct describing what the host said.
+     *
+     * haveCounters distinguishes "the radio reports zero traffic" from "this
+     * backend does not count packets"; the two looked identical before, and the
+     * second was being reported as the first.
+     */
+    uint64_t    txPackets = 0;
+    uint64_t    txFailed  = 0;
+    uint64_t    txRetries = 0;
+    uint64_t    rxPackets = 0;
+    bool        haveCounters = false;
 };
 
 /*
@@ -185,6 +261,14 @@ public:
     virtual bool disconnect() = 0;
     virtual bool forget(const std::string& ssid) = 0;
     virtual LinkState state() = 0;
+
+    /*
+     * What the radio can do.  Returning false (or a RadioCaps with valid=false)
+     * is a legal answer and means "report null upwards" -- WifiNative checks for
+     * it -- but a backend that CAN answer should, because the framework treats a
+     * null as a reason to stop rather than as a missing detail.
+     */
+    virtual bool radioCapabilities(RadioCaps& out) = 0;
 
     /*
      * Association progress.  One callback carrying both what is true now and

@@ -346,13 +346,76 @@ Wificond::handleWificond(GBinderRemoteRequest* req, guint code, guint flags,
 
     case WIFICOND_getDeviceWiphyCapabilities: {
         std::string name = readString(&reader);
+
         /*
-         * Null is a legal answer -- WifiNative checks for it -- and it is the
-         * honest one until there is a real radio description to hand up.
+         * NULL IS LEGAL AND IT IS ALSO EXPENSIVE, WHICH IS NOT OBVIOUS.
+         *
+         * WifiNative does check for null here, so returning it never threw and
+         * never logged -- which is why this sat as a one-line stub through five
+         * stages.  What it costs was read out of this image's own
+         * service-wifi.jar: ThroughputPredictor.predictThroughput's FIRST act is
+         *
+         *     if (capabilities == null) {
+         *         Log.e(TAG, "Null device capabilities passed to throughput
+         *                     predictor");
+         *         return 0;
+         *     }
+         *
+         * so with a null here the framework never reaches the PHY, the channel
+         * width or the spatial streams at all -- every one of which this daemon
+         * now reports accurately.  Answering this is therefore what makes the
+         * rest of the nl80211 work reach anything.  See docs/60.
+         *
+         * THE WIRE FORMAT WAS READ, NOT ASSUMED, and it is not the shape the
+         * other parcelable in this daemon uses.  DeviceWiphyCapabilities is a
+         * hand-written framework Parcelable, not a stable-AIDL one, so its
+         * createFromParcel reads fields straight off the parcel with NO leading
+         * size word -- where ConnectionCapabilities in Supplicant.cpp has one.
+         * Getting that wrong is the Stage 4 failure that killed system_server.
+         * Disassembled from this image:
+         *
+         *     writeToParcel: writeBoolean m80211nSupported
+         *                    writeBoolean m80211acSupported
+         *                    writeBoolean m80211axSupported
+         *                    writeBoolean m80211beSupported
+         *                    writeBoolean mChannelWidth160MhzSupported
+         *                    writeBoolean mChannelWidth80p80MhzSupported
+         *                    writeBoolean mChannelWidth320MhzSupported
+         *                    writeInt     mMaxNumberTxSpatialStreams
+         *                    writeInt     mMaxNumberRxSpatialStreams
+         *
+         * Note that the 320 MHz flag is written SEVENTH, after 80+80, and the tx
+         * stream count before the rx one -- neither matches the alphabetical
+         * field order the class declares them in.  Parcel.writeBoolean is
+         * writeInt(b ? 1 : 0), so this is the non-null marker followed by nine
+         * int32s.
          */
-        GDEBUG("getDeviceWiphyCapabilities(%s) -> null", name.c_str());
+        RadioCaps c;
+        if (!mBackend->radioCapabilities(c)) {
+            GDEBUG("getDeviceWiphyCapabilities(%s) -> null (the host cannot "
+                   "describe the radio)", name.c_str());
+            GBinderLocalReply* reply = beginReply(mWificond, &writer, status);
+            writeNullParcelable(&writer);
+            return reply;
+        }
+
+        GDEBUG("getDeviceWiphyCapabilities(%s) -> HT=%d VHT=%d HE=%d EHT=%d "
+               "160=%d 80+80=%d 320=%d streams %dx%d", name.c_str(),
+               c.ht, c.vht, c.he, c.eht,
+               c.width160, c.width80p80, c.width320,
+               c.maxTxStreams, c.maxRxStreams);
+
         GBinderLocalReply* reply = beginReply(mWificond, &writer, status);
-        writeNullParcelable(&writer);
+        gbinder_writer_append_int32(&writer, 1);     /* non-null marker */
+        gbinder_writer_append_int32(&writer, c.ht  ? 1 : 0);
+        gbinder_writer_append_int32(&writer, c.vht ? 1 : 0);
+        gbinder_writer_append_int32(&writer, c.he  ? 1 : 0);
+        gbinder_writer_append_int32(&writer, c.eht ? 1 : 0);
+        gbinder_writer_append_int32(&writer, c.width160   ? 1 : 0);
+        gbinder_writer_append_int32(&writer, c.width80p80 ? 1 : 0);
+        gbinder_writer_append_int32(&writer, c.width320   ? 1 : 0);
+        gbinder_writer_append_int32(&writer, c.maxTxStreams);
+        gbinder_writer_append_int32(&writer, c.maxRxStreams);
         return reply;
     }
 
@@ -477,8 +540,44 @@ Wificond::handleClientInterface(GBinderRemoteRequest* req, guint code,
     }
 
     case CLIENT_getPacketCounters: {
-        /* { tx good, tx bad }. Nothing counts them below the contract yet. */
-        std::vector<int32_t> v = { 0, 0 };
+        /*
+         * { tx good, tx bad }, from NL80211_STA_INFO_TX_PACKETS and
+         * STA_INFO_TX_FAILED.  These read zero for all of Stages 2-5 because
+         * nothing below the contract counted packets; NetworkManager does not,
+         * and only the radio does.
+         *
+         * "good" is TX_PACKETS and not TX_PACKETS minus TX_FAILED, matching
+         * wificond's own client_interface_impl.cpp, which passes the two
+         * counters through as the driver reports them.  TX_RETRIES is
+         * deliberately not folded in either: a retried packet that got through
+         * is a good packet.
+         *
+         * CLAMPED TO int32 HERE, which is the right place for it -- the Android
+         * interface is int32 and the host's counters are not, so the narrowing
+         * belongs at the seam that has the narrow type rather than in the struct
+         * reporting what the radio said.  The framework takes deltas, so a
+         * saturating clamp costs one bad delta on a link that has moved 2^31
+         * packets and nothing after it.
+         */
+        LinkState st = mBackend->state();
+        const int32_t kMax = 0x7fffffff;
+        std::vector<int32_t> v = {
+            (int32_t) (st.txPackets > (uint64_t) kMax ? kMax : st.txPackets),
+            (int32_t) (st.txFailed  > (uint64_t) kMax ? kMax : st.txFailed),
+        };
+        /*
+         * Logged unconditionally, and on purpose: this handler produced a
+         * constant {0,0} for five stages and nothing ever showed that, because a
+         * silent handler and an uncalled one look identical from outside.  The
+         * call is infrequent -- the framework asks around a link probe, not on
+         * the RSSI poll -- so one line per call is not noise.
+         *
+         * "the host does not count packets" is a genuinely different statement
+         * from "no traffic", and the framework cannot tell them apart: it will
+         * read a flat zero as a perfectly reliable link.
+         */
+        GDEBUG("getPacketCounters() -> good=%d bad=%d%s", v[0], v[1],
+               st.haveCounters ? "" : " (the host does not count packets)");
         GBinderLocalReply* reply = beginReply(mClient, &writer, status);
         writeInt32Array(&writer, v);
         return reply;

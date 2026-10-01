@@ -1,6 +1,16 @@
 # Wi-Fi — a second radio, and the crash it exposed
 
 **Date:** 2026-09-08. **Status: Stage 4 is complete.** Android drives a real access point over a
+
+> **What the T3U actually was, recorded 2026-10-01.** The TP-Link Archer T3U this document adds was
+> **a back-door management link to bigtab01** — a second way onto the machine so that Wi-Fi
+> connectivity testing could not strand it — and **not a second radio this project intends to
+> drive**. It is no longer plugged in. Nothing T3U-specific needs testing or supporting here, and
+> the rtw88 wedge below is therefore closed as out of scope rather than open. The multi-radio
+> machinery this document introduced is a different matter and still load-bearing: `--device`,
+> factory-MAC pinning and `carriesHostDefaultRoute()` are what keep Android off the host's own
+> link. See [60-wifi-nl80211.md](60-wifi-nl80211.md).
+
 dedicated USB radio through NetworkManager, and has validated internet over a Wi-Fi network it
 controls itself. The host's own link was never at risk and never moved. The wificond race is closed
 durably. Remaining work is Stage 5 hardening — see ["What is still broken"](#what-is-still-broken).

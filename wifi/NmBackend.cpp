@@ -2,6 +2,9 @@
 
 #include <gutil_log.h>
 
+#include <net/if.h>
+
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 
@@ -166,6 +169,7 @@ NmBackend::init(const std::string& spec)
             GERR("no Wi-Fi device matching \"%s\"", spec.c_str());
             return false;
         }
+        startNl80211();
         return true;
     }
 
@@ -211,7 +215,62 @@ NmBackend::init(const std::string& spec)
               "route)", devs.size(), pick.c_str());
     }
     selectDevice(pick);
+    startNl80211();
     return true;
+}
+
+/*
+ * Open nl80211 and read the radio's capabilities once.
+ *
+ * DELIBERATELY NOT FATAL.  Every value nl80211 supplies here has an NM-derived
+ * fallback that was in service for all of Stages 2 through 5, so a kernel
+ * without nl80211, a radio that has gone away between selection and this call,
+ * or a permission problem all cost accuracy rather than function.  Refusing to
+ * start would turn a worse signal reading into no Wi-Fi at all.
+ *
+ * The capabilities are cached rather than fetched per call because they describe
+ * hardware: they cannot change while this radio is the selected one, and
+ * getDeviceWiphyCapabilities is asked on a path where a netlink round trip per
+ * call would be pure cost.  A radio swap goes through selectDevice(), which is
+ * where this gets called again.
+ */
+void
+NmBackend::startNl80211()
+{
+    mCaps = RadioCaps();
+
+    const int idx = mIfindex.load();
+    if (idx <= 0) {
+        GWARN("no interface index for the selected radio; nl80211 is off, so "
+              "RSSI, rates and the negotiated PHY fall back to NetworkManager");
+        return;
+    }
+
+    if (!mNl.isOpen() && !mNl.open()) {
+        GWARN("nl80211 unavailable (%s); RSSI, rates, packet counters and the "
+              "negotiated PHY fall back to NetworkManager",
+              mNl.lastError().c_str());
+        return;
+    }
+
+    if (!mNl.wiphy(idx, mCaps)) {
+        GWARN("nl80211 did not describe the radio (%s); Android will be told "
+              "null device capabilities", mNl.lastError().c_str());
+        return;
+    }
+
+    GINFO("radio capabilities: HT=%d VHT=%d HE=%d EHT=%d, 160MHz=%d 80+80=%d "
+          "320MHz=%d, %dx%d streams",
+          mCaps.ht, mCaps.vht, mCaps.he, mCaps.eht,
+          mCaps.width160, mCaps.width80p80, mCaps.width320,
+          mCaps.maxTxStreams, mCaps.maxRxStreams);
+}
+
+bool
+NmBackend::radioCapabilities(RadioCaps& out)
+{
+    out = mCaps;
+    return mCaps.valid;
 }
 
 /* ------------------------------------------------------------ D-Bus glue */
@@ -431,6 +490,8 @@ NmBackend::permMacOf(const std::string& path)
 std::pair<std::string, std::string>
 NmBackend::resolveByMac()
 {
+    std::lock_guard<std::recursive_mutex> guard(mDevLock);
+
     if (!mSelectorMac.empty()) {
         for (const std::pair<std::string, std::string>& d : wifiDeviceList()) {
             if (permMacOf(d.first) == mSelectorMac) {
@@ -444,6 +505,15 @@ NmBackend::resolveByMac()
 std::string
 NmBackend::wifiDevicePath()
 {
+    /*
+     * The lock that closes docs/59's open data race.  This function is the one
+     * that WRITES mDevPath and mIfname, and it is reached from binder threads
+     * through state(), macAddress(), connect() and disconnect() as well as from
+     * the GLib main loop.  See the note on mDevLock in NmBackend.h for why this
+     * is a mutex rather than a handoff to the main loop.
+     */
+    std::lock_guard<std::recursive_mutex> guard(mDevLock);
+
     if (!mDevPath.empty()) {
         /* Cheap revalidation: NM recycles object paths across restarts. */
         if (propString(mDevPath.c_str(), NM_DEV, "Interface") == mIfname) {
@@ -486,9 +556,45 @@ NmBackend::wifiDevicePath()
                   d.second.c_str(), mSelectorMac.c_str());
             mIfname = d.second;
             mDevPath = d.first;
+            /* The name moved, so the kernel index may have too. */
+            refreshIfindex();
         }
     }
     return mDevPath;
+}
+
+/*
+ * mIfname -> mIfindex.  Separate from the selection logic because it is called
+ * from both places the name can change -- selectDevice() and the rename recovery
+ * above -- and because an unresolvable name must CLEAR the index rather than
+ * leave the previous radio's behind it.  Querying nl80211 with a stale index is
+ * how a daemon ends up reporting another interface's signal.
+ */
+void
+NmBackend::refreshIfindex()
+{
+    if (mIfname.empty()) {
+        mIfindex.store(0);
+        return;
+    }
+    const unsigned idx = if_nametoindex(mIfname.c_str());
+    if (!idx) {
+        GWARN("no kernel interface index for %s: %s", mIfname.c_str(),
+              strerror(errno));
+    }
+    mIfindex.store((int) idx);
+}
+
+std::string
+NmBackend::selectedDevice() const
+{
+    /*
+     * const, and the lock is not: mDevLock guards mIfname, and reading a
+     * std::string the main loop can reassign is exactly the race this closes.
+     */
+    std::lock_guard<std::recursive_mutex> guard(
+        const_cast<std::recursive_mutex&>(mDevLock));
+    return mIfname;
 }
 
 bool
@@ -592,6 +698,8 @@ NmBackend::yieldDefaultRouteToHost()
 bool
 NmBackend::selectDevice(const std::string& spec)
 {
+    std::lock_guard<std::recursive_mutex> guard(mDevLock);
+
     std::string mac = normalizeMac(spec);
 
     mDevPath.clear();
@@ -620,6 +728,8 @@ NmBackend::selectDevice(const std::string& spec)
          */
         mSelectorMac = permMacOf(mDevPath);
     }
+
+    refreshIfindex();
 
     if (mSelectorMac.empty()) {
         GWARN("using host radio %s (%s) -- NM publishes no factory MAC for it, "
@@ -1184,8 +1294,9 @@ NmBackend::buildSettings(const NetworkRequest& req)
         g_variant_new_string(connectionUuid(req.ssid).c_str()));
     g_variant_builder_add(&conn, "{sv}", "type",
         g_variant_new_string("802-11-wireless"));
+    /* selectedDevice() rather than mIfname: it takes mDevLock.  See NmBackend.h. */
     g_variant_builder_add(&conn, "{sv}", "interface-name",
-        g_variant_new_string(mIfname.c_str()));
+        g_variant_new_string(selectedDevice().c_str()));
     /*
      * No NM-level autoconnect on profiles we own.  Android has its own
      * reconnect logic -- WifiConnectivityManager calls connectToNetwork() when
@@ -1619,6 +1730,14 @@ NmBackend::state()
 
     st.freqMhz = (int32_t) propUint(ap.c_str(), NM_AP, "Frequency");
     st.rssiDbm = rssiFromQuality(propUint(ap.c_str(), NM_AP, "Strength"));
+
+    /*
+     * NM's MaxBitrate is the AP's ADVERTISED capability, not a rate on this
+     * link, and there is only one of it -- so used alone it reports rx as tx.
+     * Measured on bigtab01: NM said 130000 for both while the live link was
+     * 39 Mb/s tx and 72.2 Mb/s rx.  Kept as the fallback because an advertised
+     * number beats no number, and superseded by nl80211 below.
+     */
     st.txRateKbps = (int32_t) propUint(ap.c_str(), NM_AP, "MaxBitrate");
     st.rxRateKbps = st.txRateKbps;
 
@@ -1628,7 +1747,91 @@ NmBackend::state()
      * 0 -- the same thing channelWidthMhz means by "do not know".
      */
     st.channelWidthMhz = (int32_t) propUint(ap.c_str(), NM_AP, "Bandwidth");
+
+    overlayNl80211(st);
     return st;
+}
+
+/*
+ * Replace NM's answers with the radio's own, where the radio has one.
+ *
+ * NM IS STILL THE BACKEND AND THIS IS NOT A SECOND ONE.  Everything about
+ * configuration -- which AP is active, what its SSID is, which profiles are ours
+ * -- stays with NM, which is the only thing that knows it.  What moves here is
+ * the four measurements NM either cannot make or makes worse:
+ *
+ *   rssiDbm       NM publishes a polled 0..100 quality quantised to 60 dB in 100
+ *                 steps; the driver publishes the dBm it measured.  Both are
+ *                 "correct", but one lags the other by however long NM's poll
+ *                 interval is -- observed 3 dB apart on an idle link.
+ *   txRateKbps    NM's is the AP's advertised best case.
+ *   rxRateKbps    NM has no separate rx rate at all.
+ *   phy / nss     NM has nothing; see Supplicant.cpp's getConnectionCapabilities.
+ *   counters      NM counts no packets.
+ *
+ * ONLY OVERWRITES WHAT IT ACTUALLY GOT.  A field nl80211 did not report keeps
+ * NM's value, so a driver that omits an attribute degrades to the old behaviour
+ * instead of reporting a zero.  That is why the StationInfo flags exist.
+ */
+void
+NmBackend::overlayNl80211(LinkState& st)
+{
+    if (!mNl.isOpen()) {
+        return;
+    }
+    const int idx = mIfindex.load();
+    if (idx <= 0) {
+        return;
+    }
+
+    StationInfo sta;
+    if (!mNl.station(idx, sta)) {
+        /*
+         * Not an error and not logged as one: an interface with no stations is
+         * an interface that is not associated, and state() has already decided
+         * whether it is associated from NM's ActiveAccessPoint.  The two can
+         * disagree for a moment either side of an association.
+         */
+        return;
+    }
+
+    if (sta.haveSignal) {
+        st.rssiDbm = sta.signalDbm;
+    }
+    if (sta.tx.bitrateKbps > 0) {
+        st.txRateKbps = sta.tx.bitrateKbps;
+        st.txNss = sta.tx.nss;
+    }
+    if (sta.rx.bitrateKbps > 0) {
+        st.rxRateKbps = sta.rx.bitrateKbps;
+        st.rxNss = sta.rx.nss;
+    }
+
+    /*
+     * The better of the two directions, because they can differ: on this machine
+     * tx ran HT while rx had been dropped to a legacy CCK rate, and the link is
+     * an HT link.  Phy is ordered for exactly this std::max.
+     */
+    st.phy = std::max(sta.tx.phy, sta.rx.phy);
+
+    /*
+     * Width: prefer the rate's, which is the width the station NEGOTIATED, over
+     * NM's AP Bandwidth, which is the width the AP is OPERATING at.  A station
+     * may use less than the AP offers and Android is asking about the link.
+     * Falls back to NM's when the rate carried no width flag.
+     */
+    const int32_t w = sta.tx.widthMhz ? sta.tx.widthMhz : sta.rx.widthMhz;
+    if (w > 0) {
+        st.channelWidthMhz = w;
+    }
+
+    if (sta.haveCounters) {
+        st.txPackets = sta.txPackets;
+        st.txFailed  = sta.txFailed;
+        st.txRetries = sta.txRetries;
+        st.rxPackets = sta.rxPackets;
+        st.haveCounters = true;
+    }
 }
 
 void

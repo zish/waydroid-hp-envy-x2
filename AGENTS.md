@@ -174,8 +174,8 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    working notification path for a low-battery warning or anything else. See
    [docs/41-battery-cutoff.md](docs/41-battery-cutoff.md).
 4. **Wi-Fi — Android's Wi-Fi settings driving NetworkManager.** **In progress: Stages 0 and 2–5
-   done, Stage 5's polish list worked through on 2026-09-30; a handful of intermittent faults
-   remain.** The whole Android Wi-Fi framework was already present and dormant in
+   done, Stage 5's polish list worked through on 2026-09-30 and its nl80211 items on 2026-10-01;
+   a handful of intermittent faults remain.** The whole Android Wi-Fi framework was already present and dormant in
    the image (`com.android.wifi` APEX, `wificond`); what was missing was the feature XML, a
    supplicant, and any vendor HAL. Direct hardware access was considered and **rejected**: `wlp1s0`
    is this machine's only network interface, so handing `phy0` to the container costs the host its
@@ -277,20 +277,60 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    assumed. `Wpa2Wpa3Psk` → `wpa-psk` turned out to be correct all along: NM's own man page says
    `wpa-psk` is "WPA2 + WPA3 personal" while `sae` is WPA3 only, so the flag comes off it. See
    [docs/59-wifi-stage5-polish.md](docs/59-wifi-stage5-polish.md).
-   **Still open**: the T3U wedge has no automatic trigger (and `nmcli connection up` remains the
-   mandatory discriminator before reprobing), and the adapter is not plugged into this machine any
-   more, so there was nothing to observe;
-   the host's link dropped twice for ~10 minutes on 2026-09-18 while Android sat in its
-   failed-validation retry loop on the same radio, uninvestigated and a caution about
-   [docs/38](docs/38-wifi-primary-radio.md)'s single-radio arrangement — the RSSI error above is a
-   plausible contributor and nothing more;
+   **The daemon now reads the radio directly over nl80211 (2026-10-01), and the headline is a null
+   that made four other fixes pointless.** `getDeviceWiphyCapabilities` was a one-line stub
+   returning null, which is legal and logs nothing — and
+   `ThroughputPredictor.predictThroughput`'s **first** act is to log "Null device capabilities
+   passed to throughput predictor" and `return 0`, before it reads the PHY, the width or the
+   streams. So reporting the negotiated PHY, which is what this session set out to do, would have
+   shipped a correct value into a field nothing read. Both are fixed together; the error fired
+   under 1.0.1 at 11:40:41 and has not recurred. `Max Supported Tx/Rx Link speed` went from `-1`
+   to 144/72 Mb/s, which the framework can only get from those capabilities.
+   **Raw `AF_NETLINK`, not libnl, and that adds no runtime dependency at all** — the binary still
+   needs exactly the six shared libraries 1.0.1 did. libnl is not even installed on the dev box,
+   while `<linux/nl80211.h>` is, because it is kernel uAPI; and the ABI-drift argument that
+   justifies vendoring libgbinder headers does not transfer, since the netlink wire format is an
+   append-only kernel ABI.
+   **Three of the four open measurements closed.** Android's "Wi-Fi standard" reads 4 (11N) instead
+   of 0, from which MCS attribute the driver sends on `NL80211_STA_INFO_TX_BITRATE` — the
+   negotiated PHY by construction, where NM's only candidate was an AP advertising 1170 Mb/s on a
+   20 MHz 2.4 GHz channel. Rx bitrate is now separate from Tx (144 vs 1 Mb/s, where both read 130).
+   RSSI comes from `STA_INFO_SIGNAL` and agreed with `iw` on 4 of 4 samples while NM measured 3 dB
+   low on 5 of 5 — the 1.0.1 inverse was exact but NM's poll lag was a bias, not noise.
+   Spatial streams are real instead of a hardcoded 1x1, which had halved this 2x2 card.
+   **The fourth closed differently than expected, and it was really two items.**
+   `getPacketCounters` now returns real counters but **Android never calls it on this host** —
+   it is tied to a link probe and `SendMgmtFrame` has never fired in the daemon's whole journal.
+   The `tx_good`/`tx_bad` columns are the other half and **cannot** be served from here at all:
+   they come from `getLinkLayerStats`, i.e. the vendor HAL.
+   **docs/59's data race is closed**, with the design decision stated: a `std::recursive_mutex` over
+   `mIfname`/`mDevPath`/`mSelectorMac`, and an `std::atomic<int>` ifindex so the nl80211 path shares
+   no mutable state. Not a post-to-the-main-loop handoff, because the main loop itself calls into
+   Android and waiting on it from a binder thread is a cycle with no timeout.
+   **A deploy trap worth knowing before touching this daemon**: `wifi/build.sh --install` writes
+   `/usr/local/bin`, but the active unit is the packaged one running `/usr/bin/waydroid-wifid` on
+   the read-only ostree `/usr` — so install-then-restart reports success and runs the old code. It
+   cost a wrong conclusion mid-session; the tell was a log string, not a version. A reversible
+   systemd drop-in stands in for a test, and is on bigtab01 now running a binary byte-identical to
+   `waydroid-ext-wifid-1.1.0`, which is **built and deliberately not deployed** — `rpm-ostree`
+   wants a reboot and this is a kiosk host.
+   See [docs/60-wifi-nl80211.md](docs/60-wifi-nl80211.md).
+   **Still open**: the host's link dropped twice for ~10 minutes on 2026-09-18 while Android sat in
+   its failed-validation retry loop on the same radio, uninvestigated and a caution about
+   [docs/38](docs/38-wifi-primary-radio.md)'s single-radio arrangement;
    scan staleness after repeated daemon restarts is still undiagnosed;
    the wrong-password path is still unproven;
-   **packet counters and link-layer stats are all zero**, so the score is driven by RSSI alone —
-   `getLinkLayerStats` needs a vendor HAL, and `iw station dump` sees the 782 tx / 864 rx packets
-   Android reports as 0;
-   Rx link speed is reported as Tx, because NM exposes one `Bitrate`;
-   and `technology` needs a few hundred lines of nl80211 the daemon does not link today.
+   link-layer stats need a vendor HAL, so the framework's throughput prediction stays un-refined
+   and `txTput`/`rxTput` remain a constant — the predictor no longer short-circuits, but whether it
+   is now *computing* is not established and is recorded as not established;
+   scan-result RSSI and the channel lists still come from NM rather than `GET_SCAN`/`GET_WIPHY`,
+   deliberately, because NM's AP objects carry the `known` flag and the `tsf` logic docs/35 had to
+   get right.
+   **The T3U is not a supported configuration**: it was a back-door management link to bigtab01 so
+   that Wi-Fi testing could not strand the machine, it is no longer plugged in, and the rtw88 wedge
+   is closed as out of scope rather than open. `bin/wifi-radio-reset.sh` stays, scoped to that
+   adapter, with `nmcli connection up` still the mandatory discriminator. The multi-radio machinery
+   itself is unaffected and matters more on a single-radio host, not less.
 5. **Audio — direct ALSA as a selectable backend, and eventually a DAW-grade HAL.**
    **Added 2026-09-11 at the owner's request; scoped, nothing built.** Two phases.
    **Phase 1 is a backend choice** — `--audio-backend {auto,alsa,pulse,none}`, probed before Android

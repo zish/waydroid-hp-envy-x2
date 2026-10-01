@@ -403,7 +403,8 @@ names.
 
 ## What is still open
 
-**Worked through on 2026-09-30 — see [59](59-wifi-stage5-polish.md).** Four of the items below are
+**Worked through on 2026-09-30 — see [59](59-wifi-stage5-polish.md), and again on 2026-10-01 —
+see [60](60-wifi-nl80211.md).** Four of the items below are
 closed and the entries are annotated in place. Two of the four closed by measurement rather than
 code, and one of them is a warning worth carrying forward: the "signal strength Android's UI
 believes" line turned out to be hiding a conversion that was wrong by up to 10 dB, and the reason
@@ -414,9 +415,12 @@ Stage 5 items not yet done, from [29](29-wifi-plan.md) and [34](34-wifi-second-r
 
 - **Scan staleness after repeated daemon restarts** — the false trail above. Not the radio;
   not diagnosed further.
-- **The rtw88 wedge still has no automatic trigger.** This session did not observe it, and the one
-  candidate turned out to be something else. `bin/wifi-radio-reset.sh` remains manual, and the
-  `nmcli connection up` discriminator remains mandatory before running it.
+- ~~**The rtw88 wedge still has no automatic trigger.**~~ **CLOSED AS OUT OF SCOPE on 2026-10-01:
+  the T3U was a back-door management link used so Wi-Fi testing could not strand the machine, not a
+  radio this project drives, and it is no longer plugged in. `bin/wifi-radio-reset.sh` stays, scoped
+  to that adapter, with the `nmcli connection up` discriminator still mandatory. See
+  [60](60-wifi-nl80211.md).** This session did not observe it, and the one
+  candidate turned out to be something else.
 - ~~Signal strength and state transitions that Android's UI believes.~~ **DONE, and it found a
   bug — `NmBackend` was converting NM's `Strength` with `quality/2 - 100`, which is wrong by up
   to 10 dB and was 8.5 dB wrong at this machine's signal level. The exact inverse is
@@ -443,7 +447,9 @@ Stage 5 items not yet done, from [29](29-wifi-plan.md) and [34](34-wifi-second-r
   `.rtt` and `.aware` are absent and Android should already consider them unsupported. Confirm with
   `pm list features | grep wifi` before writing code.
 - The wrong-password path is still unproven. `getConnectionCapabilities` now reports
-  `channelBandwidth` and **UNKNOWN technology is a conclusion, not a gap** — NM's `MaxBitrate` is
+  `channelBandwidth`, and **technology is no longer UNKNOWN — nl80211 supplies the negotiated PHY
+  as of [60](60-wifi-nl80211.md)**, which supersedes the conclusion recorded below. What stood up
+  was the reasoning about NM: **UNKNOWN was a conclusion rather than a gap** — NM's `MaxBitrate` is
   the AP's advertised capability, not the negotiated PHY. And `Wpa2Wpa3Psk` → `wpa-psk` was
   **correct all along**: NM documents `wpa-psk` as "WPA2 + WPA3 personal" and `sae` as WPA3 only,
   so that flag comes off. See [59](59-wifi-stage5-polish.md).

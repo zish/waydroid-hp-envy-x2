@@ -182,6 +182,17 @@ private:
      * int and needs nothing heavier.
      */
     std::atomic<int32_t> mChannelWidthMhz{0};
+
+    /*
+     * The negotiated PHY and the spatial streams each direction is using, cached
+     * from onHostLinkEvent for exactly the same reason and in exactly the same
+     * way as mChannelWidthMhz above -- see that note for the data race this
+     * avoids.  Phy is stored as its underlying int32 because std::atomic over an
+     * enum class buys nothing here and makes every use site a cast either way.
+     */
+    std::atomic<int32_t> mPhy{0};
+    std::atomic<int32_t> mTxNss{0};
+    std::atomic<int32_t> mRxNss{0};
 };
 
 } /* namespace wifi */

@@ -865,12 +865,13 @@ Supplicant::handleStaIface(GBinderRemoteRequest* req, guint code, int* status)
          * there, not a marker, because createTypedArray() is length-prefixed.
          */
         /*
-         * technology STAYS UNKNOWN, AND THAT IS A CONCLUSION RATHER THAN A GAP.
+         * technology IS NOW MEASURED, and the thing that makes that possible is
+         * nl80211 rather than a better reading of NetworkManager.
          *
-         * It wants the PHY the station NEGOTIATED -- HT, VHT, HE, EHT -- and
-         * NetworkManager does not have that. The only candidate it exposes is
-         * AccessPoint.MaxBitrate, which is the AP's ADVERTISED CAPABILITY and
-         * not a rate on this link. Measured on bigtab01, every AP in range:
+         * The field wants the PHY the station NEGOTIATED -- HT, VHT, HE, EHT --
+         * and NM genuinely does not have it.  Its only candidate is
+         * AccessPoint.MaxBitrate, which is the AP's ADVERTISED CAPABILITY and not
+         * a rate on this link.  Measured on bigtab01, every AP in range:
          *
          *     freq=2422  bw=20  MaxBitrate=1170000   NTGRBH_E0C2500D818B
          *     freq=2462  bw=20  MaxBitrate=1170000   f48fc5
@@ -878,32 +879,71 @@ Supplicant::handleStaIface(GBinderRemoteRequest* req, guint code, int* status)
          *
          * 1170 Mb/s on a 20 MHz channel at 2.4 GHz is not a slow link being
          * reported optimistically, it is physically impossible -- so the number
-         * is the AP's best case across all its radios and widths, and cannot be
-         * inverted into a PHY. Nor would the AP's capability answer the
-         * question if it could: the technology is the MINIMUM of the AP's and
-         * the station's, and this machine's card is a 2x2 HT/VHT Broadwell-era
-         * part that will negotiate VHT against the HE AP above. Reporting HE
-         * from the beacon would be wrong on exactly the networks where the
-         * field matters.
+         * is the AP's best case across all its radios and widths and cannot be
+         * inverted into a PHY.  Nor would the AP's capability answer the question
+         * if it could: the technology is the MINIMUM of the AP's and the
+         * station's, and this machine's card is a 2x2 HT/VHT Broadwell-era part
+         * that will negotiate VHT against an HE AP.  Reporting HE from the beacon
+         * would be wrong on exactly the networks where the field matters.
          *
-         * The value is available from nl80211 -- NL80211_STA_INFO_TX_BITRATE's
-         * RATE_INFO flags are what `iw link` prints as "MCS 15 short GI" -- so
-         * this is a missing 300 lines of netlink, not missing information. It is
-         * NOT worth faking in the meantime: UNKNOWN makes
-         * ThroughputPredictor.predictThroughput() fall back to a floor, which is
-         * visible in `dumpsys wifi` as a flat txTput=10,rxTput=10, whereas a
-         * wrong standard makes it predict confidently and wrongly.
+         * NL80211_STA_INFO_TX_BITRATE carries it instead, as the RATE_INFO flags
+         * that `iw link` prints as "MCS 14 short GI": the PHY is decided by WHICH
+         * MCS attribute the driver sent, which is the negotiated one by
+         * construction.  NmBackend takes the better of the tx and rx directions,
+         * because they can differ -- this machine ran HT tx against a legacy CCK
+         * rx rate, and that link is an HT link.  See Nl80211.cpp's parseRate.
          *
-         * channelBandwidth is different and IS reported: NM's
-         * AccessPoint.Bandwidth is the operating width from the HT/VHT/HE
-         * operation IE, which is a real property of the channel in use.
+         * THE ENUM VALUES WERE DISASSEMBLED FROM THIS IMAGE, not assumed.
+         * ConnectionCapabilities.technology is typed as a bare int in the AIDL,
+         * so the mapping had to come from somewhere, and
+         * SupplicantStaIfaceHalAidlImpl.getWifiStandard(t) is where:
          *
-         * The framework's side of both was read out of this image's
+         *     1 -> 1 (LEGACY)  2 -> 4 (11N)  3 -> 5 (11AC)
+         *     4 -> 6 (11AX)    5 -> 8 (11BE)  else 0 (UNKNOWN)
+         *
+         * i.e. the wire value is WifiTechnology, and the five it accepts are
+         * exactly the five Phy can be.  Anything else maps to 0, so an
+         * unrecognised PHY degrades to the old behaviour rather than to a wrong
+         * standard -- which still matters, because a wrong standard makes
+         * ThroughputPredictor predict confidently and wrongly where UNKNOWN makes
+         * it fall back.
+         *
+         * AND IT ONLY REACHES ANYTHING BECAUSE getDeviceWiphyCapabilities NOW
+         * ANSWERS.  predictThroughput returns 0 before looking at this field if
+         * the wiphy capabilities are null, which they were until Wificond.cpp
+         * started reporting them -- the two changes are one change.  See docs/60.
+         */
+        int32_t technology = 0;                 /* WifiTechnology.UNKNOWN */
+        switch ((Phy) mPhy.load()) {
+        case Phy::Legacy: technology = 1; break;
+        case Phy::Ht:     technology = 2; break;
+        case Phy::Vht:    technology = 3; break;
+        case Phy::He:     technology = 4; break;
+        case Phy::Eht:    technology = 5; break;
+        default:          technology = 0; break;
+        }
+
+        /*
+         * Spatial streams, per direction, as the link is actually using them --
+         * hardcoded 1/1 before, which understated this 2x2 card by half on a
+         * two-stream link.  A floor of 1 because the framework multiplies by
+         * min(tx, rx) and a zero there predicts zero throughput on a working
+         * link; 0 from the host means "did not say", not "none".
+         */
+        const int32_t txNss = mTxNss.load() > 0 ? mTxNss.load() : 1;
+        const int32_t rxNss = mRxNss.load() > 0 ? mRxNss.load() : 1;
+
+        /*
+         * channelBandwidth: NM's AccessPoint.Bandwidth is the AP's operating
+         * width from the HT/VHT/HE operation IE, and nl80211's rate flags are the
+         * width this station negotiated.  NmBackend prefers the latter and falls
+         * back to the former; see overlayNl80211().
+         *
+         * The framework's side of this was read out of this image's
          * service-wifi.jar rather than assumed --
          * SupplicantStaIfaceHalAidlImpl.getChannelBandwidth() maps 1..4
          * identically, 7 to CHANNEL_WIDTH_320MHZ and everything else to
          * CHANNEL_WIDTH_20MHZ, so the wire value is WifiChannelWidthInMhz.
-         * See docs/59-wifi-stage5-polish.md.
          */
         int32_t bandwidth = 0;          /* WifiChannelWidthInMhz.WIDTH_20 */
         switch (mChannelWidthMhz.load()) {
@@ -913,16 +953,17 @@ Supplicant::handleStaIface(GBinderRemoteRequest* req, guint code, int* status)
         case 320: bandwidth = 7; break;          /* WIDTH_320 */
         default:  bandwidth = 0; break;          /* 20, and "host did not say" */
         }
-        GDEBUG("getConnectionCapabilities() -> technology UNKNOWN, "
-               "channelBandwidth %d", bandwidth);
+        GDEBUG("getConnectionCapabilities() -> technology %d (%s), "
+               "channelBandwidth %d, streams %dx%d", technology,
+               phyName((Phy) mPhy.load()), bandwidth, txNss, rxNss);
 
         GBinderLocalReply* reply = beginReply(mStaIface, &writer, status);
         gbinder_writer_append_int32(&writer, 1);         /* non-null marker */
         gbinder_writer_append_int32(&writer, 4 + 5 * 4); /* parcelable size */
-        gbinder_writer_append_int32(&writer, 0);        /* technology UNKNOWN */
+        gbinder_writer_append_int32(&writer, technology);
         gbinder_writer_append_int32(&writer, bandwidth);
-        gbinder_writer_append_int32(&writer, 1);        /* max tx streams */
-        gbinder_writer_append_int32(&writer, 1);        /* max rx streams */
+        gbinder_writer_append_int32(&writer, txNss);
+        gbinder_writer_append_int32(&writer, rxNss);
         gbinder_writer_append_int32(&writer, 0);        /* legacyMode UNKNOWN */
         return reply;
     }
@@ -1405,8 +1446,12 @@ Supplicant::onHostLinkEvent(const LinkState& st, LinkEvent ev)
            st.associated);
 
     /* Cached for getConnectionCapabilities(); see the member's note. Only while
-     * associated -- a width from a link that has gone is not a width. */
+     * associated -- a width from a link that has gone is not a width, and a PHY
+     * from one is not a PHY. */
     mChannelWidthMhz.store(st.associated ? st.channelWidthMhz : 0);
+    mPhy.store(st.associated ? (int32_t) st.phy : 0);
+    mTxNss.store(st.associated ? st.txNss : 0);
+    mRxNss.store(st.associated ? st.rxNss : 0);
 
     switch (ev) {
     case LinkEvent::Associating:

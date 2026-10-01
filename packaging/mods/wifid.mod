@@ -1,4 +1,4 @@
-# waydroid-ext-wifid -- docs/31 through docs/35
+# waydroid-ext-wifid -- docs/31 through docs/35, docs/59 and docs/60
 #
 # The host-side replacement for Android's wificond. Registers wifinl80211 and
 # the supplicant on the container's binder and drives NetworkManager on the
@@ -6,7 +6,7 @@
 # ever owning a phy. WifiBackend.h is the seam: NmBackend is one implementation
 # and iwd or connman could be others.
 
-VERSION=1.0.1
+VERSION=1.1.0
 RELEASE=1
 KIND=host
 ARCH=x86_64
@@ -74,7 +74,7 @@ NetworkManager"
 RECOMMENDS="waydroid-ext-wifi-hostd
 waydroid-ext-wifi-framework"
 
-DOCS="docs/user/lxc-config.md docs/user/overlay.md docs/29-wifi-plan.md docs/31-wifi-stage2.md docs/34-wifi-second-radio.md docs/35-wifi-stage5.md docs/59-wifi-stage5-polish.md"
+DOCS="docs/user/lxc-config.md docs/user/overlay.md docs/29-wifi-plan.md docs/31-wifi-stage2.md docs/34-wifi-second-radio.md docs/35-wifi-stage5.md docs/59-wifi-stage5-polish.md docs/60-wifi-nl80211.md"
 
 DESCRIPTION="Serves Android's Wi-Fi native interfaces -- IWificond, IClientInterface,
 IWifiScannerImpl and the supplicant AIDL surface -- from the host, over the
