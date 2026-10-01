@@ -124,10 +124,49 @@ is not that. Three checks separate them, and all three say no:
 |---|---|
 | `Watchdog: *** WATCHDOG KILLING SYSTEM PROCESS` every 60 s | **no Watchdog kills at all** |
 | 32-bit audio HAL dead, `audioserver` never registers | `audioserver` and `android.hardware.audio.service` **alive**, 17 min old |
-| container PID counter past 65535 | highest container PID **14963** |
+| container PID counter past 65535 | `ns_last_pid` nowhere near it — see below |
 
 The discriminator that is quick and decisive: `init.svc.<name>` for a handful of services.
 `stopping` on several at once is docs/48/61; a Watchdog line every 60 s is docs/51.
+
+## Is this the 32-bit PID cliff? No — but the two can compound
+
+Asked directly, and worth answering in the document because anyone with this symptom will ask it.
+[docs/51](51-pid-namespace-32bit-cliff.md) is a real fault with the same visible symptom, and this
+is not it. But they are related more closely than "two things that both end at a boot loop", and one
+of those relationships is a hazard.
+
+**They are opposite failures of the same lifecycle.** docs/51 is a process that cannot *start* — a
+newly forked 32-bit process whose tid exceeds 65535 is aborted by bionic at birth. This document is a
+process that cannot be *killed* — `KillProcessGroup()` signals nobody, so init parks the service in
+`STOPPING`. Android's service management needs both halves to work, and on this host each one is
+broken by a different cause.
+
+**They share a red herring**, which is why docs/51 is where a misdiagnosis lands: the
+`DisplayModeDirector` / `getRefreshRateInHbmHdr` `FATAL EXCEPTION`. In docs/51 it is one crash from
+the start of the episode with Watchdog doing the real killing; here it is the repeating crash itself.
+Same stack, opposite role.
+
+**And a crash loop burns PIDs toward the cliff an order of magnitude faster than normal use**, so
+left alone long enough this fault grows the other one on top of itself. Measured on this host:
+
+| | PIDs/min |
+|---|---|
+| idle (AGENTS.md) | 14.1 |
+| real use (AGENTS.md) | ~56 |
+| three hours of normal use after recovery — `ns_last_pid` 13586 | ~75 |
+| **during the crash loop** — a fresh `system_server` every ~5 s | **~500 (estimated)** |
+
+The loop figure is an estimate from one observation rather than a measurement, but the order of
+magnitude is the point: at that rate the namespace counter covers 65536 in roughly two hours. **The
+reason that did not turn into docs/51 as well is `pidguard`**, which caps the container's `pid_max`
+at 65536 — confirmed in the container — so the counter *wraps* instead of climbing past 65535 and
+the cliff is unreachable. Without that cap, a loop left overnight would have started killing 32-bit
+processes at birth too, and the resulting diagnosis would have been genuinely ambiguous.
+
+So `pidguard` earned its keep here without being implicated in the fault. The one-line check for the
+cliff remains `cat /proc/sys/kernel/ns_last_pid` inside the container, not the highest running PID —
+already-running processes keep their low PIDs, as AGENTS.md says.
 
 ## How to recognise this one
 
