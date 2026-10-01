@@ -63,14 +63,26 @@ that line is still valid.
   2026-09-24 and reconciles `/var/lib/waydroid/overlay` from payload in
   `/usr/lib/waydroid-overlay` before the container starts, so a wiped overlay repairs itself and
   `waydroid-overlay-sync --verify` answers whether the live overlay still matches
-  ([docs/36-packaging.md](docs/36-packaging.md)). **On bigtab01 it covers 2 of the 13 files in
-  the overlay** — the camera wrapper for both ABIs, from `waydroid-ext-camera-gbm`. The other 11
-  are hand-placed there, unowned by any package, and erased by `waydroid init -f` with nothing to
-  restore them. **Seven of those eleven are now packaged and not yet installed** (`camera-hal`,
-  `battery`, `brightness-overlay`, `wifi-framework`, `wifi-hostd`, written 2026-09-24), so the
-  gap on the machine is a migration rather than missing packages; the remaining four are
-  Widevine's and need manifest mechanism that does not exist yet
-  ([packaging/README.md](packaging/README.md), *Second migration* and the section after it).
+  ([docs/36-packaging.md](docs/36-packaging.md)). **As of 2026-09-30 it covers 9 of the 13 files in
+  the overlay**, up from 2 — `camera-gbm` (both ABIs), `brightness-overlay`, `wifi-framework`,
+  `wifi-hostd` (2), `battery` and `camera-hal` (2). **The four left are Widevine's**, and they are
+  safe: `waydroid-overlay-sync` only ever removes what its own `deployed.list` records, so files it
+  did not place are untouched. They remain hand-placed, unowned, and erased by `waydroid init -f`
+  with nothing to restore them.
+  Two things worth knowing before trusting any of that. **`battery` and `camera-hal` ship no bytes**
+  — they are `derive` rows that reconstruct their file out of the host's own `vendor.img` at boot and
+  **refuse silently if a stock hash has moved**, which would simply leave the overlay file absent, so
+  pre-flight them with `waydroid-overlay-sync --check-upstream` (or by hashing the image file with
+  `debugfs`) rather than assuming. And **`waydroid-overlay-sync --verify` saying "overlay matches the
+  staged components" is not "the overlay is covered"** — it speaks only for the staged ones and is
+  silent about everything unowned.
+  **A hand-placed unit in `/etc/systemd/system` shadows the packaged one in
+  `/usr/lib/systemd/system`, so a package can install and do nothing.** Seven did on 2026-09-30;
+  only the Wi-Fi three were migrated, because only they were provably byte-identical. `media` 1.0.0
+  is a live example of why this matters in both directions: it predates the `lan.syshlt` →
+  `com.systemhalted` rename, so the shadowing is currently the only thing keeping removable media
+  working. See [docs/59](docs/59-wifi-stage5-polish.md) and
+  [packaging/README.md](packaging/README.md).
 
 ### Where builds happen
 

@@ -50,8 +50,17 @@ $ rpm -qp --requires build/rpm/RPMS/*/*.rpm
 | `waydroid-ext-battery` | **yes**, since 2026-09-24 | — |
 | `waydroid-ext-brightness-overlay` | **yes**, since 2026-09-24 | — |
 | `waydroid-ext-wifi-framework` | **yes**, since 2026-09-24 | — |
-| `waydroid-ext-wifi-hostd` | **no** | hard-requires `waydroid-ext-wifid`, which is SRPM only — correctly, since standing wificond down with no daemon behind it is worse than stock |
-| `waydroid-ext-wifid` | **no** | SRPM only |
+| `waydroid-ext-wifi-hostd` | ~~**no**~~ **yes**, since 2026-09-27 | unblocked when `wifid` got a binary RPM; the hard dependency stands, since standing wificond down with no daemon behind it is worse than stock |
+| `waydroid-ext-wifid` | ~~**no**~~ ~~SRPM only~~ **yes**, since 2026-09-27 | via `build-mod.sh --prebuilt wifid`, further down this page |
+| `waydroid-ext-wifi-sync` | **yes** | noarch, and buildable here without the daemon toolchain at all |
+
+**Corrected 2026-09-30.** The two "no" rows above were already stale when they were read back:
+`build-mod.sh --prebuilt wifid` had produced a binary `waydroid-ext-wifid` on 2026-09-27, which
+unblocked `wifi-hostd`, and `wifi-sync` had never needed the daemon toolchain to build. **Every one
+of the four Wi-Fi packages has a binary RPM.** What was actually blocking the install was a
+*dependency chain* rather than a missing package — `wifi-hostd` requires
+`waydroid-ext-overlay-sync >= 1.1.0`, and the host had 1.0.0 — which is a three-package transaction
+and not a packaging gap. See [docs/59](59-wifi-stage5-polish.md).
 
 **`waydroid-ext-overlay-sync` was the keystone and it was missing. It was written on
 2026-09-23.** Every overlay component hard-requires it by design, so while it had no `.mod`

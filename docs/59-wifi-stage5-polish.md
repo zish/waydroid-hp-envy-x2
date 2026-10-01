@@ -444,6 +444,90 @@ Unchanged from [docs/35](35-wifi-stage5.md) and [docs/38](38-wifi-primary-radio.
   section above. `getConnectionCapabilities` was kept out of that set; `getMacAddress`, `connect`
   and `disconnect` are still in it.
 
+## Packaged and deployed, and the shadowing nobody had written down
+
+Built the same day: **`waydroid-ext-wifid` 1.0.1** (patch digit — the fixes are internal and no
+interface moves), **`waydroid-ext-wifi-sync` 1.1.0** (minor digit, because the reap is new behaviour
+that *deletes* something), and **`waydroid-ext-wifi-hostd` 1.0.1** rebuilt unchanged to confirm the
+RPM matches the tree.
+
+The packaged daemon is **byte-identical to the binary runtime-tested above** — one sha256 across the
+RPM, `build/wifi/daemon/` and the copy that served Wi-Fi on the host all session — and the packaged
+reconciler is byte-identical to the tree's. That is the check worth doing; a version bump proves
+nothing about what is inside.
+
+### ostree compliance
+
+| check | result |
+|---|---|
+| payload outside `/usr` and `/etc` | **none** — nothing in `/var`, `/opt`, `/usr/local`, `/home`, `/root` |
+| scriptlets | `wifid` and `wifi-sync` have **none at all**; `wifi-hostd`'s is `waydroid-overlay-sync --quiet \|\| :` |
+| unit activation | enable symlinks shipped inside `/usr/lib/systemd/system/<target>.wants/`, never `systemctl enable` from `%post` |
+| `packaging/test-install.sh` | 18 checks, 0 failures |
+| `rpmlint` | only `no-signature` and `invalid-url Source0`, both inherent to unsigned local builds |
+
+The scriptlet and symlink rules are not style: `%post` runs against the *compose*, not the booted
+system, which is how `waydroid-ext-backlight` once installed with its SELinux half doing nothing and
+nothing anywhere reporting a problem (see [packaging/README.md](../packaging/README.md)).
+
+### docs/53's "SRPM only" was stale, and the real blocker was a dependency
+
+[docs/53](53-release-readiness.md) listed `wifid` and `wifi-hostd` as having no binary RPM.
+**All four Wi-Fi packages had one.** What was actually blocking the install was that `wifi-hostd`
+requires `waydroid-ext-overlay-sync >= 1.1.0` and the host had 1.0.0 — a three-package transaction,
+not a packaging gap. Corrected in place.
+
+### The derive pre-flight, which is the one that could have gone wrong quietly
+
+`battery` 2.0.0 and `camera-hal` 2.0.0 are **derive** rows: they carry no bytes and reconstruct
+their file from the user's own `vendor.img` at boot, refusing if the stock hash has moved. A refusal
+is silent in the sense that matters — the overlay file simply would not appear, and the battery
+would go back to Waydroid's hardcoded 85%/charging. So all three stock hashes were checked against
+this host's images with `debugfs` *before* the transaction, and all three matched.
+
+Checked again afterwards, against the staged manifests: **8 of the 9 files the manifests will own
+are byte-identical to what is hand-placed in the overlay today**, including both derive results. The
+ninth is `wificond.rc`, where the only difference is one comment word — `CLAUDE.md` where the
+packaged copy says `AGENTS.md`, from before that file was renamed. The service stanza is identical.
+
+Overlay files owned by a package goes **4 of 13 to 9 of 13**. The four left are Widevine's, and
+`waydroid-overlay-sync` leaves them alone: it only removes what its own `deployed.list` records.
+
+### 16 packages, and 7 of them would have installed inert
+
+The transaction was one `rpm-ostree install` with 3 replacements and 13 additions. `dexopt` was
+excluded because it declares `SHIPPED=no`. Adding local packages re-resolves the whole layer, so it
+also pulled the host's 33 layered Fedora packages current — 191 packages total, 167 from repos,
+which is inherent to rpm-ostree layering and was seen on the first migration too.
+
+**Then the thing worth the whole section.** Seven of the newly installed packages would have had no
+effect at all, because a hand-placed unit in `/etc/systemd/system` **shadows** the packaged one in
+`/usr/lib/systemd/system`, and those hand units exec `/usr/local/bin/…`:
+
+| package | shadowed by | packaged vs hand-placed |
+|---|---|---|
+| `wifid` | `/etc/systemd/system/waydroid-wifid.service` | **byte-identical** |
+| `wifi-sync` | its `.service` and `.timer` | **byte-identical** |
+| `android-power` | `waydroid-android-lock.service` | differs only in the `/usr/bin` vs `/usr/local/bin` prefix |
+| `cage` | binary only | prefix only |
+| `graceful-exit` | binary only | prefix only |
+| `hw-ite8350` | `ite8350-resume-check.service`, `ite8350-sleep.service` | **packaged is better** — it adds a "not this machine" guard the hand copy lacks, which stops a reprobe failing on every resume on hardware with no hub |
+| `media` | `waydroid-mediad.service` | **packaged is a REGRESSION** — 1.0.0 predates the `lan.syshlt` → `com.systemhalted` rename, so it would broadcast to a package name the app no longer has |
+
+Only the Wi-Fi three were migrated, because only they were built today from this tree and proved
+byte-identical. Backed up to `~jmelanso/waydroid-handplaced-wifi-2026-09-30.tar.gz` (8 entries: three
+units, two enable symlinks, three binaries) and removed. The running daemon kept going from its
+deleted inode, which is harmless precisely because the packaged binary is identical.
+
+`/etc/waydroid-wifid.conf` needs no merge: the pristine copy in the new deployment's `/usr/etc` and
+the live one are already identical, because the stale-commentary fix earlier the same day had
+brought the host's file to the repo template.
+
+**Left open deliberately**: the other five packages stay shadowed. Four are equivalent or better and
+migrating them is a small job plus a post-reboot check each; `media` must not be migrated until it is
+rebuilt from current source, and until then the shadowing is the only thing keeping removable media
+working. That the protection is accidental is the point — nothing would have reported it.
+
 ## Running it
 
 ```bash
