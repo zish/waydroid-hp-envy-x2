@@ -1,3 +1,22 @@
+* Wed Sep 30 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
+- Fix the RSSI Android is told. NmBackend converted NetworkManager's 0..100
+  Strength with quality/2 - 100, which assumes NM's range is -100..-50 dBm; it
+  is -100..-40, so the reported value was low by quality/10 dB -- 0 dB at the
+  bottom of the scale and 10 dB at the top. The exact inverse is
+  -100 + 3*quality/5, verified against nl80211 on 13 same-scan observations and
+  across all 61 dBm values NM can represent (docs/59).
+- Not cosmetic: this image's ScoringParams are rssi2=-83:-80:-73:-60, so a link
+  1 dB shy of "good" was being reported 1.5 dB above "insufficient", and the
+  framework's own score history fades that far every few seconds.
+- Report channelBandwidth in getConnectionCapabilities, from NM's
+  AccessPoint.Bandwidth. technology stays UNKNOWN deliberately: NM exposes only
+  the AP's advertised capability, not the negotiated PHY. The parcel layout is
+  unchanged, which matters -- this is the handler whose missing non-null marker
+  killed system_server on every association in Stage 4.
+- Cache the channel width from the host link event rather than calling the
+  backend from a binder thread, which would race NmBackend::wifiDevicePath()'s
+  writes to mDevPath and mIfname against the GLib main loop.
+
 * Wed Sep 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - Split out of waydroid-wifid.spec as its own source package (docs/47).
 - waydroid-wifi-sync and its timer move to waydroid-ext-wifi-sync, so a

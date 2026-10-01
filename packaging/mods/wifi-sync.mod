@@ -1,7 +1,9 @@
 # waydroid-ext-wifi-sync -- docs/36-wifi-credential-sync.md
 #
 # Makes NetworkManager the source of truth for the Wi-Fi networks Android knows
-# about. waydroid-wifid carries credentials in ONE direction: Android keeps its
+# about, and to clean up after itself when a network is forgotten.
+#
+# waydroid-wifid carries credentials in ONE direction: Android keeps its
 # own copy of every passphrase, pushes it down on each connect, and the daemon
 # calls Update on the NM profile -- so NM is a write-through projection of
 # Android's config, a host-side edit is silently overwritten, and a network
@@ -37,6 +39,16 @@
 # answer anyway, because you can read every passphrase that has left the host
 # out of a single file.
 #
+# WHY THE REAP IS NOT GATED ON THE ALLOW-LIST
+#
+# Two halves, two scopes. Importing and deleting HOST-OWNED profiles is opt-in,
+# because those belong to the machine's owner. The daemon's own "(Waydroid)"
+# projections are ours outright, and an empty allow-list is the default -- so a
+# reap behind that gate would never run on a stock host, which is precisely
+# where a forgotten network's passphrase would be left lying around. The
+# allow-list is still parsed first, because `nodelete` has to be able to protect
+# an SSID in both halves. docs/59-wifi-stage5-polish.md.
+#
 # WHY THE TIMER IS ENABLED AND THE SERVICE IS NOT
 #
 # The installer ships the timers.target.wants symlink and NOT a
@@ -46,7 +58,7 @@
 # --no-block`, and that call is designed to fail silently: a host with this
 # package absent must still bring Wi-Fi up normally.
 
-VERSION=1.0.0
+VERSION=1.1.0
 RELEASE=1
 KIND=host
 
@@ -105,7 +117,7 @@ coreutils
 iproute
 util-linux-core"
 
-DOCS="docs/36-wifi-credential-sync.md"
+DOCS="docs/36-wifi-credential-sync.md docs/59-wifi-stage5-polish.md"
 
 DESCRIPTION="Copies the passphrases of explicitly opted-in networks from NetworkManager into
 Android, on a five-minute timer and whenever Android turns Wi-Fi on, so a
@@ -118,14 +130,26 @@ which is installed at mode 0600 with no network in it -- the shipped file is
 comments. That file is the audit trail for which credentials have left the
 host, and until something is added to it this package is inert.
 
-Deleting NetworkManager profiles is the dangerous half, so it is guarded four
-ways: never a profile active on any device, never one pinned to the interface
-carrying the host's default route, never the daemon's own (Waydroid) profiles,
-and never more than one network per run -- a wholesale disappearance is a wiped
-Android config store, not somebody forgetting networks one at a time. An
-allow-list line may also carry nodelete, which shares the network and never
-lets a forget in Android remove the host's profile; that is the right setting
-for any network the host itself depends on.
+Deleting NetworkManager profiles is the dangerous half, so a host-owned profile
+is guarded four ways: never one active on any device, never one pinned to the
+interface carrying the host's default route, never a profile waydroid-wifid
+created itself, and never more than one network per run -- a wholesale
+disappearance is a wiped Android config store, not somebody forgetting networks
+one at a time. An allow-list line may also carry nodelete, which shares the
+network and never lets a forget in Android remove the host's profile; that is
+the right setting for any network the host itself depends on.
+
+It separately reaps the profiles waydroid-wifid created for itself, named
+\"<ssid> (Waydroid)\", once Android no longer has that network saved. Those are
+projections of Android's own configuration rather than the host's networks, so
+they need no allow-list entry and are reaped on a stock host with nothing opted
+in -- without this, forgetting a network in Android left its passphrase in
+NetworkManager indefinitely. A profile counts as the daemon's only if its UUID
+is the one the daemon derives from the SSID, so renaming a profile cannot hand
+this package write access to it, and one that has been given autoconnect=yes is
+treated as adopted and left alone. At most one is reaped per run, for a sharper
+reason than above: once Android has lost a passphrase, the daemon's profile
+holds the last copy of it.
 
 It adds networks Android does not have and never overwrites one it does. The
 cost, which is real: a passphrase changed on the host does not reach a network

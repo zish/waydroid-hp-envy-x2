@@ -1,3 +1,29 @@
+* Wed Sep 30 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
+- Reap the daemon's own "(Waydroid)" profiles when Android no longer has the
+  SSID saved. Until now a network forgotten in Android left its profile, PSK
+  included, in NetworkManager forever: NmBackend::forget() implements exactly
+  this and nothing called it (docs/59).
+- The supplicant seam cannot carry that signal, and this was measured before
+  anything was built. ISupplicantStaIface.removeNetwork fires on every
+  reconnect, not on a forget -- four times in one boot on a network that was
+  never forgotten and was still connected -- so calling forget() there would
+  have deleted the profile the host is administered over every time Wi-Fi was
+  used.
+- Ownership is tested by the daemon's deterministic RFC 4122 v5 UUID over a
+  fixed namespace and the SSID, not by the " (Waydroid)" label, which the
+  desktop GUI can rename and NM does not require to be unique. This also
+  corrects two pre-existing name-based ownership tests in this script, which
+  were sparing host profiles from a deletion their owner had opted into and
+  handing renamed projections to the wrong half of the script.
+- The reap runs BEFORE the allow-list gate, because an empty allow-list is the
+  default and our projections exist regardless; the host-owned half is still
+  opt-in and still exits early. The allow-list is parsed first so nodelete can
+  protect an SSID in both halves.
+- Guarded five ways: our UUID, absent from Android, never active on a device,
+  never autoconnect=yes, and never more than MAX_REAPS_PER_RUN (1) at once. The
+  last gets its own budget rather than sharing MAX_FORGETS_PER_RUN because once
+  Android has lost a passphrase our profile holds the last copy of it.
+
 * Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First package. The credential reconciler and its timer, split out of
   waydroid-wifid.spec's `sync` subpackage so a fix to a shell script on a timer
