@@ -135,12 +135,31 @@ if [ "$DO_RESTART" != 1 ]; then
 	exit 1
 fi
 
+# --restart NEEDS SOMEBODY AT THE MACHINE, and this checks rather than trusts.
+#
+# The container restart below stops the session, and the `waydroid session
+# start` that follows can only bring it back if the compositor's socket is
+# there -- which over ssh on the kiosk it is not, because the compositor died
+# with the session. The result is the SDDM greeter and no way back without a
+# physical login. bin/camera-test.sh did exactly this on 2026-09-30 and cost a
+# trip to the machine; the same guard is here so --restart cannot repeat it.
+export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+       DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+if [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+	echo "### REFUSING --restart: no Wayland compositor at" \
+	     "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" >&2
+	echo "    Restarting the container ends the session, and bringing it back" >&2
+	echo "    needs that socket. Without it the kiosk lands on the SDDM" >&2
+	echo "    greeter and only a physical login recovers it." >&2
+	echo "    The reprobe above is DONE; only the restart was skipped." >&2
+	echo "    Run this from a terminal inside the Waydroid session, or" >&2
+	echo "    restart by hand at the machine." >&2
+	exit 2
+fi
+
 echo "### restarting container and session"
 sudo systemctl restart waydroid-container >/dev/null 2>&1
 sleep 6
-# The container restart stops the session and does NOT bring it back.
-export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
-       DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 nohup waydroid session start >/tmp/waydroid-session.log 2>&1 &
 disown
 for i in $(seq 1 25); do

@@ -2,10 +2,44 @@
 # Restart Waydroid and test whether the camera preview produces frames.
 # Usage: camera-test.sh <label>
 # Run ON bigtab01 as jmelanso. Needs sudo for waydroid shell.
+#
+# THIS SCRIPT STOPS AND RESTARTS THE WAYDROID SESSION, SO IT NEEDS SOMEBODY AT
+# THE MACHINE. It is not a read-only check like battery-test.sh or wifi-test.sh,
+# and running it over ssh on the kiosk ENDS THE SESSION AND DROPS THE DISPLAY TO
+# THE SDDM GREETER, where only a physical login can recover it.
+#
+# That is not hypothetical. On 2026-09-30 this was run over ssh during a
+# post-reboot verification sweep. `waydroid session stop` killed the cage
+# compositor; the `waydroid session start` below then failed with
+#
+#   Wayland socket '/run/user/1000/wayland-1' doesn't exist; are you running a
+#   Wayland compositor?
+#
+# because the compositor it needed was the one just killed. The machine sat at
+# the greeter until someone logged in at the console. AGENTS.md warns about
+# exactly this and the script carried no guard, so the guard is now here.
 set -u
 LABEL="${1:-test}"
 export XDG_RUNTIME_DIR=/run/user/1000
 export WAYLAND_DISPLAY=wayland-1
+
+# Refuse rather than warn. The failure is unrecoverable without physical access,
+# so a prompt nobody is there to read is worse than an exit.
+#
+# The test is for the compositor's socket and not for "am I on a tty", because
+# the socket is the thing `waydroid session start` actually needs: if it is not
+# there now it will not be there after the stop either, and the restart cannot
+# succeed. --force is for a host where the session is genuinely headless and
+# losing it costs nothing.
+if [ "${2:-}" != "--force" ] && [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+  echo "REFUSING: no Wayland compositor at $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY." >&2
+  echo "  This script stops the Waydroid session and starts it again, and the" >&2
+  echo "  restart needs that socket. Without it the session ends and the kiosk" >&2
+  echo "  drops to the SDDM greeter, which only a physical login recovers." >&2
+  echo "  Run it from a terminal inside the Waydroid session, or pass --force" >&2
+  echo "  if losing the session really is acceptable here." >&2
+  exit 2
+fi
 
 echo "### $LABEL: gralloc = $(grep -E '^ro\.hardware\.gralloc' /var/lib/waydroid/waydroid_base.prop)"
 

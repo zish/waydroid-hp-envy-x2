@@ -597,6 +597,36 @@ One tidy left: `nice-limit.conf` now exists twice, hand-placed in
 `/usr/lib/systemd/system/waydroid-container.service.d/`. They are byte-identical and drop-ins merge,
 so `LimitNICE=40` is applied either way; the `/etc` copy is simply redundant now.
 
+### I ended the session with a test script, and two scripts now refuse to let that happen
+
+The verification sweep above finished with `bin/camera-test.sh`, run over ssh alongside the other
+`*-test.sh` scripts. **Its line 12 is `waydroid session stop`.** That killed the cage compositor; the
+`waydroid session start` on line 14 then failed with
+
+```
+Wayland socket '/run/user/1000/wayland-1' doesn't exist; are you running a Wayland compositor?
+```
+
+because the compositor it needed was the one just stopped. SDDM went back to the greeter on tty1 and
+only a physical login recovered it. [AGENTS.md](../AGENTS.md) warns about precisely this, and the
+warning had been read earlier the same session — the mistake was assuming a file named
+`*-test.sh` was a read-only check like its four siblings.
+
+Nothing was damaged: the packages, the overlay, `waydroid-wifid` and every host-side daemon were
+untouched, and the container came back with the session. The cost was a trip to the machine.
+
+`bin/camera-test.sh` and `bin/sensor-hub-reset.sh --restart` now **refuse with exit 2** when there is
+no compositor socket at `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, with `--force` for a host where losing
+the session genuinely costs nothing. The test is the socket rather than "am I on a tty", because the
+socket is the thing the restart actually needs: if it is absent before the stop it will be absent
+after, so the restart cannot succeed and the only question is whether anyone is there to notice.
+`sensor-hub-reset.sh` also now says that the reprobe already happened and only the restart was
+skipped, so a refusal does not read as "nothing was done".
+
+Those two are the only scripts in `bin/` that perform the disruption — swept rather than fixed
+one-off. The rest only mention it in comments. **Safe over ssh**: `wifi-test.sh`,
+`battery-test.sh`, `sensors-test.sh`, `brightness-test.sh`.
+
 ## Running it
 
 ```bash
