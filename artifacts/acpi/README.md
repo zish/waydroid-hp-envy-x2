@@ -104,3 +104,28 @@ Searched the **decompiled source** of all seven tables — 136 devices — not j
 **ACPI is ruled out as the vibrator's control path.** Combined with the sensor hub having no HID
 Output reports, the remaining candidate is the SYNA7500 touchscreen's two Output reports on vendor
 page `0xff00` — see [../hid/README.md](../hid/README.md).
+
+---
+
+## Resolved 2026-10-02 — and there is exactly one GPIO in the firmware
+
+See [docs/62](../../docs/62-vibration-ec-owned.md). "ACPI is ruled out as the vibrator's control
+path" holds, and this session re-derived it independently rather than trusting it: all seven tables,
+155 `Device` blocks, 878 `Method`s, comment-stripped — zero haptic-shaped hits. (Strip iasl's
+comments before any regex over a `.dsl`: the ASCII column renders bytes `0x7B`/`0x7D` as `{`/`}`,
+which silently breaks brace-depth parsing.)
+
+Two additions:
+
+- **There is exactly one `GpioIo` in all seven tables**, and it is already spoken for: the enable
+  pin (`0x11` on `GPI0`) that `GPS0._CRS` declares for a GPS receiver **this unit does not have**.
+  Per the correction above, `GPS0` is a family-wide firmware declaration and the line was sniffed
+  directly — see [docs/13](../../docs/13-gps.md). No GPIO drives a motor, because there is no
+  second GPIO to drive one.
+- **HP's WMI surface is closed too.** `\_SB.WMID` has 71 methods, all battery, thermal, dock,
+  security and BIOS-config; `hp-bioscfg` exposes exactly two settings, `Sure_Start` and
+  `pending_reboot`.
+
+The answer was never in a table: the motor is the **EC's**, fired by EC firmware on the capacitive
+Windows button and at power-on, and the DSDT handler for that button (`_Q81`) only sets a bit and
+raises a `Notify`.

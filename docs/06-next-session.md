@@ -37,8 +37,11 @@ Source in [sensors/](../sensors), writeup in [docs/14](14-sensors.md), verify wi
 app that follows the sensor rendered upside down, because the hub reports the gravity vector where
 Android's convention is proper acceleration. One negation in `GetAccelerometerEvent`, plus the
 repair of two cross-checks that had been ratifying the bug; [docs/18](18-sensor-axes.md).
-**Vibration is the one part of goal 2 still open**, and still blocked below
-Waydroid — see the vibration section below, which is unchanged.
+**Vibration was the one part of goal 2 still open and is now deferred as unlikely, 2026-10-02.**
+The motor is the embedded controller's: it buzzes on a tap of the capacitive Windows button and at
+power-on, the OS is never on the path, and the DSDT handler for that button never touches a motor.
+See [62](62-vibration-ec-owned.md); the section below is superseded and kept only for its
+negative results.
 
 **Session of 2026-09-06** added a second camera fix (`LENS_FACING` `EXTERNAL`->`BACK`, so apps that
 demand a rear camera will open it) and spent most of its time ruling things out — see
@@ -338,13 +341,21 @@ Four things to know before touching it:
 
 The other two candidates, both still open:
 
-1. **Vibration** — the rest of goal 2, and the harder half. Unchanged from the previous scoping;
-   read the next section. Nothing about the sensors work moves it forward, because the sensors were
-   already readable from Linux and the vibrator still is not. It needs the DSDT, not Waydroid.
+1. ~~**Vibration** — the rest of goal 2, and the harder half.~~ **Deferred as unlikely on
+   2026-10-02**: the motor is driven by the EC, on the EC's own button and its own power-on
+   sequence, and nothing the OS can reach asks it to buzz. See
+   [62](62-vibration-ec-owned.md).
 2. **Goal 5, removable media** — untouched, and still the cheapest thing on the list. Exposing the
    user's `/run/media/<username>` to the container is probably sufficient.
 
 ### Vibration — harder than the sensors, and blocked one layer lower
+
+> **Superseded 2026-10-02 by [62](62-vibration-ec-owned.md), which answers this section.** The
+> motor is the EC's and no software path to it exists. The table below is still accurate as a list
+> of places a vibrator is *not*, and the closing guess — "most likely an ACPI method on the ITE8350
+> embedded controller" — was half right: it is the embedded controller, but there is no method,
+> because the EC never asks the OS and the OS cannot ask the EC. The `HID-SENSOR-ff830080` note at
+> the end is also resolved there.
 
 The vibrator **does exist in the hardware** (confirmed by the owner, 2026-09-06). But **Linux
 exposes no interface to it**, which makes this a very different problem from the sensors: those are

@@ -142,8 +142,24 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    *noaudit* variant, so `ausearch` shows nothing. Fixed by giving the container a real
    `RLIMIT_NICE` through a `waydroid-container.service` drop-in rather than a policy module. See
    [docs/40-binder-nice.md](docs/40-binder-nice.md).
-   **Vibration is the remaining part and is blocked a layer lower** — the motor exists but Linux
-   exposes no interface to it at all, so that part starts with the DSDT, not with Waydroid.
+   **Vibration was the remaining part and is now deferred as unlikely, 2026-10-02.** The motor is
+   real and works — it buzzes on a tap of the capacitive Windows button, and again at power-on. Both
+   are the **embedded controller** acting alone, and the power-on buzz settles it by itself, since
+   no OS exists at that moment. A probe watching all 15 evdev devices and all three raw HID streams
+   against one clock caught the tap arriving **only** as `intel-vbtn` scancode `0xC2`/`0xC3` →
+   `KEY_LEFTMETA`, from `INT33D6:00`, a child of the EC; the touchscreen and the sensor hub stayed
+   silent. The DSDT handler for that scancode, `_Q81`, sets one bit and raises one `Notify` and
+   **never touches a motor** — the EC buzzes first and tells the OS after. ACPI (155 devices, 878
+   methods), GPIO (exactly one `GpioIo` in all seven tables, and it is the enable pin `GPS0._CRS`
+   declares for a receiver this unit does not have — see [docs/13](docs/13-gps.md)), PWM,
+   LEDs, force-feedback, I2C, HP WMI (71 methods) and EC RAM are all ruled out, each re-derived
+   rather than inherited. Two earlier notes are corrected: the SYNA7500's two HID Output reports are
+   the **RMI4 register transport**, not a haptic channel, and "the sensor hub has no Output reports"
+   was the wrong reason to clear the hub, because Feature reports are writable and it has a 16-byte
+   vendor one — it is cleared by measurement instead. The only surviving avenue is blind-probing the
+   EC at `0x62`/`0x66` through `/dev/port`, which races the kernel's EC driver on the controller
+   that owns charging and thermal; **do not start it without the owner accepting that risk.** See
+   [docs/62-vibration-ec-owned.md](docs/62-vibration-ec-owned.md); the probe is `bin/button-probe.py`.
 3. **Power** — **DONE.** Battery level, voltage, charge status and AC adapter state now come from
    the host. The container could always read the host's `/sys/class/power_supply` and the health HAL
    read it correctly; Waydroid's `healthd_board_battery_update()` then overwrote every field with
@@ -902,7 +918,10 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   namespace is to the 32-bit bionic cliff and is a **weather report, not a health check** — crossing
   65535 breaks nothing until something restarts a 32-bit process — and `stylus-watch.py`, which
   listens to a digitizer's evdev stream and settles in seconds whether the panel's controller
-  recognises a given pen at all, that being a firmware question no driver or kernel option changes, and `check-signed-commits.sh`, which is the push-time signature gate — it reads `%G?`
+  recognises a given pen at all, that being a firmware question no driver or kernel option changes, and `button-probe.py`, which opens every `/dev/input/event*` **and** every `/dev/hidraw*` at once
+  against one clock so a single button press names its own source — that is what proved the
+  capacitive Windows button is the EC's and not the touchscreen's ([docs/62](docs/62-vibration-ec-owned.md)),
+  and silence everywhere is a result too, and `check-signed-commits.sh`, which is the push-time signature gate — it reads `%G?`
   rather than shelling out to `git verify-commit`, whose exit status cannot distinguish "bad
   signature" from "no signature", and it is wired both to `.git/hooks/pre-push` and to
   `lefthook.yml` so the check holds whether or not lefthook is installed
