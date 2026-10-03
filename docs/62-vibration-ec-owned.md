@@ -92,7 +92,7 @@ rather than trusting them, and two were previously recorded with incomplete reas
 | Candidate path | Result | How checked |
 |---|---|---|
 | ACPI device or method | **none** | All 7 tables decompiled; 155 `Device` blocks, 878 `Method`s; comment-stripped regex for `vibrat\|haptic\|rumble\|buzz\|motor\|VIBR\|HAPT\|RUMB\|BUZZ\|HPTC\|MOTR` → **0 hits** |
-| GPIO line | **none** | Exactly **one** `GpioIo` exists in all seven tables, and it is spoken for: the enable pin (`0x11` on `GPI0`) that `GPS0._CRS` declares for a GPS receiver **this unit does not have** — `GPS0` is a family-wide firmware declaration, and the line was physically sniffed in [docs/13](13-gps.md). There is no second one |
+| GPIO line | **none reachable** | Exactly **one** `GpioIo` exists in all seven tables, and it is spoken for: the enable pin (`0x11` on `GPI0`) that `GPS0._CRS` declares for a GPS receiver **this unit does not have** — `GPS0` is a family-wide firmware declaration, and the line was physically sniffed in [docs/13](13-gps.md). Five further pads are reserved to firmware and are not Linux's to drive — see Correction 3 |
 | PWM | **none** | `/sys/class/pwm/` is empty |
 | LED class (a common home for vibrators) | **none** | `hda::mute`, three keyboard-lock LEDs, `phy0-led` |
 | force-feedback input device | **none** | No `B: FF=` line in `/proc/bus/input/devices` |
@@ -131,6 +131,39 @@ of a "buzz for N ms" command, and it deserved to be the session's prime suspect.
 It is still cleared, but now by measurement rather than by that argument: across 9,735 reports the
 hub emitted only sensor report IDs `01`/`02`/`04`, and it produced nothing whatsoever at the tap.
 The hub is not in the button's path, so it is not in the motor's path.
+
+### Correction 3 — one `GpioIo` is not a GPIO census
+
+This is a correction to *this note*, found while answering a later question about the LPSS UARTs.
+
+The AML statement above is exact and re-verified: all seven tables contain exactly one `GpioIo`
+(`GPS0`, pin `0x11`), no `GpioInt` at all, and no `GeneralPurposeIo` operation region. What that
+does **not** establish is that only one GPIO is in use, and the table row above was written as
+though it did.
+
+The kernel marks five pads as in use by firmware rather than available to Linux:
+
+```
+pin  1 (GP1_UART1_TXD)                GPIO    0xc000000d  [ACPI]
+pin  2 (GP2_UART1_RTSB)               GPIO    0xc000000d  [ACPI]
+pin 27 (GP27_MGPIO6)                  GPIO    0x4000001d  [ACPI]
+pin 36 (GP36_SATA2XPCIE6L1B_SATA2GP)  GPIO    0x4000001d  [ACPI]
+pin 77 (GP77_PIRQAB)                  mode 0  0xc000001c  [ACPI]
+```
+
+**Not one of them is described by any GPIO resource in the AML.** The firmware reserves them
+without declaring them, so grepping the decompiled tables for `GpioIo` cannot see them — which is
+the methodology trap worth carrying forward: on this platform the AML is not a complete GPIO
+census, and `/sys/kernel/debug/pinctrl/INT3437:00/pins` is the thing to read.
+
+The mechanism behind the `[ACPI]` marker was **not** determined. A tempting explanation — that
+`CONFIG1` bit 3 selects firmware ownership — fits the five marked pads but was tested across all 95
+and **refuted**: 18 pads have that bit set and only 5 carry the marker, pin 17 among the former.
+Recorded so the next reader does not re-derive a wrong rule from a small sample.
+
+None of this reopens the question, and it arguably closes it harder. Those pads are reserved *away
+from* the operating system, so even if the motor hung off one, Linux could not drive it; and the
+power-on buzz happens before any OS has touched a pad at all.
 
 ## What is left, and why it is not recommended
 

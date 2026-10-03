@@ -120,8 +120,12 @@ Two additions:
 - **There is exactly one `GpioIo` in all seven tables**, and it is already spoken for: the enable
   pin (`0x11` on `GPI0`) that `GPS0._CRS` declares for a GPS receiver **this unit does not have**.
   Per the correction above, `GPS0` is a family-wide firmware declaration and the line was sniffed
-  directly — see [docs/13](../../docs/13-gps.md). No GPIO drives a motor, because there is no
-  second GPIO to drive one.
+  directly — see [docs/13](../../docs/13-gps.md).
+  **But one `GpioIo` is not a GPIO census.** The kernel marks five further pads — 1, 2, 27, 36 and
+  77 — as in use by firmware, and **no AML declares any of them**. Read
+  `/sys/kernel/debug/pinctrl/INT3437:00/pins`, not just the tables. Those pads are reserved away
+  from the OS, so they are not a path for Linux either; see
+  [docs/62](../../docs/62-vibration-ec-owned.md) Correction 3.
 - **HP's WMI surface is closed too.** `\_SB.WMID` has 71 methods, all battery, thermal, dock,
   security and BIOS-config; `hp-bioscfg` exposes exactly two settings, `Sure_Start` and
   `pending_reboot`.

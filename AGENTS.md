@@ -151,7 +151,9 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    silent. The DSDT handler for that scancode, `_Q81`, sets one bit and raises one `Notify` and
    **never touches a motor** — the EC buzzes first and tells the OS after. ACPI (155 devices, 878
    methods), GPIO (exactly one `GpioIo` in all seven tables, and it is the enable pin `GPS0._CRS`
-   declares for a receiver this unit does not have — see [docs/13](docs/13-gps.md)), PWM,
+   declares for a receiver this unit does not have — see [docs/13](docs/13-gps.md); note five
+   further pads are reserved to firmware without any AML declaring them, so a `GpioIo` grep is
+   **not** a GPIO census on this platform), PWM,
    LEDs, force-feedback, I2C, HP WMI (71 methods) and EC RAM are all ruled out, each re-derived
    rather than inherited. Two earlier notes are corrected: the SYNA7500's two HID Output reports are
    the **RMI4 register transport**, not a haptic channel, and "the sensor hub has no Output reports"
