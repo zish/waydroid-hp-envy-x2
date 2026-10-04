@@ -139,9 +139,13 @@ Three properties that matter:
   exactly as they are, which is precisely why it sidesteps every CRIU blocker.
 - It is not a kill-shield: `SIGKILL` still reaches frozen tasks, so the OOM killer can too.
 
-**This is untested here** and the long-freeze case is the one to prove: 1534 threads all observe
+~~**This is untested here** and the long-freeze case is the one to prove: 1534 threads all observe
 the same `CLOCK_MONOTONIC` jump on thaw, so watchdogs, ANRs and a thundering herd of expired
-alarms are the expected failure mode. Seconds should be clean; minutes need evidence.
+alarms are the expected failure mode. Seconds should be clean; minutes need evidence.~~
+**Tested 2026-10-03, up to a 600 s hold — the minutes are clean too.** No watchdog, no ANR, no
+crash. The expected herd exists but is ×2.2 of baseline for one minute and gone by the second.
+See *the whole-container freeze, tested short to long* below; `bin/freeze-probe.sh` is the
+instrument.
 
 Note it buys nothing for **suspend** — [17-hybrid-sleep.md](17-hybrid-sleep.md) established that
 s2idle already freezes all userspace including the container. The value is the awake-but-idle case.
@@ -676,6 +680,134 @@ Which to use is a real choice rather than a redundancy. AMS compaction is automa
 policy-driven, and needs the flag re-applied at every container start. The reclaimer is manual and
 unthrottled and answers "give me half a gigabyte back, now". Running both is coherent.
 
+## 2026-10-03: the whole-container freeze, tested short to long — the thaw is a non-event
+
+Step 5 below is done for the freeze arm. The prediction this note has carried since
+2026-09-10 — "seconds should be clean; minutes need evidence" — now has the evidence, and
+**the minutes are clean too.** Four rungs on `bin/freeze-probe.sh`, 1300–1500 tasks in the
+cgroup, machine idle, nothing else touching it:
+
+| hold | freeze | thaw | ANRs / crashes / watchdogs | procs | liveness after thaw |
+|---|---|---|---|---|---|
+| 5 s | 12 ms | 21 ms | none | 84 → 84 | 29 ms |
+| 30 s | 10 ms | 17 ms | none | 84 → 84 | 26 ms |
+| 120 s | 10 ms | 26 ms | none | 84 → 84 | 32 ms |
+| 600 s | 9 ms | 33 ms | **none** | 81 → 77 | 30 ms |
+
+`bin/power-ab.sh --freeze` is not the instrument for this and was not used: it refuses to
+run on AC, it measures watts — a question this note closed twice, at a known ceiling of
+~40 mW — and it records nothing whatever about the thaw. The open question was never what
+freezing saves. It was what it breaks.
+
+### Freezing 1500 tasks takes 10 ms
+
+The note's standing caution — the write is one atomic request but tasks stop at their next
+safe point, so poll `cgroup.events` rather than sleeping — is correct in principle and the
+number is tiny. Freeze was 9–12 ms and thaw 17–33 ms at **every** rung, with no trend
+against hold length. Nothing was ever caught in uninterruptible sleep long enough to
+matter. Poll anyway; just do not budget seconds for it.
+
+### The predicted catastrophe did not happen
+
+No ANR, no `FATAL EXCEPTION`, no `Watchdog: ***`, no lmkd kill, at any rung including ten
+minutes. Android answered `getprop sys.boot_completed` in ~30 ms immediately after every
+thaw. All eight host daemons — which live **outside** this cgroup and talk to Android over
+binder, so a synchronous call into a frozen peer was the obvious hazard — stayed in `S`
+throughout. Not one landed in `D`.
+
+### What actually happens at thaw is AMS catching up, and it looks like damage
+
+The 600 s rung lost processes, and the first reading of that was wrong. They are AMS
+reaping cached apps that were already empty and past expiry, and could not be reaped *while
+the container could not run*, so they all go in one burst 1.2 s after the thaw:
+
+```
+10-03 16:57:58.376 ActivityManager: Killing 36574:com.google.android.partnersetup (adj 915): empty for 2419s
+10-03 16:57:58.377 ActivityManager: Killing 43185:com.google.android.gms.unstable  (adj 925): empty for 2419s
+10-03 16:57:58.378 ActivityManager: Killing 35989:com.google.android.apps.maps     (adj 925): empty for 2420s
+```
+
+`SystemClock.uptimeMillis()` keeps advancing while a task is frozen, so a 600 s freeze ages
+every cached process by 600 s against its empty-process expiry without AMS being able to act
+on any of them.
+
+The arithmetic is worth doing before calling this a loss, and it also corrects the obvious
+reading. It is **not** a timer that fires at 1800 s. Across the two 600 s runs:
+
+| | became empty | empty at freeze start | empty at kill |
+|---|---|---|---|
+| run A | 16:12:34 | 1221 s | 1822 s (30.4 min) |
+| run B | 16:17:39 | **1818 s** | 2419 s (40.3 min) |
+
+Run A crossed 1800 s *during* the freeze, 21 s before the thaw. Run B was **already past
+1800 s eighteen seconds before the freeze even started** and AMS did not reap it in that
+window — it waited until 2419 s. So a fixed threshold does not explain the timing, and the
+differing 30- and 40-minute figures say the same thing: AMS reaps expired empty processes on
+its next oom-adj/trim pass, and those passes are event-driven. A frozen container generates
+no events, so no pass runs; the thaw generates a burst of them, one pass runs, and the whole
+accumulated backlog is serviced at once.
+
+Either way the conclusion holds and is the one that matters: these processes were empty and
+at or past expiry **independent of the freeze**, which deferred their reaping rather than
+causing it. In both runs every single casualty was explained by one of these lines.
+
+This is the one trap in reading freeze results, and it is the same shape as the
+`is exempt from freezer` trap at the top of this note: a log that looks like proof of
+breakage and is proof of ordinary bookkeeping.
+
+### The thundering herd is real, bounded, and over within a minute
+
+Container CPU against the identical-length baseline window, sliced so decay is visible
+rather than averaged away:
+
+| | baseline | 0–60 s | 60–120 s | 120–180 s | 180–240 s |
+|---|---|---|---|---|---|
+| 600 s hold | 2.79% of a core | **6.19% (×2.2)** | 2.73% (×1.0) | 2.70% (×1.0) | 2.58% (×0.9) |
+
+An earlier 600 s run measured ×4.5 in its first minute, so the herd's size varies with how
+much work came due; both decayed to baseline in the second minute. At 120 s the first-minute
+figure was ×1.1 — barely visible. The herd is WorkManager jobs and deferred broadcasts
+landing at once (`Start proc … for service … SystemJobService`), plus AMS's reaping, and it
+is **work that was deferred, not work that was created**.
+
+### `lxc-info` says RUNNING while the container is frozen — and `waydroid-restartd` depends on it
+
+This is the one finding with a consequence beyond the experiment, and it is a latent defect.
+
+`lxc-info -P /var/lib/waydroid/lxc -n waydroid -sH` returns **`RUNNING`** throughout a
+freeze. Verified directly at freeze+0 and again 72 s in, at every rung. LXC does not notice
+a `cgroup.freeze` written out of band; its `FROZEN` state tracks freezes LXC itself
+performed.
+
+`waydroid-restartd` is built on the opposite assumption. Its `container_state()` docstring
+says "RUNNING/FROZEN/STOPPED/…", and the main loop stands down on anything that is not
+RUNNING. **That branch never fires.** What happens instead, traced end to end:
+
+1. `container_state()` returns RUNNING, so restartd proceeds to `read_props()`.
+2. `read_props()` runs `lxc-attach … getprop`. liblxc places the attach helper in the
+   **`.lxc` child cgroup** of `lxc.payload.waydroid` — and the freeze is hierarchical, so
+   the helper is frozen at birth and never reaches `exec`.
+3. `subprocess.run(timeout=10)` kills the *host-side* `lxc-attach` after 10 s. The frozen
+   helper in `.lxc` survives it, orphaned.
+4. Each cycle therefore costs 20 s — 10 s idle interval plus the 10 s timeout — and parks
+   one more helper. Measured mid-freeze: **10 frozen `lxc-attach` processes in `.lxc`**,
+   still carrying the `lxc-attach` cmdline because they never exec'd. `pids.current` rose by
+   **+31** over the first 600 s rung (1479 → 1510) and **+32** over the second (1319 → 1351),
+   against ~30 predicted from 600 s divided by the 20 s cycle.
+5. `read_props()` returns `None`, which restartd handles as "container may be starting" and
+   **signals nothing**. So it is safe — but by the fallback path, not the designed one.
+6. On thaw everything is reaped cleanly. `.lxc` returns to `procs=0` and `pids.current` fell
+   to 1225, below where it started. **Nothing leaks.**
+
+Note `.lxc` is easy to miss: a shell glob of `$CG/*/` does not match it, which is why this
+note previously recorded "the only child cgroup, `.lxc`, holds 0 processes" — true at rest,
+and it holds the attach helpers while frozen.
+
+The one-line fix, if restartd is ever touched for this: read
+`/sys/fs/cgroup/lxc.payload.waydroid/cgroup.events` for `frozen 1` and stand down on it,
+rather than trusting `lxc-info` to report a freeze it did not perform. It is not urgent —
+nothing misbehaves today — but the dead branch is misleading to the next reader.
+
 ## Suggested order of work
 
 Revised 2026-09-12. The battery question is closed; what is left is a performance question and one
@@ -697,11 +829,12 @@ cheap untested lead.
    to the v2 layout (`cpu.weight`, `cpu.uclamp.min`, `cpuset.cpus`, `io.weight`) in the overlay —
    worth attempting here specifically because schedutil and bfq mean uclamp and `io.weight` would
    really work, which is not true of most x86 hosts.
-5. Test the host-side whole-container freeze, short then long, and characterise the thaw. Still
-   undone; ceiling known to be ~40 mW, so a curiosity rather than a lead. `bin/power-ab.sh --freeze`
-   runs it as a measured arm with an automatic thaw. The `cpu.max` A/B on the same cgroup is the
-   more useful experiment and is also still undone — it lost its load on 2026-09-12 when dexopt
-   finished first.
+5. ~~Test the host-side whole-container freeze, short then long, and characterise the thaw.~~
+   **Done 2026-10-03 — it is a non-event**, 5 s to 600 s: freeze in ~10 ms, thaw in ~25 ms, no
+   ANR, no crash, no watchdog, no daemon wedged, and a thaw herd of ×2.2 for one minute that is
+   back to baseline in the second. `bin/freeze-probe.sh`, not `bin/power-ab.sh --freeze`, which
+   measures watts and records nothing about the thaw. **The `cpu.max` A/B on the same cgroup is
+   still undone** — it lost its load on 2026-09-12 when dexopt finished first.
 6. ~~Only then decide whether per-app granularity justifies widening the cgroup mount.~~
    **Decided 2026-09-10, unchanged 2026-09-12: not on battery grounds.** If it is built, build it
    for responsiveness, and know that the mount change alone does not deliver that.

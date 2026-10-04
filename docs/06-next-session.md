@@ -609,6 +609,14 @@ Two consequences worth knowing before planning work:
   including the script doing the search.
 - **IIO device indices are not stable across boots.** `accel_3d` was `iio:device4` in one session
   and `iio:device0` in the next. Match on the node's `name`.
+- **`grep -c` and `pgrep -c` print `0` *and* exit non-zero when they match nothing**, so the
+  reflexive `count=$(grep -c ... || echo 0)` yields the two-line string `"0\n0"` and every later
+  `[ "$count" -gt 0 ]` dies with "integer expected". Default the empty case instead:
+  `c=$(grep -c ...); c=${c:-0}`. Bit `bin/freeze-probe.sh` twice on 2026-10-03.
+- **A `$dir/*/` glob silently skips dotted child cgroups.** `lxc.payload.waydroid/.lxc` is where
+  liblxc puts `lxc-attach` helpers, and it is invisible to the obvious loop — which is how a
+  frozen-container investigation concluded there were no child cgroups while ten processes sat in
+  one. Use `find -mindepth 1 -maxdepth 1 -type d`.
 
 ## Hypotheses disproven along the way
 
@@ -633,6 +641,8 @@ Two consequences worth knowing before planning work:
 | Multi-plane YUV import is a way around | imports (planes=3) but `gbm_bo_map` segfaults |
 | The import width is `total_size` | **wrong — it is 0**, and that was the actual bug |
 | The 1D buffer is 4096x338, so the fix can recompute it | wrong — the kernel returned 4096x512; size the dmabuf with `lseek` |
+| A long whole-container freeze will cause watchdogs, ANRs and an alarm herd | wrong — 600 s is clean; the herd is ×2.2 for one minute ([43](43-app-freezer.md)) |
+| `lxc-info` reports FROZEN when the container's cgroup is frozen | wrong — it says RUNNING; LXC only tracks freezes it performed itself |
 
 A second set — ARM translation, a phantom camera, USB autosuspend, the `uvcvideo quirks` value —
 was disproven during the lens-facing work; see [11-camera-facing.md](11-camera-facing.md).
