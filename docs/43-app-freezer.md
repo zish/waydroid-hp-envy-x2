@@ -1,14 +1,22 @@
 # Android's per-app freezer, and why it does nothing here
 
-**Status: scoped; the freezer itself is still unbuilt, but one containment fix shipped on
-2026-09-12** — see *dex2oat contained, without cgroups*. Added to the goal list on 2026-09-10 at
-the owner's request. Everything here is verified on the host; where something is still hypothesis
-it says so.
+**Status: investigated to a conclusion; the freezer is deliberately unbuilt and should stay
+that way.** One containment fix shipped on 2026-09-12 and all three outstanding experiments
+are now done — see *dex2oat contained, without cgroups*. Added to the goal list on 2026-09-10
+at the owner's request. Everything here is verified on the host; where something is still
+hypothesis it says so.
 
-**Read the 2026-09-12 sections before acting on the 2026-09-10 ones.** They establish that there
-are two independent faults rather than one, that the second is not fixable by the mount change
-proposed below, that the battery verdict survives a deliberately hostile re-measurement, and that
-compaction — the other half of `CachedAppOptimizer` — is not blocked at all.
+**Read the later sections before acting on the earlier ones.** The 2026-09-12 sections establish
+that there are two independent faults rather than one, that the second is not fixable by the
+mount change proposed below, that the battery verdict survives a deliberately hostile
+re-measurement, and that compaction — the other half of `CachedAppOptimizer` — is not blocked at
+all. The 2026-10-03 sections close the two experiments the plan was waiting on, and both came
+back against building anything: the whole-container freeze is harmless but worth ~40 mW, and
+capping `cpu.max` does not improve host responsiveness because there is no host responsiveness
+problem to improve. The 2026-10-04 section closes the last one — Android's own UI smoothness —
+the same way. **Nothing in this goal is now worth building. The one real performance fault it
+found, the uncontained dexopt storm, was already fixed by `artifacts/dexopt/` with two
+properties and no cgroups.**
 
 ## What the feature is
 
@@ -871,10 +879,127 @@ smoothness, which is step 4 below and still needs someone at the machine. Nothin
 measured inside Android, and nothing here exercises IO — `io.weight` and bfq remain
 untested.
 
+## 2026-10-04: step 4 — the jank was demonstrated, and it is not there
+
+This is the last question in the note, and it closes the performance case against the v2
+cgroups rewrite. Measured with `bin/jank-ab.sh` on the host, with the owner at the machine;
+`dumpsys gfxinfo` is the metric, which is Android's own frame accounting rather than an
+observer's impression.
+
+**The headline: nothing janks.** A real background dexopt storm taking 224% of a core
+produces **zero** janky frames, and four deliberately uncontained nice-0 busy loops
+saturating all four CPUs produce **0.16%** — three frames in 1912. The owner, scrolling by
+hand through the worst of it, reported it as *smooth, no different*. Both halves agree.
+
+### The arms
+
+Synthetic swipes (`--drive`), so every arm gets the same stimulus. Target is Settings'
+all-apps list, ~1825–1912 frames per 30 s window:
+
+| arm | container CPU | PSI some | janky | p50 | p90 | p95 | p99 |
+|---|---|---|---|---|---|---|---|
+| baseline, idle | 49.5% | 1.76 | **0.00%** | 5 ms | 8 | 10 | 15 |
+| contained dexopt | 224.0% | 8.84 | **0.00%** | 5 ms | 8 | 9 | **11** |
+| uncontained spinners | 379.1% | 26.86 | **0.16%** | 5 ms | 14 | 16 | 22 |
+| spinners *and* dexopt | 378.8% | 55.24 | 0.53% | 10 ms | 19 | 21 | 26 |
+
+The last row is the machine at roughly 95% of its total capacity — it was an accident,
+caught because `cmd package compile` cannot be aborted and the previous arm's dex2oat was
+still draining, and it is kept because it is the genuine worst case. Even there the verdict
+is 0.53% janky and a p99 of 26 ms: one frame in ~200 misses, which is an occasional hitch,
+not a stutter.
+
+### Why the dexopt arm is the one that matters, and why it is clean
+
+The 2026-09-12 section above found the storm "the axis where the missing cgroups demonstrably
+cost something" — 91.6% busy, CPU pressure `some avg10=35%`, uncontained. That was measured
+*before* `artifacts/dexopt/` existed. Re-run now with the containment in place, the same job
+is invisible to the UI, and the per-process table says exactly why:
+
+```
+184.63%  adj=-1000  nice=10   /apex/com.android.art/bin/dex2oat32 ...
+ 15.50%  adj=0      nice=-10  com.android.settings
+ 12.50%  adj=-1000  nice=-8   /system/bin/surfaceflinger
+```
+
+dex2oat is held to 184% — which is the `--cpu-set=0,2` ceiling, the two threads of physical
+core 0 — so the UI keeps core 1 intact. **The performance problem this note identified was
+real and is already fixed, by two properties and no cgroups at all.** The v2 rewrite would
+be re-solving a solved problem.
+
+Worth noting the `nice=10` in that line, because it qualifies this note's own
+*`nice` is not quietly covering for it* finding. That finding is about AMS backgrounding
+apps, and it stands: `setProcessGroup` goes through task profiles and task profiles go
+through cgroups that do not exist. But `installd` sets dex2oat's niceness **directly**, and
+`setpriority` needs no cgroup, so the single heaviest background producer on this machine
+*is* properly deprioritised. The gap is narrower than "background apps get zero
+deprioritisation" suggests — it is specifically AMS's app lifecycle that gets none.
+
+### Load makes rendering faster, again
+
+The contained-dexopt arm has a **better** p99 than the idle baseline — 11 ms against 15 ms —
+with 4.5× the CPU load. This is the same inversion the 2026-10-03 `cpu.max` A/B found on the
+host side, now visible in Android's own frame timing: `intel_cpufreq` passive with schedutil
+and nine cpuidle states means an idle machine renders from deep C-states and a busy one does
+not. Anything measuring "performance under load" here will see load *help* until the load is
+large enough to actually contend.
+
+### Two things the instrument had to learn, both worth keeping
+
+**A still screen renders zero frames, and zero janky frames out of zero reads as perfect.**
+The first arm of the session reported 3 frames and would have passed as flawless. `jank-ab.sh`
+refuses any window under `--min-frames` for that reason; it caught three void arms on the day.
+
+**A human cannot deliver the same stimulus twice.** The two hand-scrolled arms rendered 1122
+and 850 frames for nominally identical effort, so part of the difference between them was
+just how hard someone was flicking. The synthetic driver fixed that — the four driven arms
+landed within 5% of each other (1825–1912 frames) — and it is why the driven numbers above
+are the ones quoted rather than the hand-scrolled ones. The hand arms agreed anyway
+(0.18% janky idle, 0.24% under dexopt), which is the useful cross-check.
+
+### Caveats, stated rather than buried
+
+- **Settings' all-apps list is a light rendering workload** — a simple RecyclerView. A
+  heavier surface (Chrome on a complex page, a game, video) was deliberately not tested, so
+  "no jank" is established for this workload and is not a claim about all of them.
+- **`Number High input latency` moves a lot and should not be over-read.** It goes 657
+  (baseline) → 374 (dexopt) → 1679 (spinners) → 2080 (both). But it is 36% of frames even at
+  an idle baseline under synthetic input, against 22% when hand-scrolled, so the driver
+  inflates it and the absolute values are not trustworthy. The direction — input latency
+  degrading under saturation while *render* time does not — is probably real and is the one
+  thing here that might repay a closer look.
+- **The per-process table cannot see short-lived processes.** It snapshots `cgroup.procs`
+  before and after, so a burst of dex2oat32 that starts and exits inside the window is
+  invisible: the first dexopt arm showed 198.7% container CPU against a table summing to
+  ~18%. Container `cpu.stat` is the authority; the table only attributes what survives.
+
+### What this means for the goal
+
+Both arguments for rewriting `cgroups.json` and `task_profiles.json` to the v2 layout are
+now dead, each by measurement:
+
+- **The host-side argument** — "Waydroid must not make the host janky" — died on 2026-10-03.
+  The host keeps a p99 wake latency of 0.1 ms with Android saturating every CPU, and capping
+  `cpu.max` makes it worse.
+- **The Android-side argument** — "the missing top-app cpuset and uclamp floor cost UI
+  smoothness" — dies here. They do not, on this workload, even at full saturation.
+
+**There is nothing left in goal 7 that is worth building.** That is a conclusion about this
+machine and these workloads, not a general one: the v2 rewrite remains the correct fix for
+the underlying defect, and it is still true that 44 of 45 controller references in
+`task_profiles.json` are dead. What has been established is that nothing measurable is lost
+to it here, which is a reason not to spend the effort rather than a reason to believe the
+configuration is fine.
+
+If the question is ever reopened, reopen it with evidence: a workload that actually janks.
+`bin/jank-ab.sh --drive` will measure it in two minutes.
+
 ## Suggested order of work
 
-Revised 2026-09-12. The battery question is closed; what is left is a performance question and one
-cheap untested lead.
+Revised 2026-10-04. **Every step is now done, and the answer to the goal is that there is
+nothing worth building.** The battery case is closed twice over, the host-side levers were
+measured and found unnecessary, and step 4 — the last argument standing — was demonstrated
+against: nothing janks, even at full saturation.
 
 1. ~~Measure what cached Android apps actually cost while idle. If it is negligible, stop here.~~
    **Done 2026-09-10, re-done against a hostile sample 2026-09-12 — it is negligible.** ~13 mW out
@@ -886,21 +1011,28 @@ cheap untested lead.
    set *before* the container starts and does not survive a restart, so it needs an `ExecStartPost`
    one-shot. `bin/waydroid-reclaim.py` is the host-side alternative that needs none of that and
    recovered **~558 MB of RAM** in one run. Both are measured above.
-4. **Demonstrate the jank before building the v2 rewrite.** Scroll something in Android while a
-   Play Store install or dexopt pass runs, now that dex2oat is contained, and see whether what is
-   left is actually bad. If it is, the project is rewriting `cgroups.json` and `task_profiles.json`
-   to the v2 layout (`cpu.weight`, `cpu.uclamp.min`, `cpuset.cpus`, `io.weight`) in the overlay —
-   worth attempting here specifically because schedutil and bfq mean uclamp and `io.weight` would
-   really work, which is not true of most x86 hosts.
-5. ~~Test the host-side whole-container freeze, short then long, and characterise the thaw.~~
-   **Done 2026-10-03 — it is a non-event**, 5 s to 600 s: freeze in ~10 ms, thaw in ~25 ms, no
-   ANR, no crash, no watchdog, no daemon wedged, and a thaw herd of ×2.2 for one minute that is
-   back to baseline in the second. `bin/freeze-probe.sh`, not `bin/power-ab.sh --freeze`, which
-   measures watts and records nothing about the thaw.
-   ~~The `cpu.max` A/B on the same cgroup.~~ **Also done 2026-10-03, and it says the lever is
-   precise and unnecessary**: four nice-0 spinners taking 393% of this 4-CPU box leave host p99
-   wake latency at 0.1 ms, and capping makes it *worse*, not better. `bin/cpumax-ab.sh` supplies
-   a load that does not evaporate, which is what the 2026-09-12 attempt lacked.
+4. ~~Demonstrate the jank before building the v2 rewrite.~~ **Done 2026-10-04 — there is no
+   jank to demonstrate.** A real `bg-dexopt-job` taking 224% of a core produced **0.00%** janky
+   frames; four deliberately uncontained nice-0 spinners saturating all four CPUs produced
+   **0.16%**, and the owner scrolling through it by hand called it smooth. The contained-dexopt
+   arm's p99 was *better* than idle (11 ms against 15 ms), for the same C-state reason step 5
+   found on the host. `bin/jank-ab.sh --drive`. The one honest limit is that this was Settings'
+   all-apps list, a light RecyclerView; a heavier surface was deliberately not tested.
+   **So the v2 rewrite of `cgroups.json` and `task_profiles.json` has no demonstrated case
+   left** — the performance problem it would have addressed was the dexopt storm, and
+   `artifacts/dexopt/` already fixed that with two properties and no cgroups.
+5. ~~Test the host-side whole-container freeze, short then long, and characterise the thaw, and
+   A/B `cpu.max` on the same cgroup.~~ **Both done 2026-10-03 — see the two sections above.**
+   The freeze is a non-event: 5 s to 600 s, freeze in ~10 ms and thaw in ~25 ms, no ANR, no crash,
+   no watchdog, no daemon wedged, and a thaw herd of ×2.2 for one minute that is back to baseline
+   in the second. The only casualties are AMS reaping cached apps that were already empty and
+   past expiry, which were due to die anyway. The `cpu.max` A/B says the lever is
+   precise and unnecessary: four nice-0 spinners taking 393% of this 4-CPU box leave host p99 wake
+   latency at 0.1 ms, and capping makes it *worse*. `bin/freeze-probe.sh` and `bin/cpumax-ab.sh`,
+   both with a detached deadman so neither can leave the machine frozen or capped.
+   One latent defect fell out: `lxc-info` reports RUNNING while frozen, so
+   `waydroid-restartd`'s stand-down branch is dead code and it parks one orphaned `lxc-attach`
+   helper per 20 s in the `.lxc` child cgroup instead. Harmless and self-cleaning; see above.
 6. ~~Only then decide whether per-app granularity justifies widening the cgroup mount.~~
    **Decided 2026-09-10, unchanged 2026-09-12: not on battery grounds.** If it is built, build it
    for responsiveness, and know that the mount change alone does not deliver that.

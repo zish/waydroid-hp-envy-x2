@@ -618,6 +618,12 @@ Two consequences worth knowing before planning work:
   The box exposes nine cpuidle states under `intel_cpufreq`/schedutil, so an idle core pays deep
   C-state exit on every wake. Any A/B that compares a busy arm against an idle one is partly
   measuring C-state residency. Verified idle → loaded → idle; see [43](43-app-freezer.md).
+- **Zero rendered frames reads as zero jank.** `dumpsys gfxinfo` only counts frames an app
+  actually drew, so a still screen reports a flawless result. Any jank measurement needs a
+  minimum-frame guard or it will confidently report that nothing was wrong; three windows on
+  2026-10-04 were void and two of them looked perfect. And a human cannot deliver the same
+  stimulus twice — hand-scrolled arms rendered 1122 and 850 frames for the same nominal
+  effort — so drive an A/B with `input swipe`, not a finger.
 - **A `$dir/*/` glob silently skips dotted child cgroups.** `lxc.payload.waydroid/.lxc` is where
   liblxc puts `lxc-attach` helpers, and it is invisible to the obvious loop — which is how a
   frozen-container investigation concluded there were no child cgroups while ten processes sat in
@@ -647,8 +653,10 @@ Two consequences worth knowing before planning work:
 | The import width is `total_size` | **wrong — it is 0**, and that was the actual bug |
 | The 1D buffer is 4096x338, so the fix can recompute it | wrong — the kernel returned 4096x512; size the dmabuf with `lseek` |
 | A long whole-container freeze will cause watchdogs, ANRs and an alarm herd | wrong — 600 s is clean; the herd is ×2.2 for one minute ([43](43-app-freezer.md)) |
-| `lxc-info` reports FROZEN when the container's cgroup is frozen | wrong — it says RUNNING; LXC only tracks freezes it performed itself |
 | Capping the container's `cpu.max` protects host responsiveness | wrong — the host needs no protection, and capping makes its p99 latency *worse* |
+| `lxc-info` reports FROZEN when the container's cgroup is frozen | wrong — it says RUNNING; LXC only tracks freezes it performed itself |
+| The missing cgroups cost Android UI smoothness | wrong — 0.00% janky under a real dexopt storm, 0.16% at full saturation ([43](43-app-freezer.md)) |
+| `nice` does nothing for background work here | too broad — AMS's app backgrounding gets none, but `installd` sets dex2oat `nice=10` directly and that works |
 
 A second set — ARM translation, a phantom camera, USB autosuspend, the `uvcvideo quirks` value —
 was disproven during the lens-facing work; see [11-camera-facing.md](11-camera-facing.md).
@@ -694,9 +702,30 @@ world-accessible is the only reason the camera works today. Nothing about audio 
 tested on this machine, including whether it works at all right now.
 
 Goal 7 is **Android's per-app freezer**, added 2026-09-10. See
-[43-app-freezer.md](43-app-freezer.md), which was substantially rewritten on 2026-09-12. The
-freezer itself is still unbuilt and the battery case against it is now measured twice; two
-*adjacent* things were built instead, and both work.
+[43-app-freezer.md](43-app-freezer.md), substantially rewritten on 2026-09-12 and extended on
+2026-10-03 and 2026-10-04. The freezer itself is deliberately unbuilt and the battery case
+against it is measured twice; two *adjacent* things were built instead, and both work.
+
+**As of 2026-10-04 goal 7 is investigated to a conclusion: there is nothing left worth
+building.** Step 4, the last open question, was demonstrated against on 2026-10-04 with the
+owner at the machine. A real `bg-dexopt-job` taking 224% of a core produced **0.00%** janky
+frames in Settings; four deliberately uncontained nice-0 spinners saturating all four CPUs
+produced **0.16%**, and hand-scrolling through it was reported as smooth. The contained-dexopt
+arm's p99 was *better* than idle (11 ms vs 15 ms) — the same C-state effect as the host-side
+result. So the v2 rewrite of `cgroups.json`/`task_profiles.json` has no demonstrated case:
+the one real performance fault was the dexopt storm, and `artifacts/dexopt/` already fixed it
+with two properties and no cgroups. Instrument is `bin/jank-ab.sh --drive`; the stated limit
+is that Settings' app list is a light RecyclerView and no heavier surface was tested.
+
+**The 2026-10-03 host-side experiments.** The
+whole-container freeze was tested from 5 s to 600 s (`bin/freeze-probe.sh`): freeze takes ~10 ms
+and thaw ~25 ms for 1500 tasks, and nothing breaks at any hold — no ANR, no crash, no watchdog,
+no host daemon wedged. The predicted thaw catastrophe is a ×2.2 CPU bump for one minute that is
+back to baseline in the second. The `cpu.max` A/B (`bin/cpumax-ab.sh`) finally got a load that
+does not evaporate — four nice-0 spinners inside Android — and found the host needs no help at
+all: Android taking 393% of this 4-CPU box leaves host p99 wake latency at 0.1 ms, and capping
+makes it *worse*. So the "Waydroid must not make the host janky" case is dead — and the
+Android-side one died the next day, above.
 
 Four things to know before touching it.
 
