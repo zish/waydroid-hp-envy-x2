@@ -613,6 +613,11 @@ Two consequences worth knowing before planning work:
   reflexive `count=$(grep -c ... || echo 0)` yields the two-line string `"0\n0"` and every later
   `[ "$count" -gt 0 ]` dies with "integer expected". Default the empty case instead:
   `c=$(grep -c ...); c=${c:-0}`. Bit `bin/freeze-probe.sh` twice on 2026-10-03.
+- **An idle machine has *worse* wake latency than a loaded one here**, by about 4×: a host
+  `sleep(10ms)` overshoots by 0.264 ms idle and 0.061 ms with Android saturating all four CPUs.
+  The box exposes nine cpuidle states under `intel_cpufreq`/schedutil, so an idle core pays deep
+  C-state exit on every wake. Any A/B that compares a busy arm against an idle one is partly
+  measuring C-state residency. Verified idle → loaded → idle; see [43](43-app-freezer.md).
 - **A `$dir/*/` glob silently skips dotted child cgroups.** `lxc.payload.waydroid/.lxc` is where
   liblxc puts `lxc-attach` helpers, and it is invisible to the obvious loop — which is how a
   frozen-container investigation concluded there were no child cgroups while ten processes sat in
@@ -643,6 +648,7 @@ Two consequences worth knowing before planning work:
 | The 1D buffer is 4096x338, so the fix can recompute it | wrong — the kernel returned 4096x512; size the dmabuf with `lseek` |
 | A long whole-container freeze will cause watchdogs, ANRs and an alarm herd | wrong — 600 s is clean; the herd is ×2.2 for one minute ([43](43-app-freezer.md)) |
 | `lxc-info` reports FROZEN when the container's cgroup is frozen | wrong — it says RUNNING; LXC only tracks freezes it performed itself |
+| Capping the container's `cpu.max` protects host responsiveness | wrong — the host needs no protection, and capping makes its p99 latency *worse* |
 
 A second set — ARM translation, a phantom camera, USB autosuspend, the `uvcvideo quirks` value —
 was disproven during the lens-facing work; see [11-camera-facing.md](11-camera-facing.md).

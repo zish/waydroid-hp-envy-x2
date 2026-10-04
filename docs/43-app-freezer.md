@@ -808,6 +808,69 @@ The one-line fix, if restartd is ever touched for this: read
 rather than trusting `lxc-info` to report a freeze it did not perform. It is not urgent —
 nothing misbehaves today — but the dead branch is misleading to the next reader.
 
+## 2026-10-03: the `cpu.max` A/B — the lever works, and the host does not need it
+
+The other half of step 5, and the one this note called "the more useful experiment". It
+failed on 2026-09-12 because it "lost its load — dexopt finished first". A dexopt storm is
+not a load that can be scheduled, and since `artifacts/dexopt/` it is contained anyway, so
+`bin/cpumax-ab.sh` supplies a deterministic one instead: **four spinners inside Android at
+nice 0**, which is the exact shape of the uncontained offender this note caught
+(`com.android.vending:background`, 86% of a core, nice 0, in `0::/`).
+
+Host scheduling latency is the metric, because "janky" is a latency claim: how late a
+host-side 10 ms sleep actually wakes.
+
+| arm | p50 | p95 | p99 | max | PSI some | Android got | throttled |
+|---|---|---|---|---|---|---|---|
+| idle, no cap | 0.264 ms | 0.292 | 0.315 | 0.482 | 0.00 | 2.8% of a core | — |
+| **load, uncapped** | **0.062 ms** | 0.080 | **0.100** | 1.646 | 2.69 | **393.3%** | 0 |
+| load, capped 200% | 0.133 ms | 0.560 | 1.522 | 2.291 | 49.99 | 200.2% | 301 periods / 59 s |
+| load, capped 100% | 0.241 ms | 0.318 | 1.467 | 2.433 | 74.76 | 100.4% | 300 periods / 89 s |
+
+Three conclusions, in order of how much they matter.
+
+**There is no host jank to fix.** Four nice-0 spinners taking 393% of this 4-CPU box leave
+the host's worst-case wake at 1.6 ms and its p99 at 0.1 ms. A 60 Hz frame budget is 16.7 ms.
+The host scheduler handles an uncontained, saturating Android perfectly well on its own.
+
+**Capping makes host latency worse, not better** — p99 0.100 ms uncapped against 1.522 ms at
+a 2-core cap — while costing Android half its throughput. Throttling converts a steady load
+into a bursty one: the container runs flat out, then is hard-stopped for the rest of each
+100 ms period. If the cap is ever wanted it should be for a reason other than host
+responsiveness, because on this evidence it buys negative responsiveness.
+
+**Do not read the PSI column as host harm.** `/proc/pressure/cpu` is system-wide and counts
+the container's own throttled tasks as stalled, so `some avg10` rising to 50% and 75% under
+the caps is the cap working exactly as specified, not the host suffering. The host-side
+latency numbers are the ones that speak to jank, and they move the other way.
+
+### A measurement trap on this machine: an idle box has *worse* wake latency than a loaded one
+
+Worth recording on its own, because it will mislead any future latency or power A/B here.
+The inversion above is real and reproducible — idle → loaded → idle, with the idle arm
+repeated last to rule out ordering:
+
+```
+idle-1   p50=0.266  p95=0.292  p99=0.317  max=0.343
+loaded   p50=0.061  p95=0.080  p99=0.170  max=2.614
+idle-2   p50=0.264  p95=0.291  p99=0.313  max=0.711
+```
+
+`idle-2` reproduces `idle-1` to three decimal places, so this is not warm-up or ordering.
+The driver is `intel_cpufreq` (intel_pstate passive) with schedutil and **nine** cpuidle
+states exposed; when the box is idle the cores sit in deep C-states and every wake pays the
+exit latency, and when Android is hammering them they stay shallow and fast. A loaded
+machine therefore looks 4× more responsive on this metric than an idle one. Any A/B here
+that compares a busy arm against an idle one is partly measuring C-state residency, not the
+thing it means to measure.
+
+### What this does not answer
+
+Host latency under a synthetic CPU load is not the same question as Android's own UI
+smoothness, which is step 4 below and still needs someone at the machine. Nothing here was
+measured inside Android, and nothing here exercises IO — `io.weight` and bfq remain
+untested.
+
 ## Suggested order of work
 
 Revised 2026-09-12. The battery question is closed; what is left is a performance question and one
@@ -833,8 +896,11 @@ cheap untested lead.
    **Done 2026-10-03 — it is a non-event**, 5 s to 600 s: freeze in ~10 ms, thaw in ~25 ms, no
    ANR, no crash, no watchdog, no daemon wedged, and a thaw herd of ×2.2 for one minute that is
    back to baseline in the second. `bin/freeze-probe.sh`, not `bin/power-ab.sh --freeze`, which
-   measures watts and records nothing about the thaw. **The `cpu.max` A/B on the same cgroup is
-   still undone** — it lost its load on 2026-09-12 when dexopt finished first.
+   measures watts and records nothing about the thaw.
+   ~~The `cpu.max` A/B on the same cgroup.~~ **Also done 2026-10-03, and it says the lever is
+   precise and unnecessary**: four nice-0 spinners taking 393% of this 4-CPU box leave host p99
+   wake latency at 0.1 ms, and capping makes it *worse*, not better. `bin/cpumax-ab.sh` supplies
+   a load that does not evaporate, which is what the 2026-09-12 attempt lacked.
 6. ~~Only then decide whether per-app granularity justifies widening the cgroup mount.~~
    **Decided 2026-09-10, unchanged 2026-09-12: not on battery grounds.** If it is built, build it
    for responsiveness, and know that the mount change alone does not deliver that.
