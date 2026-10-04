@@ -811,10 +811,23 @@ Note `.lxc` is easy to miss: a shell glob of `$CG/*/` does not match it, which i
 note previously recorded "the only child cgroup, `.lxc`, holds 0 processes" — true at rest,
 and it holds the attach helpers while frozen.
 
-The one-line fix, if restartd is ever touched for this: read
-`/sys/fs/cgroup/lxc.payload.waydroid/cgroup.events` for `frozen 1` and stand down on it,
-rather than trusting `lxc-info` to report a freeze it did not perform. It is not urgent —
-nothing misbehaves today — but the dead branch is misleading to the next reader.
+**Fixed 2026-10-04.** `waydroid-restartd` now reads
+`/sys/fs/cgroup/lxc.payload.waydroid/cgroup.events` for `frozen 1` directly and returns
+`FROZEN` from `container_state()`, rather than trusting `lxc-info` to report a freeze it did
+not perform. The stand-down branch that was dead now fires. Verified against a live freeze:
+
+| | before | after |
+|---|---|---|
+| poll duration while frozen | ~10 000 ms, blocked on the frozen `lxc-attach` | **74 ms** |
+| helpers parked in `.lxc` per cycle | 1 | **0** |
+| journal | silent | `container is FROZEN; standing down until it is RUNNING` |
+
+`lxc-info` still reports RUNNING throughout — nothing about LXC changed, restartd simply
+stopped believing it. The transition is logged once on each edge rather than every poll,
+because "restartd went quiet for ten minutes" is exactly the thing a later reader would want
+explained. This was never a correctness bug: the old fallback signalled nothing and the
+orphans were all reaped on thaw. It was a dead branch, a wasted poll cycle every 20 s, and a
+misleading docstring.
 
 ## 2026-10-03: the `cpu.max` A/B — the lever works, and the host does not need it
 

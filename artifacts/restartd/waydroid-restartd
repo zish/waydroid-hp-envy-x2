@@ -80,6 +80,9 @@ LXC_NAME = "waydroid"
 LXC_INFO = "/usr/bin/lxc-info"
 LXC_ATTACH = "/usr/bin/lxc-attach"
 
+# The container's own cgroup, used ONLY to notice a freeze. See container_state().
+CGROUP_EVENTS = "/sys/fs/cgroup/lxc.payload.%s/cgroup.events" % LXC_NAME
+
 # Android's own state names. Only STOPPING is actionable: STOPPED is a service
 # that really did stop (the overlay .rc that execs /system/bin/true to close the
 # wificond name race leaves wificond exactly there, and it is correct).
@@ -133,12 +136,46 @@ def log(msg):
     sys.stderr.flush()
 
 
+def container_frozen():
+    """True if the container's cgroup is frozen.
+
+    This exists because LXC WILL NOT TELL US. Measured 2026-10-03: with
+    cgroup.freeze written to 1 and every task in the container stopped,
+    `lxc-info -sH` still reports RUNNING -- at freeze+0 and again 72 s in. LXC's
+    FROZEN state tracks freezes LXC itself performed, not the cgroup's actual
+    state, and bin/freeze-probe.sh writes cgroup.freeze directly.
+
+    Without this check the "not RUNNING, stand down" branch below is dead code,
+    and what happens instead is read_props() calling lxc-attach, whose helper
+    liblxc places in the .lxc child cgroup -- frozen hierarchically, so it never
+    reaches exec. The 10 s timeout then kills the host-side lxc-attach and
+    orphans the frozen helper, one per ~20 s cycle: 10 were counted live
+    mid-freeze and pids.current rose by ~31 over a 600 s hold. Nothing is ever
+    signalled and the orphans are all reaped on thaw, so the old behaviour was
+    safe -- but it was safe by the fallback path rather than the intended one,
+    and it burned a poll cycle every 20 s doing nothing. See docs/43.
+
+    Read directly rather than shelled out: it is one file and this runs on a
+    poll loop. Any error means "assume not frozen", which is the old behaviour.
+    """
+    try:
+        with open(CGROUP_EVENTS) as fh:
+            for line in fh:
+                if line.startswith("frozen "):
+                    return line.split()[1] == "1"
+    except OSError:
+        pass
+    return False
+
+
 def container_state():
     """RUNNING/FROZEN/STOPPED/..., or STOPPED for anything unrecognised.
 
     Same treatment as artifacts/shutdown/waydroid-shutdown-android: lxc-info
     exits 1 and prints "<name> doesn't exist" when there is no container.
     """
+    if container_frozen():
+        return "FROZEN"
     try:
         out = subprocess.run(
             [LXC_INFO, "-P", LXC_PATH, "-n", LXC_NAME, "-sH"],
@@ -231,6 +268,7 @@ def main():
     cascade_until = 0.0
     breaker_until = 0.0
     warned_no_pid = set()
+    last_state = None    # so a freeze is logged once, not on every poll
 
     log("watching for init services stuck in STOPPING "
         "(idle %.1fs, cascade %.1fs at %.2fs, breaker %d/%.0fs)%s"
@@ -242,9 +280,24 @@ def main():
         cascading = now < cascade_until
         interval = cfg.fast_interval if cascading else cfg.idle_interval
 
+        state = None          # None means the breaker is up and nothing was checked
         if now < breaker_until:
             interval = cfg.idle_interval
-        elif container_state() != "RUNNING":
+        else:
+            state = container_state()
+            if state != last_state:
+                # Transition only. A freeze is otherwise invisible in the journal,
+                # and "restartd went quiet for ten minutes" is exactly the thing a
+                # later reader would want explained.
+                if state != "RUNNING":
+                    log("container is %s; standing down until it is RUNNING" % state)
+                elif last_state is not None:
+                    log("container is RUNNING again; resuming")
+                last_state = state
+
+        if state is None:
+            pass
+        elif state != "RUNNING":
             seen.clear()
             signalled.clear()
         else:
