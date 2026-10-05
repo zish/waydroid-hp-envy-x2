@@ -15,13 +15,19 @@ import android.widget.TextView
  * the copyright, and under what licence it is distributed.
  *
  * This file is duplicated verbatim -- the package line aside -- in every app
- * in this repository: bt-app, drm-probe, media-app, quat-monitor, sensor-app
- * and touch-probe. Each of those builds from its own src/ directory with no
- * shared module and no dependency resolution, which is the whole reason the
- * build is four tool invocations rather than a Gradle daemon; a common source
- * root would have to be threaded through six build.sh files to save six small
- * copies of one screen. Change one, change all six; an md5sum over the six,
- * package line excluded, says whether they have drifted.
+ * in this repository: appfuse-probe, audio-probe, bt-app, drm-probe,
+ * media-app, pw-app, quat-monitor, sensor-app and touch-probe. Each of those
+ * builds from its own src/ directory with no shared module and no dependency
+ * resolution, which is the whole reason the build is four tool invocations
+ * rather than a Gradle daemon; a common source root would have to be threaded
+ * through nine build.sh files to save nine small copies of one screen. Change
+ * one, change all nine; an md5sum over the nine, package line excluded, says
+ * whether they have drifted.
+ *
+ * Do not trust that list without checking it. It read "six" and omitted
+ * appfuse-probe and pw-app for as long as those have existed, because adding an
+ * app does not force anyone to come back here. The authority is a find over the
+ * repo for files named About.kt, with build output excluded, not this comment.
  *
  * Nothing here touches R. The name comes from the package manager, so the file
  * drops unchanged into the five apps whose build generates no R class.
@@ -128,7 +134,7 @@ object About {
         }
 
     /**
-     * Nullable on purpose. All six apps declare versionName 1.0 today, but
+     * Nullable on purpose. All nine apps declare versionName 1.0 today, but
      * aapt2 links a manifest without the attribute and says nothing, so one
      * that loses it would reach here as null; the line is then dropped rather
      * than rendered as "Version null".
