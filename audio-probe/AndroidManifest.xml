@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Audio Probe - answers whether an app on this device is actually GRANTED a
+  fast track, and with what buffer. Written for goal 5 (docs/44) after the HAL
+  was made to report one card period instead of the whole card buffer, which
+  created a FastMixer where there had been none.
+
+  The dumps on the host side can show that a FastMixer EXISTS. They cannot show
+  that an ordinary app gets to use it - `Fast tracks: activeMask=0x1` with only
+  the normal-mixer submix is what a media player produces, because media players
+  deliberately ask for deep buffers. This app asks for the opposite and reports
+  what it is given.
+
+  Same house style as sensor-app, drm-probe and quat-monitor: depends on NOTHING
+  but the platform. No AndroidX, no Compose, no coroutines, no Gradle.
+
+  NO PERMISSIONS ARE DECLARED, and none are needed - PCM output requires none.
+  That is deliberate for the same reason as drm-probe: the probe must run with
+  exactly the privileges an ordinary audio app has, or its answers would not be
+  about ordinary audio apps.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.systemhalted.audioprobe"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:launchMode="singleTop"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

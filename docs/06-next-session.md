@@ -688,18 +688,190 @@ Goal 4 is now **Wi-Fi** — scoped 2026-09-07, nothing built; see
 media is now goal 6. It is untouched and remains the cheapest remaining item, but the owner
 deprioritised it below Wi-Fi.
 
-Goal 5 is **audio**, added 2026-09-11; scoped, nothing built. See
-[44-audio-alsa-backend.md](44-audio-alsa-backend.md). Phase 1 is a `--audio-backend
-{auto,alsa,pulse,none}` CLI option probed before Android boots; phase 2 is a DAW-grade HAL. Three
-things to know before touching it. Nobody is building a native PipeWire client for Waydroid and
-there is a good reason not to, but the HAL is **already an ALSA client** — it opens the alsa-lib
-name `"pulse"`, which is just a config alias — so redirecting it is small. Sharing a card with the
-host is not possible (one substream per PCM here, dmix cannot cross the container's IPC namespace,
-PipeWire opens `hw:` directly), so this means dedicating a device, exactly like the second radio in
-[34](34-wifi-second-radio.md). And an availability probe run as root will lie, because root opens
-`/dev/snd/*` regardless while Android's audioserver is uid 1041 — `/dev/video0` being
-world-accessible is the only reason the camera works today. Nothing about audio has ever been
-tested on this machine, including whether it works at all right now.
+Goal 5 is **audio**, added 2026-09-11. **The ALSA arm was built and A/B'd against the PipeWire
+arm on 2026-10-04**, with audio playing and a listener at the machine. See
+[44-audio-alsa-backend.md](44-audio-alsa-backend.md), whose last third is the measured result and
+supersedes parts of the first two thirds. Phase 1 is still a `--audio-backend
+{auto,alsa,pulse,none}` CLI option probed before Android boots; phase 2 is still a DAW-grade HAL.
+
+**What the A/B found.** Redirecting the HAL takes four pieces and no rebuild — an overlay
+`/system/etc/asound.conf` with `pcm.!pulse`, a `/dev/snd` mount entry in `config_nodes`, a udev
+rule, and setting PipeWire's profile for the card to Off — and it works: Android drove `hw:1,0`
+directly and the owner reported a clean sine. It buys **5.95% of a core** (that is the whole cost
+of `pipewire` plus `pipewire-pulse` for one stereo stream, and it drops to 0.03%), it gives the
+card a **32x shorter, bit-exact buffer** (256x4 S16_LE instead of 1024x32 S32_LE), and it changes
+**nothing an app can observe** — `HAL frame count` 1024, S16, 48 kHz, stereo in both arms. It also
+makes timing *worse*: HAL write jitter went from 0.145 ms std to 0.347-0.371 ms, because the HAL's
+writer thread is `SCHED_OTHER` nice -19 while PipeWire's graph thread is realtime. Neither arm
+dropped a sample, at idle.
+
+**Five things the scoping got wrong, all corrected in docs/44.** The SELinux probe it proposed
+asks about `waydroid_t`, which is denied `v4l_device_t` too while the camera works — the real
+domain is `container_runtime_t` and it is allowed, and Android's internal SELinux is `Disabled`,
+so SELinux is a non-issue. The PCM is opened by
+`/vendor/bin/hw/android.hardware.audio.service` at **uid 1000 / gid 1041**, not by `audioserver`
+at uid 1041. `setfacl` cannot be used at all: udev rewrites the whole ACL on any seat-session
+change and wiped the grant within seconds of the restart that applied it, so the rule is
+mandatory, not merely tidier. `SCHED_FIFO` **is** available in the container (`Max realtime
+priority 10`) — the HAL just never asks. And "audio has never been tested" was stale when written.
+
+**Two traps worth not re-paying.** `systemctl restart waydroid-container` is the wrong lever and
+strands the machine: the overlay and the mount entry are read at **session** start, so restarting
+the container applied neither and dropped the cage session to the SDDM greeter, which under
+[25](25-waydroid-in-cage.md) needs someone at the keyboard. And a listening test needs a tone
+longer than the measurement — a 300 s file ran out mid-test and produced a confident "nothing at
+all" for an arm that had stopped playing.
+
+**Three scripts now exist**: [bin/alsa-arm.sh](../bin/alsa-arm.sh) (`status`/`caps`/`on`/
+`verify`/`off`, restarts nothing by design), [bin/alsa-vs-pulse.sh](../bin/alsa-vs-pulse.sh) (the
+read-only instrument, detects its own arm, reports deltas not totals), and
+[bin/audio-tone.sh](../bin/audio-tone.sh) (headless playback — this image has no `tinyplay`, no
+`stagefright` and no `media` binary, so it goes through VLC's `.StartActivity` and
+`cmd media_session`).
+
+**Load-tested the same day, and the worry did not pan out.**
+[bin/alsa-load-ab.sh](../bin/alsa-load-ab.sh) ran idle/loaded/recovered arms with four nice-0
+spinners inside Android — [43](43-app-freezer.md)'s load — and the ALSA arm took **zero** delayed
+writes and **zero** timestamp discontinuities with the host at **100% busy and 4.2 s of PSI stall
+per 45 s**, across three independent runs, while the HAL write rate held at 47.09/s. Write jitter
+rose ~17% under load and recovered. So direct ALSA at 21.3 ms is usable as it stands, and
+`SCHED_FIFO` is the fix for the jitter and the prerequisite for going *lower*, not for using it.
+The limit worth remembering: the spinners are nice 0 and the HAL's writer is **nice -19**, so this
+is "survives nice-0 competition on a saturated CPU", not "survives anything" — and the pulse arm
+was never run against the same load.
+
+**Latency, measured 2026-10-04 — and it is the deflating part.** **Android cannot report its own
+output latency on this image**: AudioFlinger's per-track `Latency` column reads `unavail`, because
+it comes from the HAL's presentation timestamp and this HAL supplies none (timestamp errors are
+100% of writes in both arms). The buffers are all exactly readable though, and in the ALSA arm
+nothing sits between them: app `AudioTrack` buffer 8208 frames (171 ms, VLC's own choice) +
+AudioFlinger mixer 1024 frames (21.3 ms) + card queue, measured, 896 frames (18.7 ms) = **40 ms of
+platform latency**, ~83 ms for a minimum-buffer app, ~211 ms as VLC actually ran. **Direct ALSA is
+not a latency win of any size this can see**: the pulse arm's measurable downstream is graph
+quantum 5.33 ms + the eq6 node 5.33 ms + card queue ~7 ms ≈ **17.7 ms**, against ALSA's 18.7 ms of
+card queue — the same number. The only term ALSA definitely removes is `pipewire-pulse`'s own
+buffer, which is the one thing nothing reports (`pactl` says 0 usec). Adopt ALSA for the 5.95% of
+a core and the bit-exact S16 path, not for latency.
+
+**And docs/44's "85 ms HAL buffer" is wrong for this image: it is 21.3 ms.** The doc derived 85 ms
+from upstream's `PLAYBACK_PERIOD_SIZE 1024` x `COUNT 4`; three measurements say 256 x 4 instead —
+the card's `hw_params` (`period_size: 256`, `buffer_size: 1024`), AudioFlinger's independent
+`HAL buffer size: 4096 bytes` = 1024 frames, and `delay` sitting at 896-1053 against a 1024-frame
+buffer. So the term the roadmap called dominant does not exist, and what actually dominates is the
+app's buffer plus the mixer — which no backend choice touches. Flagged as inference in docs/44:
+the constants were deduced from the PCM request because `out_get_latency()` is unreadable while
+the track `Latency` says `unavail`; reading `audio_hw.c` for this branch would settle it.
+
+**2026-10-05: the direction is decided — support ALSA — and the reason the ~100 ms never moved is
+now exact.** The deciding argument for the substrate was AAudio EXCLUSIVE: it needs
+`create_mmap_buffer`, which needs a `hw:` device opened directly, and no socket transport can hand
+an app a ring buffer the hardware DMAs from. On that substrate, `dumpsys media.audio_flinger` says
+**`No FastMixer`** — none is constructed, so a `FAST` mixPort could never have worked, and the
+ordering docs/44 carried (mixPort first) was wrong. AudioFlinger gates the FastMixer's existence on
+the HAL's buffer, before any policy flag: `initFastMixer = (mFrameCount < mNormalFrameCount)`, with
+`mNormalFrameCount` scaled *up* from the HAL's count only as far as 20 ms (960 frames at 48 kHz).
+At 1024 frames the multiplier is `960/1024 = 0.9375`, clamped to 1.0, so both counts land at 1024
+and the gate is false. That reproduces both observed numbers exactly. **So the HAL buffer is not a
+weak lever, it is the only lever** — the opposite of what docs/44 said, and the "clamp" it flagged
+as unverifiable does not exist.
+
+**It took one byte, not an NDK rebuild.** `get_buffer_size()` hardcodes 1024 frames for every
+format via a jump table; the only property the HAL reads at all is `waydroid.pulse_runtime_path`.
+`bin/audio-fastpath.sh on --frames 256` derives two overlay files from the host's own rootfs: the
+single instruction `mov $0x800,%esi` → `mov $0x200,%esi` (one byte differs in the whole file,
+gated on the stock sha256, keyed on a byte sequence that occurs exactly once), and
+`AUDIO_OUTPUT_FLAG_FAST` added to the **existing** `primary output` mixPort — not a new one,
+because `subdevices_count: 1` means a second `hw:1,0` open gets `-EBUSY`. The ALSA buffer is
+deliberately untouched, so the card keeps the 1024-frame / 4 x 256 configuration already
+load-tested to 100% CPU with zero delayed writes.
+
+**Trap worth the ink: the loaded HAL is the 32-bit build.** `android.hardware.audio.service` is
+i686, so `/proc/<pid>/maps` shows `/vendor/lib/hw/`, not `lib64`. The first pass of the analysis
+was done against the `lib64` copy, which is present, loadable and never loaded; patching it would
+have changed nothing and read as a failed experiment.
+
+**MEASURED 2026-10-05, and it worked first try.** After one log-out/log-in:
+`HAL frame count 1024 → 256`, `Normal frame count 1024 → 768`, `AudioStreamOut` flags
+`0x2 (PRIMARY)` → `0x6 (PRIMARY|FAST)`, and a **FastMixer thread at `tid=221`** with
+`Fast track availMask=0xfe` (7 slots free), `writeErrors=0 underruns=0`. The normal mixer now
+writes into a MonoPipe and the FastMixer owns the HAL write (`PipeSink frames written: 201984`).
+Both predicted numbers were exact, which confirms `multiplier = floor(960/mFrameCount)` is the
+live arithmetic. So low-latency audio on Waydroid cost **one byte plus one XML attribute** — no
+NDK rebuild, no framework rebuild, no change to the ALSA buffer the load test already validated.
+
+**And the instrument called it a failure.** `verify` tested `grep -q 'No FastMixer'`, which
+substring-matches the dump's `No FastMixer statistics available currently` — that line is
+`FastMixerDumpState` reporting it has no *samples* yet (nothing was playing) and means the
+FastMixer **exists**. It printed "FastMixer absent" on the run that had worked, with advice to do
+an unnecessary framework rebuild. Caught by the dump's own contradiction: `Normal frame count`
+differing from `HAL frame count` can only be produced inside the block that runs under
+`FastMixer_Static`/`_Dynamic`, so the reported diagnosis of `FastMixer_Never` was refuted by the
+same dump. Now fixed to anchor the match (`^ *No FastMixer$`) and to print `Fast track availMask`,
+the MonoPipe depth and `PipeSink frames written` as three independent corroborations.
+
+**The app-visible answer, from a new probe app.** Built `audio-probe/` (same no-Gradle toolchain
+and house style as `drm-probe`/`sensor-app`, no permissions) because no host-side dump can show
+whether an *ordinary app* is granted a fast track — a media player yields
+`Fast tracks: activeMask=0x1`, slot 0 being the normal-mixer submix, since media players ask for
+deep buffers on purpose. Three `AudioTrack`s differing only in performance mode; the decisive field
+is `getPerformanceMode()` read back, because `AudioTrack` silently downgrades what it cannot honour.
+
+**`LOW_LATENCY` was GRANTED**: 512-frame buffer (10.67 ms), **0 underruns**, against an ordinary
+`getMinBufferSize` floor of 5390 frames (112.29 ms) — a 10.5x reduction in the app-visible buffer.
+`PROPERTY_OUTPUT_FRAMES_PER_BUFFER` moved 1024 → **256** (5.33 ms), which is the cleanest proof the
+change reached apps and not just AudioFlinger's internals. `POWER_SAVING` correctly downgrades to
+`NONE` — there is no `DEEP_BUFFER` mixPort, only `PRIMARY|FAST`.
+
+**Load-tested at 5.33 ms: zero delayed writes and zero timestamp discontinuities at 100% CPU**
+(PSI 6.1 s), FastMixer `underruns=0 writeErrors=0` over 52 s, mix cycle
+`mean=5.33 max=7.54 stddev=0.35 ms` at 108 us/cycle (~2% of a core).
+
+**Retraction, same day.** I reported "jitter improved 7x under the fast path (0.35 → 0.052 ms)".
+That is **withdrawn**: AudioFlinger's `Hal write jitter` stops describing the HAL once a FastMixer
+exists, because `mNormalSink` is replaced by the MonoPipe, so the figure measures an in-memory pipe
+write rather than a write to the card. The dump's own arithmetic proves it —
+`Frames written / Total writes = 1420032/1849 = 768`, the *normal* frame count, and the rate
+62.58/s is `48000/768`, not `48000/256`. `bin/alsa-load-ab.sh`'s `jit_std` column inherits the same
+caveat and should not be compared across the fastpath change. The comparable number is
+`audio-probe`'s app-side write cadence (fast 11.1 ms sd 5.3 vs ordinary 20.0 ms sd 29.5).
+
+**The next lever is a ~116 ms latency the framework believes and the HAL cannot know.**
+`getLatency()` (hidden, via reflection — it worked) returned 127 / 229 / 287 ms for the three arms;
+subtract each arm's own buffer and the remainder is the same **116.3 ms** three times, so it is a
+fixed value that now dominates app-visible latency. The HAL has no `snd_pcm_delay`, no
+`snd_pcm_avail` and no `snd_pcm_sw_params_*`, so it never asks where the card is — the figure is
+computed or constant, against a real ~18.7 ms of card buffer. **Not pinned to an instruction yet**:
+one attempt mis-identified `out_write` as `get_latency` from a bad vtable-slot derivation, so no
+address is claimed. Settling whether it lives in the HAL or in AudioFlinger's accounting is step
+one, and it is the same class of fix as the one that worked. This also governs `getTimestamp()` and
+A/V sync, and `Timestamp stats` has shown `err` on essentially every write in every arm from the
+beginning.
+
+**Open, and worth doing next.** A true acoustic round-trip number, which needs no cable and no
+physical step: the built-in mic is on the same card, `hw:1,0`'s capture substream is free, and
+`/dev/snd/pcmC1D0c` is already 0666 from the arm's udev rule — play a chirp from Android, record
+it on the host, cross-correlate, and check the 40 ms accounting. Whether the jitter regression
+closes if the HAL asks for `SCHED_FIFO`. Whether it survives load that is not nice-0 CPU — negative nice, I/O or memory
+pressure, a period below 256 frames. The same load against the **pulse** arm, for symmetry. The
+`snd-aloop` third arm scoped in [44](44-audio-alsa-backend.md) — Android as a real ALSA client
+while PipeWire keeps routing and Bluetooth, no cross-compile and no reboot, with the open risk
+that its clock is unsynchronised and PipeWire will resample. And multichannel, which is
+`audio.usb.default.so` and a real interface — this card is stereo-only, though it does do
+44.1-192 kHz, S32_LE, periods down to 16 frames (0.33 ms) and MMAP, none of which the stack uses.
+
+**bluez-alsa was costed and is not worth it**, with facts the scoping lacked: it is **not packaged
+for Fedora at all** (`rpm-ostree install --dry-run` → `Packages not found` across all four repos),
+the image has **no `libdbus`**, so the guest side is a bionic cross-compile of libdbus plus the pcm
+and ctl plugins for both ABIs, WirePlumber's `bluez5` monitor holds BlueZ's media endpoint so the
+host would lose its own Bluetooth audio, and **no A2DP sink is even paired** to test against. It
+would replace a path that already works, at unchanged A2DP latency. `snd-aloop` is the answer to
+"ALSA and Bluetooth".
+
+**The machine is currently left in the ALSA arm**, which means the host has no audio: card 1 is
+handed to Android, PipeWire's profile for it is Off, `Master` is at 100% and Android's media
+volume at 5 of 15. A udev rule at `/etc/udev/rules.d/99-waydroid-alsa-arm.rules` puts card 1's
+nodes at mode 0666, and `/var/lib/waydroid/.alsa-arm.revert` holds the state `off` needs. `ssh HOST 'sudo sh -s' -- off < bin/alsa-arm.sh` reverts all of it, and then
+needs a session restart to take effect.
 
 Goal 7 is **Android's per-app freezer**, added 2026-09-10. See
 [43-app-freezer.md](43-app-freezer.md), substantially rewritten on 2026-09-12 and extended on
