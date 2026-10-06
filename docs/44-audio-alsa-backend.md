@@ -1815,6 +1815,79 @@ That sandbox and an ostree `/var/usrlocal` binary under SELinux interact in ways
 during a first bring-up. Upstream's version in `misc/systemd/bluealsa.service.in` is the right
 target once A2DP is proven end to end.
 
+### A2DP playback does NOT work yet, and here is exactly where it stops
+
+Headphones ("Earmuffs", `60:AB:D2:41:04:39`) paired and **connected**, BlueALSA exposes the PCM,
+and the daemon owns its bus name. Playback still fails. Recording this honestly because the
+negative result and its exclusions are worth more than a vague "needs more work".
+
+**What works:** `bluetoothctl connect` succeeds; `Connected: yes`; the PCM appears at
+`/org/bluealsa/hci0/dev_60_AB_D2_41_04_39/a2dpsrc/sink`; `bluealsactl info` reports a sane
+configuration -- `Transport: A2DP-source`, `Mode: sink`, `Format: S16_LE`, `Channels: 2`,
+`Rate: 48000 Hz`, `Available codecs: SBC AAC`, `Selected codec: AAC`, `Delay: 15.0 ms`.
+
+**What fails:** `aplay -D bluealsa` gets past open and then
+`aplay: set_params:1462: Unable to install hw params`, for the request
+`S16_LE / 2ch / 48000 / PERIOD_SIZE 6000 / PERIODS 4 / BUFFER 24000`.
+
+**Ruled out, each by measurement rather than reasoning:**
+
+- *Format, rate, channels.* The PCM reports exactly `S16_LE / 2 / 48000`, which is what was
+  offered.
+- *Period and buffer limits.* Read out of the source rather than guessed:
+  `PERIODS 2..1024` and `PERIOD_BYTES >= rate/100 * channels * width/8` = **1920** at 48 kHz
+  stereo S16. The request satisfies both, and `--period-size=1024 --buffer-size=4096` fails
+  identically.
+- *Codec.* Forcing SBC with `bluealsactl codec ... SBC` changes nothing.
+- *The profile string.* `str2profile()` accepts `a2dp`, which maps to
+  `A2DP_SOURCE|A2DP_SINK`, and the lookup wants `BA_PCM_MODE_SINK` for playback -- matching the
+  PCM exactly.
+- *Bus mismatch.* `DBUS_BUS_SYSTEM` appears exactly once in the whole tree; daemon and plugin use
+  the same bus.
+- *SELinux.* `bluealsad` runs `unconfined_service_t` with no AVC denials recorded.
+- *The malformed D-Bus policy I had shipped.* Real bug, fixed (below), **not this one** -- the
+  failure is identical with valid XML.
+
+**Two open leads.**
+
+1. `--dump-hw-params` returns **generic unconstrained ALSA ranges** -- every format, `RATE
+   [4000 4294967295]`, `CHANNELS [1 10000]`. The plugin's constraints are not visible at refine
+   time. In the open path, `ba_dbus_pcm_codecs_get` failing only logs and continues, which would
+   leave `bluealsa_set_hw_constraint` building its RATE and CHANNELS lists from an empty
+   `codec->rates`/`codec->channels`. No "Couldn't get BlueALSA PCM codecs" error was emitted, so
+   the fetch appears to succeed -- which leaves the empty-list theory unconfirmed.
+2. `bluealsad` **intermittently** logs `E: Lost BlueALSA D-Bus name: org.bluealsa` and exits(1),
+   around the time a client opens a PCM, which drops the A2DP transport and disconnects the
+   headphones -- that is what "I can't connect to them" turned out to be. It is intermittent: one
+   run survived the same sequence untouched, and once it dies the subsequent `PCM not found` is
+   just fallout. Run in the foreground rather than under systemd it survived, which is suggestive
+   but not conclusive.
+
+**The next step is to make the plugin talk.** `snd_debug` is compiled out of a release build
+(`src/asound/log.h` stubs it unless `DEBUG` is defined), so `BLUEALSA_LOG_LEVEL=debug` produced
+nothing. Rebuilding with `--enable-debug` would make it name the failing constraint directly,
+instead of inferring it. That is the cheapest decisive move and it has not been taken yet.
+
+### Three bugs in this repo's own script, found by this
+
+1. **A `--` inside an XML comment** in the generated `org.bluealsa-local.conf`, which is illegal
+   and left dbus-broker unable to parse the policy. Third instance of this family in two days,
+   after the Kotlin nested block comment and the Android manifest: **generated XML and KDoc must be
+   validated, not eyeballed.** `build.sh` now parses the file before shipping it.
+2. **`systemctl reload dbus || systemctl restart dbus-broker`.** The fallback severs every D-Bus
+   connection on the machine -- far worse than the problem it papered over. Now reload-only, with a
+   warning if it fails.
+3. **`systemctl enable --now` does not restart an already-running unit.** Two reinstalls reported
+   success while the *first* binary kept running -- which is why a `--localstatedir` fix appeared to
+   work when the warning had simply not been re-emitted. Now `enable` + explicit `restart`. My
+   earlier claim that the warning was gone "so the fix worked" was wrong for exactly this reason.
+
+### Current state
+
+`bluealsad` active, headphones connected, PCM present, **0 PipeWire processes**, Waydroid session
+running with the fast path live. Bluetooth audio does not play. `bin/pipewire-off.sh on` restores
+PipeWire and with it working host Bluetooth audio, if that trade is wanted before this is finished.
+
 ### What remains, and the open architectural choice
 
 Nothing can carry audio until a sink is connected. After that, Android has to reach `bluealsa`, and

@@ -255,14 +255,24 @@ if [ "$DO_BUILD" = 1 ]; then
      Upstream's org.bluealsa.conf grants send_destination to group "audio",
      which cannot be joined on this host: the group is defined in the read-only
      base image, so usermod succeeds and does nothing. This names the user
-     instead. The Android side needs it too -- no idmap means Android's
-     AID_SYSTEM (uid 1000) is host uid 1000. -->
+     instead. The Android side needs it too, because with no idmap Android's
+     AID_SYSTEM (uid 1000) is host uid 1000.
+     NOTE: no double hyphen may appear inside an XML comment. A stray one here
+     made dbus-broker unable to parse the policy, and bluealsad then lost its
+     bus name and exited(1) the instant a client opened a PCM. -->
 <busconfig>
   <policy user="$BT_CLIENT_USER">
     <allow send_destination="org.bluealsa"/>
   </policy>
 </busconfig>
 DBUSPOLICY
+
+	# Validate it. A malformed policy does not fail loudly at install time: the
+	# broker simply cannot parse it, and the symptom surfaces much later as
+	# bluealsad losing its bus name under load.
+	python3 -c "import sys,xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])" \
+		"$STAGE/etc/dbus-1/system.d/org.bluealsa-local.conf" \
+		|| { echo "generated D-Bus policy is not well-formed XML" >&2; exit 1; }
 
 	mkdir -p "$STAGE/etc/systemd/system"
 	# No `|| true` here. The first version had one, the directory did not exist,
@@ -340,9 +350,20 @@ chmod 0755 /usr/local/bin/bluealsad /usr/local/bin/bluealsactl \
 # has to be allowed to exec them.
 restorecon -R /var/usrlocal /etc/alsa /etc/dbus-1 /etc/systemd/system 2>/dev/null || true
 # D-Bus must re-read system.d before anything can own org.bluealsa.
-systemctl reload dbus 2>/dev/null || systemctl restart dbus-broker 2>/dev/null || true
+#
+# RELOAD ONLY. The first version fell back to `systemctl restart dbus-broker`,
+# which severs every D-Bus connection on the machine -- a far worse outcome than
+# the problem it was papering over. If the reload fails, say so and stop.
+if ! systemctl reload dbus 2>/dev/null; then
+    echo "  WARNING: could not reload dbus; the policy may not be active yet." >&2
+    echo "  NOT restarting the system bus. Check /etc/dbus-1/system.d XML validity." >&2
+fi
 systemctl daemon-reload
-systemctl enable --now bluealsad.service
+# `enable --now` does NOT restart an already-running unit, so a reinstall left
+# the OLD binary running while reporting success -- which is how a stale build
+# without --localstatedir stayed live through two installs.
+systemctl enable bluealsad.service >/dev/null 2>&1
+systemctl restart bluealsad.service
 sleep 2
 echo "  bluealsad: $(systemctl is-active bluealsad.service)"
 systemctl is-active --quiet bluealsad.service || systemctl status bluealsad.service --no-pager -l | tail -20
