@@ -847,6 +847,45 @@ one, and it is the same class of fix as the one that worked. This also governs `
 A/V sync, and `Timestamp stats` has shown `err` on essentially every write in every arm from the
 beginning.
 
+**2026-10-06, items 1-4 of the post-fastpath list.** (1) The ~116 ms is `out_get_latency`, three
+instructions: `mov $0x3e8000,%eax; xor %edx,%edx; divl 0xac(%ecx)` = `4096000/rate` = **85 ms
+flat**, upstream's 1024x4=4096 frames, a buffer this card has never had. Patched to dividend
+`1024*1000` so it reports 21 ms. **This reconciles a correction I overreached on**: docs/44's
+original 85 ms was an accurate reading of what the HAL *claims*; my "it is 21.3 ms" was accurate
+about what the card *runs*. Both true. It dominates because `correctLatency_l` adds the MonoPipe
+fill and `AudioTrack::latency()` adds the track buffer, and it sets the ordinary floor through
+`getMinFrameCount` -- `afLatency/5.33` buffers x 256 frames predicted 5376 against a measured
+`getMinBufferSize` of 5390. Deployed; prediction for after the restart is ~1800 frames.
+
+(2) **Capture is broken by a format mismatch, and it is not gain.** The HAL logs
+`adev_open_input_stream selects channels=2 rate=16000 format=10` -- `format=10` is `S32_LE`, output
+logs `2` = S16_LE -- while `AudioRecord` reports S16_LE/48000/mono. Android reads 32-bit samples as
+pairs of 16-bit ones, so peak hits 32767 at 98% non-zero. Host `arecord` on the same card reads
+**-12.6 dBFS**, healthy, so neither the card nor the driver is at fault. The host mixer did have
++66 dB of absurd gain (`Capture` +30 dB, `Internal Mic Boost` +36 dB) which I cut to -2.25/0 dB;
+**it changed the Android peak not at all**, which is what ruled gain out. Originals were
+`Capture=63`, `Internal Mic Boost=3`. Rate and channels are `.rodata` words at `0x8a0`; the format
+default's origin is NOT located, so no patch is proposed. `AUDIO_INPUT_FLAG_FAST` was added to the
+`primary input` mixPort (it had no flags at all, hence a 2880-frame buffer against a 640-frame
+minimum) but cannot help until the format is fixed.
+
+(3) **The fast path is 48 kHz only.** Every rate builds -- AudioFlinger resamples -- but
+`LOW_LATENCY` is granted at 48000 and silently downgraded to `NONE` at 44100/96000/192000, because
+a fast track bypasses the resampler and must match the output rate. So 44.1 kHz work loses the fast
+path entirely. `PCM_FLOAT` **is** granted at 48 kHz, which is the useful half.
+
+(4) **AAudio EXCLUSIVE is five NULL vtable slots, not a constant.** The output ops block stops at
+`0x48`; `set_callback`, `pause`/`resume`/`drain`/`flush`, `get_presentation_position`, `start`,
+`stop`, `create_mmap_buffer` and `get_mmap_position` are all left NULL. So MMAP needs five new
+functions, and **`get_presentation_position` is why timestamps have never worked** -- it is the
+highest-value one, needs no MMAP, and is `snd_pcm_delay` plus a frame counter.
+
+**Also fixed: a bug in `audio-fastpath.sh` caught by its own hash gate.** `on` derived from
+`$ROOTFS`, which once the overlay is applied IS the overlay-merged view -- so the second `on` was
+patching its own output. Now derives from `/etc/waydroid-extra/images/vendor.img` via `debugfs`
+without mounting, verified to reproduce the stock sha256. `debugfs`'s dump destination must be
+created by root.
+
 **Open, and worth doing next.** A true acoustic round-trip number, which needs no cable and no
 physical step: the built-in mic is on the same card, `hw:1,0`'s capture substream is free, and
 `/dev/snd/pcmC1D0c` is already 0666 from the arm's udev rule — play a chirp from Android, record

@@ -14,10 +14,12 @@
   Same house style as sensor-app, drm-probe and quat-monitor: depends on NOTHING
   but the platform. No AndroidX, no Compose, no coroutines, no Gradle.
 
-  NO PERMISSIONS ARE DECLARED, and none are needed - PCM output requires none.
-  That is deliberate for the same reason as drm-probe: the probe must run with
-  exactly the privileges an ordinary audio app has, or its answers would not be
-  about ordinary audio apps.
+  ONE permission is declared: RECORD_AUDIO, and only because capture cannot be
+  probed without it. Output needs none. The drm-probe principle still holds -
+  the probe runs with exactly the privileges an ordinary audio app has, and an
+  ordinary DAW asks for RECORD_AUDIO too, so this does not privilege the probe
+  beyond its subject. build.sh installs with `pm install -g`, which grants it;
+  the probe reports explicitly when it is NOT granted rather than crashing.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.systemhalted.audioprobe"
@@ -25,6 +27,8 @@
     android:versionName="1.0">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:label="@string/app_name"

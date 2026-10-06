@@ -1459,6 +1459,156 @@ The fast arm's cadence tracks its 10.67 ms buffer with a fifth of the ordinary p
 which is the app-side shape of the same result. The 73 ms outlier is a first-write artefact that
 survived the one-sample discard and is worth a second look before being quoted.
 
+## Items 1-4 worked through, 2026-10-06
+
+### 1. The ~116 ms is `out_get_latency`, and it is three instructions
+
+Located properly this time, by mechanically tracking `lea`/`mov` pairs across the whole
+disassembly rather than eyeballing the compiler's pipelined interleaving -- which is what produced
+the earlier misidentification of `out_write` as `get_latency`. The slot map it yields is
+corroborated by `0x40 OUT.write -> 0x35a0`, the function already identified independently.
+
+`audio_stream_out.get_latency` is slot `0x38` -> **`0x3570`**:
+
+```
+3579:  mov  $0x3e8000,%eax        ; 4096000 = 4096 frames x 1000
+357e:  xor  %edx,%edx
+3580:  divl 0xac(%ecx)            ; / sample rate (the field get_sample_rate returns)
+```
+
+`4096000 / 48000 = 85` ms, flat, for any track. That is upstream's `PLAYBACK_PERIOD_SIZE 1024 x
+PERIOD_COUNT 4 = 4096 frames` -- **a buffer this card does not have.** The card runs 1024 frames.
+
+**This reconciles a correction I made too broadly.** docs/44 originally derived "85 ms" from
+upstream source; on 2026-10-04 I called that "wrong for this image: it is 21.3 ms". Both were
+right about different things, and I should have said so: the HAL **reports** 85 ms while the card
+**runs** 21.3 ms. The original figure was an accurate reading of what the HAL claims.
+
+Why it dominates: AudioFlinger's `correctLatency_l` adds the MonoPipe's average fill (only when a
+FastMixer exists -- measured `ave=1024.45` frames = 21.3 ms), and `AudioTrack::latency()` adds the
+track's own buffer. That is the ~116 ms constant the three probe arms implied. It also sets the
+**ordinary app's floor**, via `getMinFrameCount`:
+
+```
+minBufCount   = afLatency / ((1000 * afFrameCount) / afSampleRate)
+minFrameCount = minBufCount * afFrameCount
+```
+
+At `afLatency` 116 ms and `afFrameCount` 256 that is `116/5.33 = 21` buffers = 5376 frames, and
+`getMinBufferSize` measured **5390**. A second probe run measured **2310**, implying `afLatency`
+~48 ms at that moment -- which is itself evidence for the MonoPipe term, since that is the part
+that varies.
+
+Patched by the same mechanism: `mov $0x3e8000,%eax` -> `mov $0xfa000,%eax`, i.e. dividend
+`1024 x 1000`, so it reports **21 ms**. Byte sequence `b8 00 80 3e 00` occurs exactly once.
+`--latency-frames` defaults to 1024, the card's real buffer. The HAL still is not *measuring*
+anything and cannot -- but a correct constant beats a 4x-wrong one. **Deployed, pending a session
+restart.** Falsifiable prediction: `getMinBufferSize` should fall from ~5390 frames to roughly
+1800 (`afLatency` ~42 ms -> 7 buffers x 256).
+
+### A bug in my own script, caught by my own gate
+
+`on` derived its source from `$ROOTFS/vendor/lib/hw/...`. Once the overlay is applied,
+`/var/lib/waydroid/rootfs` **is** the overlay-merged view, so the second `on` was reading back the
+file the first `on` wrote and trying to patch an already-patched binary. The sha256 gate refused,
+loudly, which is the entire argument for having it fail rather than skip.
+
+Fixed by deriving from the stock image instead: `debugfs -R "dump /lib/hw/... $T"
+/etc/waydroid-extra/images/vendor.img`, read without mounting -- the same mechanism
+`waydroid-overlay-sync`'s `derive` rows use. vendor.img's root is `/vendor`, so in-image paths drop
+the leading `vendor/`. Verified to reproduce the stock sha256 exactly. `debugfs`'s destination must
+be created by root; a user-owned `mktemp` path fails with "Permission denied while opening ... for
+dump_inode".
+
+### 2. Capture is broken by a format mismatch, not by gain
+
+Added an `AudioRecord` arm to `audio-probe` (and `RECORD_AUDIO` to its manifest -- the only
+permission it declares, because capture cannot be probed without it). The input side had never been
+exercised in this project, and the fastpath patch made it urgent: `get_buffer_size()` is **one
+function shared by both vtables**, so shrinking it for playback shrank the reported capture buffer
+too.
+
+Capture opens and delivers data -- `INITIALIZED`, 72704 frames in 71 reads, 98% non-zero,
+`getTimestamp` works (unlike playback). But the data is garbage: **peak 32767 of 32767, 0.0 dBFS**.
+
+It is not gain, and it is not the card:
+
+- Host-side `arecord -D hw:1,0 -f S16_LE -r 48000 -c 2` on the same card: **peak 7725 = -12.6
+  dBFS**, 97.8% non-zero, with a large DC offset around 7600. The hardware path is healthy.
+- The host mixer did have absurd gain -- `Capture` at **+30.00 dB** and `Internal Mic Boost` at
+  **+36.00 dB**, 66 dB total -- and I reduced it to -2.25 dB / 0 dB. **It made no difference to the
+  Android peak**, which is what ruled gain out. Worth leaving low regardless, and it is host state
+  no Android process can reach, the HAL having no `snd_mixer_*`. Originals were `Capture=63`,
+  `Internal Mic Boost=3`, `Mic Boost=0`.
+- The HAL's own log says what it did: `adev_open_input_stream selects channels=2 rate=16000
+  format=10`. `format=10` is `SND_PCM_FORMAT_S32_LE`; output logs `format=2`, S16_LE. The input
+  defaults in `.rodata` at `0x8a0` are `ch=2, rate=0x3e80=16000, 320, periods=2`, so the HAL is
+  using its own constants and ignoring the request.
+
+So the HAL opens **S32_LE / 16 kHz / stereo** while `AudioRecord` reports **S16_LE / 48 kHz /
+mono**. Android reads 32-bit samples as pairs of 16-bit ones. The arithmetic matches the
+measurement: `type plug` resamples 48 k -> 16 k, so the low half of each S32 sample is non-zero
+noise reaching full scale while the high half carries the real (<= 7725) signal -- giving a 32767
+peak at ~98% non-zero. **The "clipping" is a misread, mine included: it is a format
+misinterpretation, not a level problem.**
+
+Fixing it means making the input config agree. Rate and channels are plain `.rodata` words at
+`0x8a0` (16000 -> 48000, 2 -> 1); the origin of the format default has **not** been located, so no
+patch is proposed yet. Properly it is HAL source work: `adev_open_input_stream` should honour the
+requested config, or at minimum report back what it selected.
+
+`AUDIO_INPUT_FLAG_FAST` was added to the `primary input` mixPort regardless -- it carried no flags
+attribute at all, which is why capture was handed a 2880-frame (60 ms) buffer against a 640-frame
+(13.3 ms) minimum. Same reasoning as the output flag: on the existing mixPort, because `pcm0c` has
+one substream too. Deployed, pending the same restart, and it cannot help until the format mismatch
+is fixed.
+
+### 3. The fast path is 48 kHz only
+
+The rate/format matrix, with `PERFORMANCE_MODE_LOW_LATENCY` requested every time:
+
+| rate | PCM_16 | PCM_FLOAT | granted | buffer |
+|---|---|---|---|---|
+| 44100 | builds | builds | `NONE` | 2127 fr |
+| **48000** | builds | builds | **`LOW_LATENCY`** | **512 fr** |
+| 96000 | builds | builds | `NONE` | 4620 fr |
+| 192000 | builds | builds | `NONE` | 9228 fr |
+
+Every rate builds, which proves nothing -- AudioFlinger resamples to the output's rate. The real
+column is *granted*: **a fast track must match the output rate exactly**, because it bypasses the
+resampler, and the policy profile declares 48000 alone. So **44.1 kHz work loses the fast path
+entirely** -- worth knowing, since plenty of DAW material is 44.1.
+
+`PCM_FLOAT` **is** granted at 48 kHz, which is the useful half of this: an app can feed float to
+the mixer (AudioFlinger mixes in float anyway) and still be fast. The card itself does 44.1-192 kHz
+and `S32_LE`; none of that reaches an app. Raising it means advertising more rates in the policy
+profile, and the primary output can only be opened at one of them -- so this is a trade, not a free
+addition, and multichannel still wants a USB interface and the `/dev/bus/usb` mount.
+
+### 4. AAudio EXCLUSIVE: five NULL vtable slots, so it is HAL source work
+
+This is now a structural answer rather than a symbol-table one. The output stream's ops are
+installed in one block, and it stops at slot `0x48`. Everything above is left NULL by `calloc`:
+
+| slot | op | consequence |
+|---|---|---|
+| `0x4c` | `set_callback` | no callback-driven output |
+| `0x50`-`0x5c` | `pause`/`resume`/`drain`/`flush` | no gapless, no offload |
+| `0x60` | **`get_presentation_position`** | **the reason timestamps never work** |
+| `0x64`/`0x68` | `start`/`stop` | required for MMAP |
+| `0x6c` | **`create_mmap_buffer`** | **AAudio EXCLUSIVE impossible** |
+| `0x70` | `get_mmap_position` | required for MMAP |
+
+So AAudio MMAP/EXCLUSIVE is not a constant away, it is **five functions away** -- `start`, `stop`,
+`create_mmap_buffer`, `get_mmap_position`, plus `get_presentation_position` for the timestamps that
+make low latency usable. That is new HAL code against the stable `audio_hw_device_t` C ABI, which
+the NDK can build (the [docs/08](08-camera-fixed.md) pattern), but it is a project, not a patch.
+`get_presentation_position` alone is the highest-value of the five and does not need MMAP: it is
+`snd_pcm_delay` plus a frame counter, and it would fix `getTimestamp` and A/V sync.
+
+AAudio in SHARED mode already rides the FastMixer, so it gets today's 10.67 ms. EXCLUSIVE is what
+would bypass the mixer entirely.
+
 ### Still open after this
 
 - **`SCHED_FIFO` for the FastMixer.** It wants it; the container's `Max realtime priority` is 10

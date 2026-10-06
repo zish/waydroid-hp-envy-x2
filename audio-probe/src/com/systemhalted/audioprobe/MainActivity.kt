@@ -4,8 +4,11 @@
  */
 package com.systemhalted.audioprobe
 
+import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.graphics.Typeface
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
@@ -170,6 +173,12 @@ class MainActivity : Activity() {
             results.add(runArm(label, mode, fpbN ?: 256))
         }
 
+        rule("rate and format matrix")
+        matrix(fpbN ?: 256)
+
+        rule("capture")
+        runCapture()
+
         rule("verdict")
         val low = results.firstOrNull { it.requested == AudioTrack.PERFORMANCE_MODE_LOW_LATENCY }
         if (low == null || !low.built) {
@@ -324,6 +333,167 @@ class MainActivity : Activity() {
         return arm
     }
 
+    /**
+     * What rates and formats an app can actually get, and -- the part that
+     * matters for a DAW -- whether it can get a FAST track at anything other
+     * than the device's own rate.
+     *
+     * AudioFlinger will happily build a track at any rate and resample it to
+     * the output's, so a track existing at 96 kHz proves nothing about the
+     * hardware. The output rate is fixed by the policy XML profile, which
+     * declares 48000 alone. A fast track additionally has to match the output
+     * exactly, because it bypasses the resampler -- so the granted performance
+     * mode across rates is the real measurement here, not whether build()
+     * threw.
+     *
+     * Tracks are built and released without playing: this is about what the
+     * policy and AudioFlinger permit, and playing 12 tones would add nothing
+     * but noise.
+     */
+    private fun matrix(quantum: Int) {
+        emit("  output is pinned to ${RATE} Hz by the policy profile; anything else is resampled.")
+        emit("  A FAST track must match the output rate, so 'granted' is the real column.")
+        emit("")
+        emit("  %-8s %-10s %-9s %-12s %9s".format("rate", "encoding", "built", "granted", "bufFrames"))
+        for (rate in intArrayOf(44100, 48000, 96000, 192000)) {
+            for ((encName, enc) in listOf(
+                "PCM_16" to AudioFormat.ENCODING_PCM_16BIT,
+                "PCM_FLOAT" to AudioFormat.ENCODING_PCM_FLOAT,
+            )) {
+                var built = "no"; var granted = "-"; var frames = "-"
+                var t: AudioTrack? = null
+                try {
+                    t = AudioTrack.Builder()
+                        .setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                .build())
+                        .setAudioFormat(
+                            AudioFormat.Builder()
+                                .setEncoding(enc).setSampleRate(rate)
+                                .setChannelMask(CHMASK).build())
+                        .setBufferSizeInBytes(quantum * 2 * CHANNELS *
+                            if (enc == AudioFormat.ENCODING_PCM_FLOAT) 4 else 2)
+                        .setTransferMode(AudioTrack.MODE_STREAM)
+                        .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                        .build()
+                    built = "yes"
+                    granted = perfName(t.performanceMode)
+                    frames = t.bufferSizeInFrames.toString()
+                } catch (th: Throwable) {
+                    built = "FAILED"
+                    granted = th.javaClass.simpleName
+                } finally {
+                    try { t?.release() } catch (th: Throwable) { }
+                }
+                emit("  %-8d %-10s %-9s %-12s %9s".format(rate, encName, built, granted, frames))
+            }
+        }
+    }
+
+    /**
+     * Capture. A DAW records, and this project has never exercised the input
+     * side at all -- so this is a first look, not a regression check.
+     *
+     * It also matters for a reason specific to what was patched: the HAL's
+     * get_buffer_size() is ONE function shared by the input and output vtables,
+     * so shrinking it for playback shrank the reported capture buffer too. That
+     * side effect has never been tested, and this is the test.
+     *
+     * Peak level is reported because a capture path can be perfectly healthy by
+     * every API measure and still deliver digital silence, which is the failure
+     * mode worth catching.
+     */
+    private fun runCapture() {
+        val minBytes = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, ENCODING)
+        emit("  getMinBufferSize  $minBytes bytes" +
+            if (minBytes > 0) " = ${minBytes / 2} frames mono (${ms(minBytes / 2, RATE)})" else " (FAILED)")
+
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            emit("  RECORD_AUDIO is NOT granted -- reinstall with `pm install -g`.")
+            emit("  Nothing below could be measured.")
+            return
+        }
+        emit("  RECORD_AUDIO       granted")
+
+        val want = if (minBytes > 0) minBytes else 4096
+        val rec = try {
+            AudioRecord.Builder()
+                .setAudioSource(MediaRecorder.AudioSource.MIC)
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(ENCODING).setSampleRate(RATE)
+                        .setChannelMask(AudioFormat.CHANNEL_IN_MONO).build())
+                .setBufferSizeInBytes(want)
+                .build()
+        } catch (t: Throwable) {
+            emit("  BUILD FAILED: $t"); return
+        }
+
+        try {
+            emit("  state              ${recState(rec.state)}")
+            if (rec.state != AudioRecord.STATE_INITIALIZED) {
+                emit("  not initialised -- the input stream could not be opened"); return
+            }
+            emit("  granted buffer     ${rec.bufferSizeInFrames} frames (${ms(rec.bufferSizeInFrames, RATE)})")
+            emit("  source / rate      ${rec.audioSource} / ${rec.sampleRate} Hz, ${rec.channelCount} ch")
+            emit("  session id         ${rec.audioSessionId}")
+
+            val chunk = minOf(rec.bufferSizeInFrames, 1024).coerceAtLeast(64)
+            val buf = ShortArray(chunk)
+            rec.startRecording()
+            if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                emit("  startRecording did NOT take -- recordingState=${rec.recordingState}"); return
+            }
+
+            val intervals = ArrayList<Double>()
+            var frames = 0; var peak = 0; var nonZero = 0L; var reads = 0
+            val target = (RATE * CAPTURE_SECONDS).toInt()
+            var last = System.nanoTime()
+            while (frames < target) {
+                val n = rec.read(buf, 0, buf.size)
+                if (n <= 0) { emit("  read returned $n -- stopping early"); break }
+                val now = System.nanoTime()
+                if (reads > 0) intervals.add((now - last) / 1_000_000.0)
+                last = now; reads++
+                for (i in 0 until n) {
+                    val v = buf[i].toInt()
+                    val a = if (v < 0) -v else v
+                    if (a > peak) peak = a
+                    if (v != 0) nonZero++
+                }
+                frames += n
+            }
+            rec.stop()
+
+            if (intervals.isNotEmpty()) {
+                val mean = intervals.average()
+                emit("  read cadence       n=${intervals.size} chunk=$chunk frames" +
+                    " mean=%.3f sd=%.3f min=%.3f max=%.3f ms".format(
+                        mean, sqrt(intervals.sumOf { (it - mean) * (it - mean) } / intervals.size),
+                        intervals.min(), intervals.max()))
+            }
+            emit("  frames captured    $frames in $reads reads")
+            emit("  peak sample        $peak of 32767" +
+                if (peak > 0) " = %.1f dBFS".format(20.0 * kotlin.math.log10(peak / 32767.0)) else "")
+            emit("  non-zero samples   $nonZero of $frames" +
+                if (nonZero == 0L) "   <-- DIGITAL SILENCE: the stream opened but delivered nothing"
+                else "")
+
+            val ts = AudioTimestamp()
+            if (rec.getTimestamp(ts, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS) {
+                emit("  getTimestamp       framePosition=${ts.framePosition} nanoTime=${ts.nanoTime}")
+            } else {
+                emit("  getTimestamp       unavailable -- no capture presentation position")
+            }
+        } finally {
+            try { rec.stop() } catch (t: Throwable) { }
+            rec.release()
+        }
+    }
+
     /** 1 kHz, interleaved stereo, at a quarter of full scale. */
     private fun sine(frames: Int): ShortArray {
         val a = ShortArray(frames * CHANNELS)
@@ -357,6 +527,7 @@ class MainActivity : Activity() {
         private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
         private const val FRAME_BYTES = CHANNELS * 2
         private const val PLAY_SECONDS = 1.5
+        private const val CAPTURE_SECONDS = 1.5
         /** Quiet on purpose. Audibility is not what is being measured. */
         private const val VOLUME = 0.2f
 
@@ -365,6 +536,12 @@ class MainActivity : Activity() {
             "NONE (ordinary)" to AudioTrack.PERFORMANCE_MODE_NONE,
             "POWER_SAVING (deep)" to AudioTrack.PERFORMANCE_MODE_POWER_SAVING,
         )
+
+        private fun recState(s: Int): String = when (s) {
+            AudioRecord.STATE_INITIALIZED -> "INITIALIZED"
+            AudioRecord.STATE_UNINITIALIZED -> "UNINITIALIZED"
+            else -> "?($s)"
+        }
 
         private fun perfName(m: Int): String = when (m) {
             AudioTrack.PERFORMANCE_MODE_NONE -> "NONE"

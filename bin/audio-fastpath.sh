@@ -77,6 +77,30 @@
 #    been exercised in this project, so there is no behaviour here to regress,
 #    but it is a real side effect and not a no-op.
 #
+# 1b. The SAME file's out_get_latency(), which is three instructions:
+#
+#        mov  $0x3e8000,%eax        ; 4096000 = 4096 frames x 1000
+#        xor  %edx,%edx
+#        divl 0xac(%ecx)            ; / sample rate (the field get_sample_rate returns)
+#
+#     so it reports 4096000/48000 = 85 ms, flat. That is upstream's
+#     PLAYBACK_PERIOD_SIZE 1024 x PERIOD_COUNT 4 = 4096 frames -- a buffer this
+#     card does not have. The card runs 1024 frames (verified in
+#     /proc/asound/card1/pcm0p/sub0/hw_params), and the measured `delay` sat at
+#     896-1053 frames, so the truth is ~21 ms and the HAL overstates by 4x.
+#
+#     This matters more than a wrong number usually would. AudioFlinger adds the
+#     MonoPipe's average fill to it (correctLatency_l, only when a FastMixer
+#     exists), AudioTrack adds its own buffer, and the result is what
+#     getLatency() hands an app -- measured at 127/229/287 ms across three
+#     performance modes, i.e. a constant ~116 ms plus each arm's own buffer.
+#     A DAW uses that figure to time-align what it records. The fast path gave
+#     it a 10.67 ms buffer behind a 116 ms claim.
+#
+#     --latency-frames (default 1024, the card's real buffer) sets the dividend
+#     to frames x 1000. The HAL still is not MEASURING anything -- it has no
+#     snd_pcm_delay and cannot -- but a correct constant beats a 4x-wrong one.
+#
 # 2. /vendor/etc/audio_policy_configuration.xml -- AUDIO_OUTPUT_FLAG_FAST is
 #    added to the EXISTING "primary output" mixPort rather than declared as a
 #    new "fast output" mixPort. That is deliberate. A separate mixPort is what
@@ -91,9 +115,12 @@
 #    primary MixerThread's FastMixer.
 #
 # NEITHER FILE IS CARRIED IN THIS REPO. Both are derived here from the host's
-# own /var/lib/waydroid/rootfs by a deterministic transform, and `on` refuses
-# loudly if the input hash has moved -- it does not silently skip, which is the
-# known flaw in waydroid-overlay-sync's existing `derive` rows.
+# own stock /etc/waydroid-extra/images/vendor.img, read with debugfs without
+# mounting it, by a deterministic transform; and `on` refuses loudly if the
+# input hash has moved -- it does not silently skip, which is the known flaw in
+# waydroid-overlay-sync's existing `derive` rows. It must be the IMAGE and not
+# /var/lib/waydroid/rootfs, because once the overlay is applied the rootfs path
+# returns the patched file and `on` would be deriving from its own output.
 #
 # WHAT TO EXPECT, AND HOW IT CAN FAIL
 #
@@ -119,21 +146,24 @@ set -u
 
 OVERLAY_DIR=/var/lib/waydroid/overlay
 ROOTFS=/var/lib/waydroid/rootfs
+VENDOR_IMG=/etc/waydroid-extra/images/vendor.img
 HAL_REL=vendor/lib/hw/audio.primary.waydroid.so
 XML_REL=vendor/etc/audio_policy_configuration.xml
 STATE=/var/lib/waydroid/.audio-fastpath.revert
 
 # The stock 32-bit HAL this transform was derived against.
 HAL_SHA_STOCK=cac012cfc7d8b1852635afdf34d160f7b9524e927fba3f17c9424b1b2b639cd2
-# `mov $0x800,%esi` -- unique in the whole file (verified: exactly 1 occurrence).
-PATCH_FIND=be00080000
+# Both patch sites are keyed on their full instruction encoding, each verified to
+# occur exactly once in the stock file. See the HAL PATCH block in on().
 
 FRAMES=256
+LATFRAMES=1024
 VERB=${1:-status}
 [ $# -gt 0 ] && shift
 while [ $# -gt 0 ]; do
     case "$1" in
         --frames) FRAMES=${2:?--frames needs a value}; shift 2 ;;
+        --latency-frames) LATFRAMES=${2:?--latency-frames needs a value}; shift 2 ;;
         *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -229,13 +259,34 @@ on() {
     [ "$FRAMES" -ge 64 ]   || die "--frames $FRAMES is below 64; AudioFlinger will not thank you"
     [ "$FRAMES" -le 1024 ] || die "--frames $FRAMES exceeds the stock 1024; this verb only shrinks"
     [ $((FRAMES % 16)) -eq 0 ] || die "--frames must be a multiple of 16 (AudioMixer requires it)"
+    case "$LATFRAMES" in ''|*[!0-9]*) die "--latency-frames must be a number" ;; esac
+    [ "$LATFRAMES" -ge 64 ]   || die "--latency-frames $LATFRAMES is implausibly small"
+    [ "$LATFRAMES" -le 4096 ] || die "--latency-frames $LATFRAMES exceeds the stock 4096"
 
-    SRC_HAL=$ROOTFS/$HAL_REL
-    SRC_XML=$ROOTFS/$XML_REL
-    [ -f "$SRC_HAL" ] || die "$SRC_HAL not found -- is the rootfs mounted? (needs a running session)"
-    [ -f "$SRC_XML" ] || die "$SRC_XML not found -- is the rootfs mounted? (needs a running session)"
+    # DERIVE FROM THE IMAGE, NOT FROM $ROOTFS. Paid for on 2026-10-06: once the
+    # overlay is applied, /var/lib/waydroid/rootfs IS the overlay-merged view, so
+    # reading the HAL back through it returns the file this script wrote last
+    # time. `on` would then patch an already-patched file -- the byte sequence
+    # would no longer be found, and with a less careful gate it would have
+    # silently produced something wrong. The hash check caught it, which is the
+    # argument for having it fail loudly rather than skip.
+    #
+    # vendor.img is ext2 and debugfs reads it without mounting anything, which is
+    # the same mechanism waydroid-overlay-sync's `derive` rows use. Its root is
+    # /vendor, so the in-image paths drop the leading "vendor/".
+    [ -f "$VENDOR_IMG" ] || die "$VENDOR_IMG not found -- cannot derive from a stock image"
+    command -v debugfs >/dev/null 2>&1 || die "debugfs not found (e2fsprogs) -- cannot read vendor.img"
 
-    head_ "Deriving from the host's own image"
+    SRC_HAL=$(mktemp) || die "mktemp failed"
+    SRC_XML=$(mktemp) || die "mktemp failed"
+    trap 'rm -f "$SRC_HAL" "$SRC_XML"' EXIT HUP INT TERM
+    debugfs -R "dump /${HAL_REL#vendor/} $SRC_HAL" "$VENDOR_IMG" 2>/dev/null
+    debugfs -R "dump /${XML_REL#vendor/} $SRC_XML" "$VENDOR_IMG" 2>/dev/null
+    [ -s "$SRC_HAL" ] || die "could not extract /${HAL_REL#vendor/} from $VENDOR_IMG"
+    [ -s "$SRC_XML" ] || die "could not extract /${XML_REL#vendor/} from $VENDOR_IMG"
+
+    head_ "Deriving from the host's own stock image"
+    kv "source" "$VENDOR_IMG (via debugfs, unmounted)"
     GOT=$(sha256sum "$SRC_HAL" | cut -d' ' -f1)
     kv "stock HAL sha256" "$GOT"
     if [ "$GOT" != "$HAL_SHA_STOCK" ]; then
@@ -248,40 +299,58 @@ on() {
 
     mkdir -p "$OVERLAY_DIR/vendor/lib/hw" "$OVERLAY_DIR/vendor/etc" || die "cannot create overlay dirs"
 
-    # --- 1. the HAL constant ---
-    REPL=$(python3 -c "import struct,sys; sys.stdout.write(b'\xbe'.hex()+struct.pack('<I',$FRAMES*2).hex())")
-    python3 - "$SRC_HAL" "$OVERLAY_DIR/$HAL_REL" "$PATCH_FIND" "$REPL" <<'PY' || die "HAL patch failed"
-import sys
-src, dst, find, repl = sys.argv[1:5]
-f = bytearray(open(src,'rb').read())
-find = bytes.fromhex(find); repl = bytes.fromhex(repl)
-n = bytes(f).count(find)
-if n != 1:
-    sys.exit("  patch site appears %d times, expected exactly 1 -- refusing" % n)
-off = bytes(f).find(find)
-f[off:off+len(repl)] = repl
-open(dst,'wb').write(bytes(f))
-print("  %-32s %s" % ("patched at file offset", hex(off)))
-print("  %-32s %s -> %s" % ("immediate", find.hex(' '), repl.hex(' ')))
-PY
+    # --- 1. the HAL constants, both of them ---
+    python3 - "$SRC_HAL" "$OVERLAY_DIR/$HAL_REL" "$FRAMES" "$LATFRAMES" <<'HALPATCH' || die "HAL patch failed"
+import struct, sys
+src, dst, frames, latframes = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+f = bytearray(open(src, 'rb').read())
+# Each site is keyed on its whole instruction encoding, verified to occur exactly
+# once in the stock file, so the transform does not depend on a brittle offset.
+patches = [
+    ("get_buffer_size frames", bytes.fromhex('be00080000'),
+     b'\xbe' + struct.pack('<I', frames * 2)),
+    ("get_latency dividend",   bytes.fromhex('b800803e00'),
+     b'\xb8' + struct.pack('<I', latframes * 1000)),
+]
+for name, find, repl in patches:
+    n = bytes(f).count(find)
+    if n != 1:
+        sys.exit("  %s: site occurs %d times, expected exactly 1 -- refusing" % (name, n))
+    off = bytes(f).find(find)
+    f[off:off + len(repl)] = repl
+    print("  %-24s %s -> %s  @ %s" % (name, find.hex(' '), repl.hex(' '), hex(off)))
+open(dst, 'wb').write(bytes(f))
+HALPATCH
     chmod 0644 "$OVERLAY_DIR/$HAL_REL"
     kv "overlay HAL sha256" "$(sha256sum "$OVERLAY_DIR/$HAL_REL" | cut -d' ' -f1)"
     kv "get_buffer_size now reports" "$FRAMES frames ($(python3 -c "print('%.2f' % ($FRAMES/48.0))") ms at 48 kHz)"
+    kv "get_latency now reports" "$((LATFRAMES * 1000 / 48000)) ms (was 85, from a 4096-frame buffer this card never had)"
 
     # --- 2. the policy flag ---
-    sed 's#\(<mixPort name="primary output" role="source" flags="AUDIO_OUTPUT_FLAG_PRIMARY\)"#\1|AUDIO_OUTPUT_FLAG_FAST"#' \
+    # Output: add FAST to the existing mixPort (see the note above on why not a
+    # new one). Input: the primary input mixPort carries NO flags attribute at
+    # all, which is why capture was handed a 2880-frame (60 ms) buffer against a
+    # 640-frame minimum -- there is no fast capture path for it to land on.
+    # AUDIO_INPUT_FLAG_FAST is the symmetric fix, and goes on the existing
+    # mixPort for the same reason: pcm0c has one substream too.
+    sed -e 's#\(<mixPort name="primary output" role="source" flags="AUDIO_OUTPUT_FLAG_PRIMARY\)"#\1|AUDIO_OUTPUT_FLAG_FAST"#' \
+        -e 's#\(<mixPort name="primary input" role="sink"\)>#\1 flags="AUDIO_INPUT_FLAG_FAST">#' \
         "$SRC_XML" > "$OVERLAY_DIR/$XML_REL" || die "cannot write the policy overlay"
     CNT=$(grep -c 'AUDIO_OUTPUT_FLAG_PRIMARY|AUDIO_OUTPUT_FLAG_FAST' "$OVERLAY_DIR/$XML_REL")
-    if [ "$CNT" -ne 1 ]; then
+    ICNT=$(grep -c 'AUDIO_INPUT_FLAG_FAST' "$OVERLAY_DIR/$XML_REL")
+    if [ "$CNT" -ne 1 ] || [ "$ICNT" -ne 1 ]; then
         rm -f "$OVERLAY_DIR/$XML_REL"
-        die "policy edit matched $CNT times, expected 1 -- the mixPort line has changed shape; refusing"
+        die "policy edit matched out:$CNT in:$ICNT, expected 1 each -- a mixPort line has
+  changed shape. Refusing rather than shipping a half-edited policy."
     fi
     chmod 0644 "$OVERLAY_DIR/$XML_REL"
     kv "primary output flags" "AUDIO_OUTPUT_FLAG_PRIMARY|AUDIO_OUTPUT_FLAG_FAST"
+    kv "primary input flags" "AUDIO_INPUT_FLAG_FAST (was: none declared)"
 
     {
         echo "# written by bin/audio-fastpath.sh on $(date -Is)"
         echo "frames=$FRAMES"
+        echo "latency_frames=$LATFRAMES"
         echo "stock_hal_sha256=$HAL_SHA_STOCK"
         echo "overlay_hal=$OVERLAY_DIR/$HAL_REL"
         echo "overlay_xml=$OVERLAY_DIR/$XML_REL"
