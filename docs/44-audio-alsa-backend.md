@@ -1701,6 +1701,115 @@ loss is A2DP, which is what the bluez-alsa plan is for.
 
 `bin/pipewire-off.sh on` reverses all of it immediately, with no restart.
 
+## BlueALSA: built, installed and running, 2026-10-06
+
+`bluealsa/build.sh` -- builds bluez-alsa **v5.0.0** on the dev box and deploys it to bigtab01.
+**Installed and active, owning `org.bluealsa` on the system bus, with zero PipeWire processes.**
+Not yet carrying audio: no A2DP sink is connected, which is the one remaining step and needs the
+owner's headphones.
+
+### Why BlueALSA and not Android's own Bluetooth stack
+
+Giving the adapter to Android, so Fluoride does A2DP itself, is the obvious alternative and is
+wrong here: **the host's HP Bluetooth keyboard is paired to that adapter.** Handing it over costs
+the keyboard. BlueALSA keeps the adapter host-side and lets Android send PCM to it.
+
+### It cross-builds from Debian onto Fedora, and that is deliberate
+
+Per AGENTS.md all builds happen on the dev box. On bigtab01 a toolchain costs a layered install
+**and a reboot**, and a reboot there needs someone at the console for the LUKS passphrase and to
+start `sshd` by hand -- so it is much more expensive than it looks.
+
+Built on Debian 13 (glibc **2.41**), runs on Fedora 44 (glibc **2.43**). That direction is
+forward-compatible and was verified before anything was installed: `bluealsad --version` printed
+`v5.0.0` on the host with all 16 shared-library dependencies resolved, none missing, for the daemon
+*and* the ALSA plugin. Every library was already present -- `libasound`, `libdbus-1`,
+`libglib-2.0`, `libsbc`, `libbluetooth`, and `libfdk-aac`, which is why **AAC is enabled** rather
+than SBC alone.
+
+### Four install traps on an immutable host, all paid for
+
+1. **`/usr/local` is a symlink to `../var/usrlocal`.** `tar` will not extract directories through a
+   symlink onto a read-only `/usr`: every entry failed with `Invalid cross-device link`. The staged
+   paths are rewritten to `/var/usrlocal`. The binaries keep `--prefix=/usr/local`, which is
+   correct at *runtime* because the symlink resolves -- only extraction needs the real path.
+2. **A `./` member in the tarball makes `tar` try to `utime` and `chown` `/` itself**, which is
+   read-only. Every file extracted correctly and `tar` still exited non-zero, so the installer's
+   `set -e` skipped `chmod`, `restorecon` and `enable`. Fixed by archiving the top-level
+   directories by name.
+3. **`--sysconfdir=/etc` is required.** Upstream installs the real alsa snippet under
+   `$prefix/share/alsa/alsa.conf.d` and **symlinks** it from `$sysconfdir/alsa/conf.d`. At the
+   default that link lands in `/usr/local/etc`, which alsa-lib never reads. The host's
+   `/usr/share/alsa/alsa.conf` includes `/etc/alsa/conf.d` (line 13), so pointing sysconfdir there
+   puts the link where it is read with the target in writable `/usr/local`. The first attempt
+   instead *moved* the file and deleted `share/`, shipping a dangling symlink -- caught by a guard
+   added for it, which then had to be made DESTDIR-aware, since an absolute target is correct after
+   extraction and only looks dangling inside a stage.
+4. **`--localstatedir=/var`**, or the daemon warns `Couldn't create directory:
+   /usr/local/var/lib/bluealsa` at every start.
+
+Also: the dev box has `libtoolize` but **no `libtool`** binary, so checking for the latter failed a
+build that worked. `autoreconf --install` needs the former.
+
+### Group `audio` cannot be joined here
+
+Upstream's D-Bus policy grants `own_prefix=org.bluealsa` to root and `send_destination` to group
+**audio**. That group exists at gid 63 but is defined in the **base image's `/usr/lib/group`**,
+which is read-only -- so `usermod -aG audio jmelanso` **exits 0 and changes nothing**; `id` still
+reports only `jmelanso` and `wheel`. Shadowing it by editing `/etc/group` would work and is the
+conventional ostree answer, but it is system-database surgery for one ACL and invisible to anyone
+reading this directory.
+
+Instead `build.sh` stages `/etc/dbus-1/system.d/org.bluealsa-local.conf` naming the user. This is
+not cosmetic: **the Android side will connect as that uid.** The container has no idmap, so
+Android's `AID_SYSTEM` (1000) *is* host uid 1000.
+
+### Where it runs
+
+| path | why |
+|---|---|
+| `/var/usrlocal/bin/` | binaries; `/usr/local` resolves here |
+| `/var/usrlocal/lib/alsa-lib/` | the ALSA plugin |
+| `/var/usrlocal/share/alsa/alsa.conf.d/` | the real `pcm.bluealsa` snippet |
+| `/etc/alsa/conf.d/` | symlink to it, where alsa-lib reads |
+| `/etc/dbus-1/system.d/` | upstream policy + our user drop-in |
+| `/etc/systemd/system/bluealsad.service` | the unit |
+
+Nothing under `/usr` is written and **no reboot is needed.** Upstream also installs
+`/usr/share/dbus-1/interfaces/org.bluealsa.xml`; that path is read-only here and the file is only
+D-Bus introspection metadata, so it is skipped deliberately.
+
+`ExecStart=/usr/local/bin/bluealsad -p a2dp-source` -- the host sends *to* headphones, so the host
+is the A2DP **source**. SELinux label comes out `bin_t`, so systemd can exec it; `--status` prints
+the label precisely because executing from `/var/usrlocal` under Enforcing is where that would
+fail.
+
+The unit is deliberately **not** upstream's heavily sandboxed one (`ProtectSystem=strict`, `User=`).
+That sandbox and an ostree `/var/usrlocal` binary under SELinux interact in ways not worth debugging
+during a first bring-up. Upstream's version in `misc/systemd/bluealsa.service.in` is the right
+target once A2DP is proven end to end.
+
+### What remains, and the open architectural choice
+
+Nothing can carry audio until a sink is connected. After that, Android has to reach `bluealsa`, and
+there are two shapes -- the choice is **not yet made**, and should be made with the host side
+proven:
+
+- **Guest plugin.** `asound.conf` points the HAL's `"pulse"` name at `pcm.bluealsa` inside the
+  container. Needs `libasound_module_pcm_bluealsa.so` **and libdbus** cross-compiled for
+  bionic/i686 (the image has no libdbus), the D-Bus system socket bind-mounted in, and
+  `ALSA_PLUGIN_DIR` set for the HAL via an overlayed init `.rc`. Architecturally clean, no extra
+  hop. Both the host's `libasound.so.2` and the image's `libasound.so` honour `ALSA_PLUGIN_DIR`,
+  which is what makes the plugin placeable at all.
+- **`snd-aloop` + a host bridge.** Android writes to `hw:Loopback`, a host process reads the other
+  end and writes to `pcm.bluealsa`. **No cross-compiling whatsoever.** Costs a buffer hop and a
+  clock-sync concern -- irrelevant against A2DP's own 100-200 ms.
+
+The second is far cheaper and the latency argument does not favour the first, because A2DP
+dominates either way. Either must be a **selectable arm**, not the default: routing all audio
+through a loopback would undo the 10.67 ms fast path that this whole goal was about. Bluetooth is a
+per-session choice, the same shape as `bin/alsa-arm.sh`'s existing arms.
+
 ### Still open after this
 
 - **`SCHED_FIFO` for the FastMixer.** It wants it; the container's `Max realtime priority` is 10
