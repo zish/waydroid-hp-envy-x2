@@ -1632,10 +1632,11 @@ package-level query was misleading: `rpm -q --whatrequires pipewire` named only
 package name.
 
 Masking the units gets the stated goal exactly -- nothing running -- while every library stays in
-place for those programs to keep linking. Six units, all of which *run*:
+place for those programs to keep linking. Five units, all of which *run* -- and
+**not** `pipewire-pulse.service`, for the reason below:
 
 ```
-pipewire.service  pipewire.socket  pipewire-pulse.service
+pipewire.service  pipewire.socket
 wireplumber.service  filter-chain.service  waydroid-pwd.service
 ```
 
@@ -1664,20 +1665,45 @@ SDDM greeter, with no autologin, needing someone at the keyboard.
 
 **The way through is to notice who actually creates that socket.** `pipewire-pulse.socket` is a
 *pure systemd socket unit* -- `ListenStream=%t/pulse/native`, `ConditionUser=!root`, and **no
-`Requires=` on `pipewire.service`**. systemd binds it. `pipewire-pulse.service` is
-socket-activated and, with nothing connecting any more, already sat `inactive dead` while the
-socket sat `active listening`.
+`Requires=` on `pipewire.service`** -- so systemd binds it, and `pipewire-pulse.service` is only
+socket-activated.
 
-So: **mask everything that runs, and leave `pipewire-pulse.socket` enabled.** The mount source is
-recreated at every login by systemd with zero PipeWire behind it. No shim file, and no tmpfiles
-ordering race against an SDDM-launched session script -- which was the first design considered and
-rejected, because betting a login against `systemd-tmpfiles-setup.service` winning a race is
-exactly how the greeter trap happens. If anything ever does connect to that socket, systemd tries
-to start the masked service and the connection is refused; nothing in the container connects,
-because the HAL resolves `"pulse"` through `asound.conf` to `hw:1,0`.
+#### The near-miss: systemd will not start a socket whose triggered service is masked
 
-`off` verifies the socket survived and **rolls itself back** if it did not, rather than leaving the
-machine un-loginable.
+The first version of this masked `pipewire-pulse.service` along with everything else, on the
+reasoning that the *socket* is what matters. **That was wrong, and it took a logout to find out.**
+
+At the next login `pipewire-pulse.socket` failed to start -- `systemctl --user start` returns
+`Job failed`, and the unit sat `inactive (dead)` with its last `Listening on` entry from the
+*previous* session. `/run/user/1000/pulse/native` was therefore never bound.
+
+**The Waydroid session came up anyway, and that is the dangerous part.** A **stale** socket file
+from the previous session was still present: `ctime 19:07:06` against a `/run/user/1000` whose own
+ctime was `22:42`, so the runtime directory had not been cleaned on logout. The bind mount found a
+source, the session started, and everything looked correct. On a real **reboot** that file would
+not exist and the session would have died on a fatal mount entry, at the greeter -- the exact
+failure this design was meant to prevent, deferred to whenever the machine next rebooted.
+
+**And the verification missed it, because it tested the wrong thing.** `off` checked
+`[ -e "$PULSE_SOCK" ]` -- that the *file existed* -- which a stale file satisfies perfectly. A
+presence check cannot distinguish "systemd bound this" from "yesterday left this here".
+
+Corrected on both counts:
+
+- `pipewire-pulse.service` stays **unmasked**. It stays `inactive` regardless, because it is
+  socket-activated and nothing connects -- the HAL resolves `"pulse"` through `asound.conf` to
+  `hw:1,0`. Measured after the fix: socket `active`, service `inactive`, **PipeWire process count
+  0**.
+- `status` and `off` now test that the **socket unit is active**, and print the socket's `ctime`
+  beside the session start time so a stale file reads as a warning rather than as reassurance.
+  After the fix: socket `ctime=22:45:20` against a session that began at `22:44:42` -- bound this
+  session, not inherited.
+
+`off` rolls itself back if that check fails, rather than leaving the machine un-loginable.
+
+A tmpfiles shim was the other candidate and is still rejected: betting a login against
+`systemd-tmpfiles-setup.service` winning a race with an SDDM-launched session script is how the
+greeter trap happens. A real socket, bound by systemd, has no race.
 
 ### Why nothing was lost here, specifically
 

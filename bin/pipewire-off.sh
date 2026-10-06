@@ -90,9 +90,30 @@ WDUID=$(id -u "$WDUSER" 2>/dev/null) || WDUID=1000
 RUNTIME=/run/user/$WDUID
 PULSE_SOCK=$RUNTIME/pulse/native
 
-# Everything that RUNS. pipewire-pulse.socket is deliberately NOT in this list.
-UNITS="pipewire.service pipewire.socket pipewire-pulse.service wireplumber.service filter-chain.service waydroid-pwd.service"
-KEEP="pipewire-pulse.socket"
+# Everything that RUNS.
+UNITS="pipewire.service pipewire.socket wireplumber.service filter-chain.service waydroid-pwd.service"
+
+# Left UNMASKED on purpose, and pipewire-pulse.SERVICE is in here for a reason
+# that cost a near-miss on 2026-10-06.
+#
+# systemd REFUSES TO START A SOCKET UNIT WHOSE TRIGGERED SERVICE IS MASKED. The
+# first version of this script masked pipewire-pulse.service along with
+# everything else, so at the next login pipewire-pulse.socket failed to start
+# ("Job failed") and /run/user/1000/pulse/native was never bound. The Waydroid
+# session nonetheless came up -- because a STALE socket file from the previous
+# session was still sitting in /run/user/1000, which had not been cleaned. On a
+# real reboot that file would not exist and the session would have died on the
+# mount entry, at the greeter. The `off` verification missed it because it
+# tested that the FILE EXISTED, which a stale file satisfies.
+#
+# So: pipewire-pulse.service stays unmasked, and stays INACTIVE anyway, because
+# it is socket-activated and nothing connects to it -- the HAL resolves "pulse"
+# through asound.conf to hw:1,0. Verified: socket active, service inactive,
+# pipewire process count 0. `status` now checks the SOCKET UNIT IS ACTIVE rather
+# than that a file is present, and the socket's ctime proves systemd bound it
+# this session rather than leaving yesterday's behind.
+KEEP_UNMASKED="pipewire-pulse.service"
+KEEP_RUNNING="pipewire-pulse.socket"
 
 VERB=${1:-status}
 
@@ -134,17 +155,29 @@ report() {
 
     head_ "Units"
     for u in $UNITS; do kv "$u" "$(ustate "$u")"; done
-    for u in $KEEP;  do kv "$u  <- KEPT" "$(ustate "$u")"; done
+    for u in $KEEP_RUNNING;  do kv "$u  <- MUST BE ACTIVE" "$(ustate "$u")"; done
+    for u in $KEEP_UNMASKED; do kv "$u  <- MUST BE UNMASKED" "$(ustate "$u")"; done
 
     head_ "The thing that must not break"
+    # Presence is NOT the test. A stale socket file from a previous session
+    # satisfies it and hides a socket unit that is failing to start.
+    SOCK_STATE=$(uctl is-active pipewire-pulse.socket | head -1 | tr -d '[:space:]')
+    kv "pipewire-pulse.socket" "${SOCK_STATE:-inactive}"
     if [ -e "$PULSE_SOCK" ]; then
-        kv "$PULSE_SOCK" "EXISTS ($(stat -c %A "$PULSE_SOCK" 2>/dev/null))"
-        say "Waydroid's unconditional LXC mount entry has a source, so a session"
-        say "start will not fail on it. See the header."
+        kv "$PULSE_SOCK" "$(stat -c '%A  ctime=%z' "$PULSE_SOCK" 2>/dev/null)"
+        kv "this session started" "$(stat -c %z /run/user/"$WDUID" 2>/dev/null)"
     else
-        warn "$PULSE_SOCK IS MISSING"
-        warn "The next waydroid session start will FAIL on a fatal mount entry"
-        warn "and leave the machine at the SDDM greeter. Run 'on' before logging out."
+        kv "$PULSE_SOCK" "MISSING"
+    fi
+    if [ "${SOCK_STATE:-}" = "active" ] && [ -e "$PULSE_SOCK" ]; then
+        say "systemd has the socket bound, so Waydroid's unconditional LXC mount"
+        say "entry has a real source and a session start will not fail on it."
+    else
+        warn "THE SOCKET UNIT IS NOT ACTIVE."
+        warn "If $PULSE_SOCK exists at all it is stale, and the next"
+        warn "reboot will strand the Waydroid session at the SDDM greeter."
+        warn "Fix: unmask pipewire-pulse.service (systemd will not start a socket"
+        warn "whose triggered service is masked), then start pipewire-pulse.socket."
     fi
 
     head_ "Waydroid audio"
@@ -166,24 +199,34 @@ off)
         uctl mask --now "$u" >/dev/null 2>&1
         kv "$u" "masked, stopped"
     done
-    say "left alone: $KEEP -- it is what creates $PULSE_SOCK"
+    # Must be unmasked BEFORE the socket can start -- see KEEP_UNMASKED above.
+    for u in $KEEP_UNMASKED; do
+        uctl unmask "$u" >/dev/null 2>&1
+        kv "$u" "left UNMASKED (socket-activated; nothing connects to it)"
+    done
+    for u in $KEEP_RUNNING; do
+        uctl start "$u" >/dev/null 2>&1
+        kv "$u" "started -- it is what binds $PULSE_SOCK"
+    done
 
     # Give systemd a moment to reap, then check the two things that matter.
     N=$(procs)
     head_ "Did it work, and is the session still startable?"
     kv "PipeWire processes now" "$N"
 
-    if [ ! -e "$PULSE_SOCK" ]; then
-        warn "$PULSE_SOCK vanished -- that would strand the next login at the greeter."
+    SOCK_STATE=$(uctl is-active pipewire-pulse.socket | head -1 | tr -d '[:space:]')
+    kv "pipewire-pulse.socket" "${SOCK_STATE:-inactive}"
+    if [ "${SOCK_STATE:-}" != "active" ] || [ ! -e "$PULSE_SOCK" ]; then
+        warn "the pulse socket is not bound by systemd -- that strands the next boot at the greeter."
         warn "ROLLING BACK rather than leaving the machine in that state."
-        for u in $UNITS; do uctl unmask "$u" >/dev/null 2>&1; done
+        for u in $UNITS $KEEP_UNMASKED; do uctl unmask "$u" >/dev/null 2>&1; done
         uctl start pipewire.socket >/dev/null 2>&1
         uctl start pipewire.service >/dev/null 2>&1
         uctl start wireplumber.service >/dev/null 2>&1
         die "rolled back. Investigate before retrying: the socket was expected to
   survive because systemd, not PipeWire, binds it."
     fi
-    kv "$PULSE_SOCK" "still exists -- session start is safe"
+    kv "$PULSE_SOCK" "bound by systemd -- session start is safe"
 
     if [ "$N" -ne 0 ]; then
         warn "$N PipeWire process(es) still alive; something restarted them."
@@ -194,7 +237,7 @@ off)
 
 on)
     head_ "Unmasking and starting"
-    for u in $UNITS; do
+    for u in $UNITS $KEEP_UNMASKED; do
         uctl unmask "$u" >/dev/null 2>&1
         kv "$u" "unmasked"
     done
