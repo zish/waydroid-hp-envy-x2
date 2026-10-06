@@ -1815,7 +1815,7 @@ That sandbox and an ostree `/var/usrlocal` binary under SELinux interact in ways
 during a first bring-up. Upstream's version in `misc/systemd/bluealsa.service.in` is the right
 target once A2DP is proven end to end.
 
-### A2DP playback does NOT work yet, and here is exactly where it stops
+### A2DP playback: where it stopped (SUPERSEDED -- root cause found, see below)
 
 Headphones ("Earmuffs", `60:AB:D2:41:04:39`) paired and **connected**, BlueALSA exposes the PCM,
 and the daemon owns its bus name. Playback still fails. Recording this honestly because the
@@ -1887,6 +1887,129 @@ instead of inferring it. That is the cheapest decisive move and it has not been 
 `bluealsad` active, headphones connected, PCM present, **0 PipeWire processes**, Waydroid session
 running with the fast path live. Bluetooth audio does not play. `bin/pipewire-off.sh on` restores
 PipeWire and with it working host Bluetooth audio, if that trade is wanted before this is finished.
+
+### ROOT CAUSE: a dontaudit'ed SELinux denial on BlueALSA's PCM pipe
+
+**Found.** BlueALSA hands a client its PCM data channel as a **pipe**, passed as a Unix FD in the
+reply to `org.bluealsa.PCM1.Open()`. Relaying that reply needs dbus-broker to touch the pipe, and
+the base policy has no rule for it:
+
+```
+avc: denied { write } for pid=888 comm="dbus-broker" path="pipe:[9193844]" dev="pipefs"
+     scontext=system_u:system_r:system_dbusd_t:s0-s0:c0.c1023
+     tcontext=system_u:system_r:unconfined_service_t:s0
+     tclass=fifo_file permissive=0
+```
+
+**The rule is `dontaudit`'ed upstream, so it is ENFORCED while logging nothing.** That is the whole
+reason this took so long, and it is the same family as
+[docs/40](40-binder-nice.md)/[docs/42](42-selinux.md) and `waydroid_backlight`: a denial against a
+*domain*, invisible to `ausearch`, where being uid 0 does not help because SELinux denies the
+domain and not the user.
+
+The fix is one rule, in `artifacts/bluealsa/waydroid_bluealsa.cil`, CIL rather than `.te` for the
+house reason -- `semodule` compiles CIL directly, so it needs no `selinux-policy-devel` and
+therefore no layered install and no reboot:
+
+```
+(allow system_dbusd_t unconfined_service_t (fifo_file (write)))
+```
+
+#### Why it presented so badly
+
+The symptom was `aplay: set_params:1462: Unable to install hw params`, preceded by
+`bluealsa-pcm.c: Couldn't open PCM: Remote peer disconnected`. Three things made that misleading:
+
+1. **The error names the wrong party.** "Remote peer disconnected" exists in neither bluez-alsa nor
+   libdbus -- `grep -a -c` puts it in **`/usr/bin/dbus-broker` alone**. The broker drops the
+   *sender's* connection over the denied fd and answers the waiting client with that message. So the
+   client blames the peer, and the peer then logs `Lost BlueALSA D-Bus name` and `exit(1)` because
+   GDBus reports a closed connection as a lost name.
+2. **`set_params` was never the failure.** The debug build shows
+   `bluealsa_set_hw_constraint: Setting constraints` succeeding; the failure is inside
+   `bluealsa_hw_params` at the `Open()` call. `--dump-hw-params` returning generic unconstrained
+   ranges was a *consequence* of the daemon being gone, not evidence of a constraint bug.
+3. **No AVC anywhere**, including with `--audit` on in dbus-broker, because of the dontaudit.
+
+What cracked it: `setenforce 0` made playback work **immediately and completely** under systemd,
+and `semodule -DB` then made the denial visible. Both are cheap and should have come earlier.
+
+#### Two further real bugs found on the way, both now fixed in `bluealsa/build.sh`
+
+- **`Type=dbus` in the unit killed the daemon.** With `Type=dbus` and `BusName=org.bluealsa`,
+  bluealsad died on every `Open()`; as `Type=simple`, or run by hand, it survives the identical
+  sequence. The unit now uses `Type=simple` with a comment saying why.
+- **`--keep-alive=0` (the default) SEGFAULTS bluetoothd 5.87.** Tearing the transport down the
+  instant the last client closes takes this path, identically in six captured coredumps:
+
+  ```
+  #0 queue_remove  #1 media_endpoint_remove  #2 a2dp_unregister_sep
+  #3 transport_a2dp_suspend  #4 service_filter  #5 message_filter
+  #6 dbus_connection_dispatch
+  ```
+
+  `--keep-alive=5` avoids it. **This is an upstream BlueZ bug and is worth reporting** -- a client
+  opening and closing an A2DP transport should not crash `bluetoothd`. Queue for
+  [docs/57](57-upstream-queue.md).
+
+#### A red herring worth recording, because it cost real time
+
+The debug build logs `SBC setup: 0 Hz JointStereo ... => 0 bps`, which looks like a fatal
+misconfiguration and is not. `sbc_print_internals` in `src/codec-sbc.c` does
+`rate[sbc->frequency]` where the table is keyed by the **A2DP bitmask**
+(`SBC_SAMPLING_FREQ_48000` = 0x01) while `sbc->frequency` holds **libsbc's enum**
+(`SBC_FREQ_48000` = 3). `rate[3]` is an unset slot, so it prints 0. The encoder is configured
+correctly; only the message lies. It is a bug in bluez-alsa's own diagnostic, present only in a
+`--enable-debug` build, and also worth reporting upstream.
+
+#### Excluded by measurement, not by reasoning
+
+v5.0.0 **and** v4.3.1 fail identically, so it is not a v5 regression. Also excluded: codec (SBC and
+AAC alike), format/rate/channels (the PCM reports exactly what was offered), period and buffer
+limits (`PERIODS 2..1024`, `PERIOD_BYTES >= 1920`, both satisfied), the profile string, bus mismatch
+(`DBUS_BUS_SYSTEM` appears once in the tree), dbus-broker restarts (PID 888 since boot), broker fd
+exhaustion (**74** fds of `--max-fds 4096`), and the malformed D-Bus policy XML I had shipped --
+a real bug, fixed, but not this one.
+
+#### Honest note on how narrow the rule is
+
+Narrower than `waydroid_backlight`, which could invent a private type because it guarded a *file*.
+A pipe takes the type of the process that created it, so there is nothing to relabel: narrowing
+this properly means giving bluealsad **its own domain** with a transition from `init_t` instead of
+leaving it in `unconfined_service_t`. That is the correct long-term fix and is not done. What the
+rule grants meanwhile is dbus-broker writing pipes owned by unconfined services -- bounded by
+`unconfined_service_t` already being unconfined, and by dbus-broker being the only subject.
+
+#### State: working, in the committed configuration
+
+**Done and verified.** `semodule -B` restored the dontaudit rules, and
+`artifacts/bluealsa/install.sh` loaded `waydroid_bluealsa`. With that in place:
+
+```
+aplay -D bluealsa     plays, no error
+bluealsad             v5.0.0, active            codec: AAC
+bluetoothd            active (no core dump)
+SELinux               Enforcing
+PipeWire              0 processes
+```
+
+Proven four ways in total: daemon by hand under Enforcing; under systemd with SELinux permissive;
+and then twice under systemd with SELinux **Enforcing** and the module loaded -- once on the
+v4.3.1 debug build, once on the v5.0.0 release build with AAC renegotiated.
+
+`artifacts/bluealsa/install.sh` installs the policy and nothing else;
+`bluealsa/build.sh --install` installs the daemon and nothing else. **Either alone leaves Bluetooth
+audio broken**, which is why each says so in its header.
+
+One wrinkle worth recording: **CIL takes no `(require ...)` block.** That is `.te` syntax, and
+`semodule` rejects it with *Unknown keyword require / Failed to build AST*. CIL resolves type and
+class names against the already-loaded policy, which is why `waydroid_backlight.cil` also names
+`sysfs_t` and `udev_t` bare. The first version of the module carried a `require` block copied from
+`audit2allow` output and failed to load.
+
+Still outstanding, and unchanged by this: the **Android-to-BlueALSA bridge** is not built, so this
+is host-side Bluetooth audio only. Nothing in Waydroid reaches `pcm.bluealsa` yet. The architectural
+choice below is still open.
 
 ### What remains, and the open architectural choice
 

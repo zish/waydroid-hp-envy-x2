@@ -74,7 +74,10 @@
 set -euo pipefail
 
 HOST="${HOST:-10.42.0.137}"
-VERSION=v5.0.0
+# BA_VERSION overrides the release built. v5.0.0 is the default; v4.3.1 is the
+# previous stable and is worth reaching for when a v5-specific regression is
+# suspected -- see docs/44 on the Open()/fd-passing failure.
+VERSION="${BA_VERSION:-v5.0.0}"
 REPO=https://github.com/arkq/bluez-alsa.git
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -84,8 +87,20 @@ SRC="$OUT/src"
 STAGE="$OUT/stage"
 TARBALL="$OUT/bluealsa-$VERSION.tar"
 
+# v5 renamed the daemon bluealsad and the CLI bluealsactl; v4 calls them bluealsa
+# and bluealsa-cli, and ships a bluealsa.conf rather than org.bluealsa.conf.
+# Everything below branches on that rather than hard-coding v5 names.
+case "$VERSION" in
+	v5.*) BA_BIN=bluealsad; BA_CLI=bluealsactl; BA_EXTRA_CONF=""      ;;
+	*)    BA_BIN=bluealsa;  BA_CLI=bluealsa-cli; BA_EXTRA_CONF="--enable-cli" ;;
+esac
+
 # The host sends TO headphones, so the host is the A2DP *source*.
-BLUEALSAD_ARGS="-p a2dp-source"
+# --keep-alive: with the default 0.0 the transport is torn down the instant the
+# last PCM client closes, and that teardown path (transport_a2dp_suspend ->
+# a2dp_unregister_sep -> media_endpoint_remove -> queue_remove) SEGFAULTS
+# bluetoothd 5.87. Delaying it avoids the crash. See docs/44.
+BLUEALSAD_ARGS="-p a2dp-source --keep-alive=5"
 
 # Who is allowed to talk to org.bluealsa besides root.
 #
@@ -128,15 +143,17 @@ kv() { printf '  %-36s %s\n' "$1" "$2"; }
 hd() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 hd "Installed"
-for f in /usr/local/bin/bluealsad /usr/local/bin/bluealsactl \
+for f in /usr/local/bin/bluealsad /usr/local/bin/bluealsa \
+         /usr/local/bin/bluealsactl /usr/local/bin/bluealsa-cli \
          /usr/local/lib/alsa-lib/libasound_module_pcm_bluealsa.so \
          /etc/alsa/conf.d/20-bluealsa.conf \
          /etc/dbus-1/system.d/org.bluealsa.conf \
          /etc/systemd/system/bluealsad.service; do
 	kv "$(basename "$f")" "$([ -e "$f" ] && echo present || echo ABSENT)"
 done
-kv "version" "$(/usr/local/bin/bluealsad --version 2>/dev/null || echo 'n/a')"
-kv "SELinux label (bluealsad)" "$(ls -Z /usr/local/bin/bluealsad 2>/dev/null | awk '{print $1}')"
+BIN=$(ls /usr/local/bin/bluealsad /usr/local/bin/bluealsa 2>/dev/null | head -1)
+kv "version" "$("${BIN:-/bin/false}" --version 2>/dev/null || echo 'n/a')"
+kv "SELinux label" "$(ls -Z "${BIN:-/dev/null}" 2>/dev/null | awk '{print $1}')"
 
 hd "Daemon"
 kv "bluealsad.service" "$(systemctl is-enabled bluealsad.service 2>/dev/null || echo 'not-enabled')/$(systemctl is-active bluealsad.service 2>/dev/null || echo inactive)"
@@ -152,10 +169,11 @@ echo "  connected devices:"
 bluetoothctl devices Connected 2>/dev/null | sed 's/^/      /' || echo "      (none)"
 
 hd "BlueALSA PCMs"
-if [ -x /usr/local/bin/bluealsactl ]; then
-	bluealsactl list-pcms 2>&1 | sed 's/^/      /' | head -20
+CLI=$(ls /usr/local/bin/bluealsactl /usr/local/bin/bluealsa-cli 2>/dev/null | head -1)
+if [ -n "$CLI" ]; then
+	"$CLI" list-pcms 2>&1 | sed 's/^/      /' | head -20
 else
-	echo "      bluealsactl not installed"
+	echo "      no CLI tool installed"
 fi
 
 hd "Client access"
@@ -174,8 +192,10 @@ if [ "$DO_UNINSTALL" = 1 ]; then
 systemctl disable --now bluealsad.service >/dev/null 2>&1
 rm -f /etc/systemd/system/bluealsad.service
 rm -f /etc/alsa/conf.d/20-bluealsa.conf
-rm -f /etc/dbus-1/system.d/org.bluealsa.conf /etc/dbus-1/system.d/org.bluealsa-local.conf
+rm -f /etc/dbus-1/system.d/org.bluealsa.conf /etc/dbus-1/system.d/bluealsa.conf /etc/dbus-1/system.d/org.bluealsa-local.conf
+rm -rf /etc/systemd/system/bluealsad.service.d
 rm -f /usr/local/bin/bluealsad /usr/local/bin/bluealsactl \
+      /usr/local/bin/bluealsa /usr/local/bin/bluealsa-cli \
       /usr/local/bin/bluealsa-aplay /usr/local/bin/a2dpconf
 rm -rf /usr/local/lib/alsa-lib /usr/local/share/alsa
 systemctl daemon-reload
@@ -215,13 +235,19 @@ if [ "$DO_BUILD" = 1 ]; then
 	# alsa.conf actually includes it, with the target in writable /usr/local.
 	# The first version of this script instead moved the file and deleted
 	# share/, which left a dangling symlink in the tarball.
+	# BA_DEBUG=1 adds --enable-debug, which is what defines DEBUG and so compiles
+	# in snd_debug() -- stubbed out of a release build by src/asound/log.h. Without
+	# it BLUEALSA_LOG_LEVEL=debug produces nothing from the ALSA plugin, which is
+	# what stalled the A2DP investigation: the plugin could not say which hw
+	# constraint it was rejecting.
 	( cd "$SRC" && ./configure \
+		${BA_DEBUG:+--enable-debug} \
 		--prefix=/usr/local \
 		--sysconfdir=/etc \
 		--localstatedir=/var \
 		--with-alsaplugindir=/usr/local/lib/alsa-lib \
 		--with-dbusconfdir=/etc/dbus-1/system.d \
-		--enable-a2dpconf \
+		--enable-a2dpconf $BA_EXTRA_CONF \
 		--enable-aac >/dev/null )
 
 	echo "== make"
@@ -297,9 +323,13 @@ After=bluetooth.service
 Wants=bluetooth.service
 
 [Service]
-Type=dbus
-BusName=org.bluealsa
-ExecStart=/usr/local/bin/bluealsad $BLUEALSAD_ARGS
+# Type=simple, NOT Type=dbus, and this is load-bearing. Under Type=dbus (with
+# BusName=org.bluealsa) the daemon died with "Lost BlueALSA D-Bus name" the
+# instant a client called PCM1.Open() -- the call whose reply carries two Unix
+# FDs -- and took bluetoothd down with it. Run manually, or as Type=simple, it
+# survives the identical sequence. See docs/44.
+Type=simple
+ExecStart=/usr/local/bin/$BA_BIN $BLUEALSAD_ARGS
 Restart=on-failure
 RestartSec=2
 
@@ -342,6 +372,11 @@ if [ "$DO_INSTALL" = 1 ]; then
 	ssh "$HOST" 'sudo sh -s' <<'REMOTE'
 set -eu
 # --no-same-owner: the stage is owned by the build user, and these belong to root.
+# Remove the other release's binaries and any ad-hoc drop-in, so switching
+# between v4 and v5 cannot leave a unit pointing at a binary that is gone.
+rm -rf /etc/systemd/system/bluealsad.service.d
+rm -f /usr/local/bin/bluealsad /usr/local/bin/bluealsactl \
+      /usr/local/bin/bluealsa /usr/local/bin/bluealsa-cli
 tar xf /tmp/bluealsa.tar -C / --no-same-owner
 rm -f /tmp/bluealsa.tar
 chmod 0755 /usr/local/bin/bluealsad /usr/local/bin/bluealsactl \

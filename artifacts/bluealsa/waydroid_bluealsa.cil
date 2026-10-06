@@ -1,0 +1,55 @@
+;; waydroid_bluealsa -- let dbus-broker relay BlueALSA's PCM pipe to clients.
+;;
+;; WHY THIS EXISTS
+;;
+;; BlueALSA hands a client its PCM data channel as a PIPE, passed as a Unix FD
+;; in the reply to org.bluealsa.PCM1.Open(). Relaying that reply requires
+;; dbus-broker to access the pipe, and the base policy has no rule for
+;; system_dbusd_t writing a fifo_file owned by unconfined_service_t -- which is
+;; what bluealsad runs as under systemd:
+;;
+;;   avc: denied { write } for pid=888 comm="dbus-broker" path="pipe:[9193844]"
+;;        scontext=system_u:system_r:system_dbusd_t:s0-s0:c0.c1023
+;;        tcontext=system_u:system_r:unconfined_service_t:s0
+;;        tclass=fifo_file permissive=0
+;;
+;; The rule is dontaudit'ed upstream, so it is ENFORCED while logging nothing.
+;; That is the whole reason this cost a long investigation: it presented as
+;;
+;;   bluealsa-pcm.c: Couldn't open PCM: Remote peer disconnected
+;;   aplay: set_params:1462: Unable to install hw params
+;;
+;; with no AVC anywhere, because dbus-broker drops the SENDER's connection and
+;; answers the waiting client with that message -- a string that exists only in
+;; /usr/bin/dbus-broker, not in libdbus and not in bluez-alsa. bluealsad then
+;; logs "Lost BlueALSA D-Bus name" and exits(1). Setting SELinux permissive made
+;; playback work immediately; `semodule -DB` made the denial visible.
+;;
+;; Same family as waydroid_backlight: a dontaudit'ed denial against a domain,
+;; invisible to ausearch, where being uid 0 does not help because SELinux denies
+;; the domain and not the user.
+;;
+;; Written in CIL rather than .te on purpose: semodule compiles CIL directly, so
+;; this needs no selinux-policy-devel, which on an rpm-ostree host would cost a
+;; layered install and a reboot.
+;;
+;; HOW NARROW THIS IS, HONESTLY
+;;
+;; Less narrow than waydroid_backlight, and the difference is worth stating.
+;; That module could invent a private type because it guarded a FILE, which can
+;; be relabelled. A pipe takes the type of the process that created it, so there
+;; is nothing to relabel: narrowing this properly means giving bluealsad its own
+;; domain with a transition from init_t, rather than leaving it in
+;; unconfined_service_t. That is the correct long-term fix and is not done here.
+;;
+;; What this grants meanwhile: dbus-broker may write pipes belonging to
+;; unconfined services. It is a widening, bounded by the fact that
+;; unconfined_service_t is already unconfined, and by dbus-broker being the only
+;; subject. It is the minimum that makes A2DP work.
+
+;; No (require ...) block: that is .te syntax and CIL rejects it with
+;; "Unknown keyword require / Failed to build AST". CIL resolves names against
+;; the already-loaded policy, which is why waydroid_backlight.cil also names
+;; sysfs_t and udev_t bare.
+
+(allow system_dbusd_t unconfined_service_t (fifo_file (write)))
