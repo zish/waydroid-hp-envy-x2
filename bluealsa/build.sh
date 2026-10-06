@@ -198,8 +198,21 @@ rm -f /usr/local/bin/bluealsad /usr/local/bin/bluealsactl \
       /usr/local/bin/bluealsa /usr/local/bin/bluealsa-cli \
       /usr/local/bin/bluealsa-aplay /usr/local/bin/a2dpconf
 rm -rf /usr/local/lib/alsa-lib /usr/local/share/alsa
+# Only bluealsad's own state dirs. /usr/local is shared -- /usr/local/bin
+# holds this project's `waydroid` wrapper -- so nothing broader is removed.
+# The second path is where an earlier --localstatedir bug put the state.
+rm -rf /var/lib/bluealsa /usr/local/var/lib/bluealsa
+rmdir -p --ignore-fail-on-non-empty /usr/local/var/lib 2>/dev/null || true
 systemctl daemon-reload
-systemctl reload dbus >/dev/null 2>&1 || systemctl restart dbus-broker >/dev/null 2>&1 || true
+# RELOAD ONLY -- the same rule as the install path, and this copy was missed
+# when that one was fixed. `systemctl restart dbus-broker` severs every D-Bus
+# connection on the machine: the desktop session, SDDM and Waydroid included.
+# A stale policy for a daemon that is already gone is harmless; a restarted
+# broker is not.
+if ! systemctl reload dbus 2>/dev/null; then
+    echo "  WARNING: could not reload dbus; the removed policy is still cached." >&2
+    echo "  It references a daemon that no longer exists, so this is harmless." >&2
+fi
 echo "  removed. Nothing was modified in place; /usr was never written."
 REMOTE
 	exit 0
