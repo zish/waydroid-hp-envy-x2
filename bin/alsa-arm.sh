@@ -240,7 +240,11 @@ old_profile=$OLDPROF
 had_mount=$HAD_MOUNT
 had_overlay=$HAD_OVERLAY
 had_udev=$HAD_UDEV
-snd_nodes=$(snd_nodes)
+# Quoted: this is a multi-word list, and the state file is read with `.`.
+# Unquoted, sourcing it assigned only the first path and then tried to
+# EXECUTE the second -- "/dev/snd/pcmC1D0p: Permission denied" during a
+# revert, with the rest of the list silently lost.
+snd_nodes="$(snd_nodes)"
 EOF
     say "wrote revert state to $STATE"
 
@@ -379,8 +383,18 @@ off() {
         udevadm control --reload-rules
         udevadm trigger --subsystem-match=sound
         sleep 1
+        # Removing the rule is not enough, and trusting the trigger to undo it
+        # is the bug this comment exists for: udev applies MODE when a rule
+        # MATCHES, so with the rule gone there is nothing left to set the mode
+        # back and the nodes stay 0666 until the next boot recreates devtmpfs.
+        # Measured: card 1 sat at crw-rw-rw- after a full `off` while every
+        # untouched node on the machine -- card 0, seq, hwC*D* -- was 0660.
+        # So restore it explicitly. 0660 is not a guess: it is what
+        # /usr/lib/udev/rules.d/50-udev-default.rules gives SUBSYSTEM=="sound"
+        # and what every node this script never touched actually has.
         for n in ${snd_nodes:-}; do
-            [ -e "$n" ] && say "$(stat -c '%n %A' "$n")"
+            [ -e "$n" ] || continue
+            chmod 0660 "$n" && say "$(stat -c '%n %A' "$n") (restored)"
         done
     else
         say "$UDEV predated this script -- left in place"
