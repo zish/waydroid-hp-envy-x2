@@ -1,0 +1,47 @@
+* Tue Oct 06 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package, and it settles the decision docs/45 left open: the avahi
+  reflector arrives as an idempotent in-place merge of two keys in
+  /etc/avahi/avahi-daemon.conf, not as a copy of that file. Shipping the whole
+  file would clobber every future Fedora change to it, and avahi has no conf.d
+  directory to drop into instead.
+- The firewalld half stops being a file edit at all. The source-port rule goes
+  in through firewall-cmd, which is additive, queryable and removable by name,
+  so firewalld's zone file stays firewalld's and this package owns no part of
+  it. A packaged firewalld service definition was considered and rejected: a
+  service applies to both address families, and the rule docs/45 measured the
+  exposure of is family="ipv4" only.
+- Nothing is written to avahi's config until the daemon binary has been grepped
+  for every key about to be set. avahi refuses to START on an unknown key, so
+  writing reflect-filters onto a host whose avahi predates it would leave that
+  host with no mDNS at all rather than an unfiltered reflector. The version
+  string cannot answer this -- Fedora's 0.9~rc2 reports 0.8 and the feature
+  works -- so the binary is asked instead, and the whole change is refused
+  rather than degraded.
+- If the daemon will not come back after the edit, the edit is rolled back and
+  avahi is restarted on the configuration it had a second earlier. Nothing else
+  in this project edits a host daemon's own config file.
+- %%check is strict and is the reason to believe any of the above: the stock
+  Fedora avahi-daemon.conf rendered through the merge must equal, byte for
+  byte, the file that was on the host when a test page came out of the Canon on
+  2026-09-11. Nine further cases cover idempotence, the absent-section and
+  duplicate-key paths, both refusals, the capability gate in both directions,
+  and the rule the tool builds against the captured zone file.
+- Said plainly rather than glossed: an uninstall does not undo the edit, and
+  afterwards `rpm -V avahi` reports avahi-daemon.conf as modified, because it
+  is. The copy taken before the first edit is kept beside it and
+  `waydroid-mdns-reflector --revert` restores it and removes the firewall rule.
+  %%preun names that command while the tool that runs it is still installed.
+- The %%post uses --no-restart and the tool says on stderr that avahi is still
+  running the old configuration. A package here names a restart rather than
+  restarting somebody else's daemon inside an rpm transaction -- the same
+  choice waydroid-ext-overlay-sync makes about the container. The firewall half
+  applies live either way, and nothing ever calls `firewall-cmd --reload`.
+- The boot unit is WantedBy=multi-user.target and After= avahi and firewalld,
+  not the ExecStartPre docs/47 prescribed for the non-overlay reconcilers. mDNS
+  is discovery over a live socket -- the Canon appeared in a session that was
+  already running -- so there is nothing for waydroid-container.service to be
+  ordered against, and inventing that dependency would buy nothing.
+- The filter list is %%config(noreplace) at /etc/waydroid-mdns.conf, flat, with
+  no directory of ours around it. waydroid-ext-dexopt's values are a %%config
+  under /usr/share and fail packaging/test-install.sh for it: the .rpmsave rpm
+  leaves behind keeps the directory above from being removed on erase.

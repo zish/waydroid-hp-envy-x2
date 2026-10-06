@@ -1,0 +1,473 @@
+#!/bin/sh
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# waydroid-mdns-reflector -- put the host's LAN mDNS services inside the Waydroid
+# container, and keep them there. Run on the host, as root.
+#
+# WHY A RECONCILER AND NOT A PACKAGED FILE
+#
+# Both halves of docs/45-mdns-reflection.md change something this project does not
+# own, and they fail differently:
+#
+#   /etc/avahi/avahi-daemon.conf belongs to the avahi package and has NO drop-in
+#     directory -- verified by the same method used here, `grep -a conf.d` over
+#     the daemon binary, which finds no such path string. So the change is an
+#     in-place edit of somebody else's file. Shipping the whole file from an RPM
+#     would clobber every future Fedora change to it and make `rpm -V avahi` lie
+#     about a file we replaced wholesale; editing two keys and leaving the rest
+#     alone makes it lie about two lines and keeps the other sixty tracking
+#     avahi's own updates. That is the lesser of the two, and docs/47 and docs/53
+#     both prescribe it.
+#   firewalld's public.xml is not edited at all. A rich rule is additive, named
+#     and removable by name through firewall-cmd, so the zone file stays
+#     firewalld's.
+#
+# Being a reconciler rather than a one-shot edit is what makes either safe to put
+# in a package: it may be re-run forever, it is a no-op when the host already
+# agrees, and it is the only way to repair the file after an `avahi` update drops
+# an .rpmnew next to it and an administrator takes the new one.
+#
+# THE GATE THAT MATTERS MORE THAN THE EDIT
+#
+# avahi REFUSES TO START on an unknown key in avahi-daemon.conf. So a tool that
+# writes `reflect-filters` onto a host whose avahi does not know that key does not
+# produce a host without filters -- it produces a host with no mDNS at all,
+# including the host's own. `reflect-filters` is a 0.9 feature and Fedora's
+# 0.9~rc2 package reports `0.8` from --version, so the version string cannot be
+# the test (docs/45). The binary itself can: --check-support greps the daemon for
+# each key before anything is written, and this tool refuses the whole change
+# rather than silently degrading to an unfiltered reflector, which would push
+# Android's own _adb._tcp records onto the LAN.
+#
+# And if the daemon still will not come back, the edit is rolled back and avahi is
+# restarted on the configuration it had a moment ago. A tool that edits a host
+# daemon's config has to be able to undo it without a human present.
+#
+# WHAT IT NEVER DOES
+#
+#   `firewall-cmd --reload`. A reload flushes and rebuilds; waydroid0's `trusted`
+#     assignment is permanent so it would survive, but the cost of being wrong is
+#     a container restart, which on a kiosk host drops the session to the SDDM
+#     greeter and needs somebody at the machine (docs/45). The runtime rule is
+#     added directly and the permanent one is written alongside it, which is the
+#     order the change was originally made in.
+#   Restart or touch waydroid-container.service. mDNS is discovery over a live
+#     socket, not something Android latches at container start, so there is
+#     nothing to restart for -- the Canon appeared in a running session.
+#   Start avahi. If the daemon is stopped or masked the file is left correct for
+#     whenever it next starts, and that is said rather than worked around.
+#
+# Usage:
+#   waydroid-mdns-reflector                 reconcile both halves
+#   waydroid-mdns-reflector --verify        report drift, change nothing (exit 3)
+#   waydroid-mdns-reflector --check-support does this avahi know every key? (exit 4)
+#   waydroid-mdns-reflector --render FILE   merge onto FILE, print to stdout
+#   waydroid-mdns-reflector --revert        undo both halves
+#
+# Exit: 0 agreed, 1 failed, 2 bad usage or configuration, 3 drift (--verify),
+# 4 this avahi does not support a key we are asked to set.
+set -eu
+
+SYSCONFDIR=@SYSCONFDIR@
+CONF=${WAYDROID_MDNS_CONF:-$SYSCONFDIR/waydroid-mdns.conf}
+AVAHI_CONF=${WAYDROID_MDNS_AVAHI_CONF:-/etc/avahi/avahi-daemon.conf}
+SAVED=$AVAHI_CONF.pre-waydroid-ext
+
+# The rule docs/45 proved, unchanged: without it a one-shot (legacy unicast) mDNS
+# query -- which is how the Mopria Print Service asks -- gets its answer dropped,
+# because avahi re-originates such a query from an unpredictable ephemeral port
+# and the reply is neither ESTABLISHED nor matched by the `mdns` service's
+# destination port 5353. ipv4 only, and by SOURCE port, because there is no
+# narrower rule to write. packaging/README.md and docs/45 both state the cost.
+RICH_RULE='rule family="ipv4" source-port port="5353" protocol="udp" accept'
+
+# The three keys avahi documents in [reflector], and the only ones this tool will
+# write. Anything else in $CONF is refused rather than passed through, for the
+# reason in the header: an unknown key stops the daemon.
+AVAHI_KEYS="enable-reflector reflect-ipv reflect-filters"
+
+MODE=apply
+QUIET=0
+RESTART=1
+RENDER_SRC=""
+FIREWALL_ZONE=""
+
+prog=${0##*/}
+say()  { [ "$QUIET" = 1 ] || printf '%s\n' "$*"; }
+warn() { printf '%s: %s\n' "$prog" "$*" >&2; }
+die()  { printf '%s: %s\n' "$prog" "$*" >&2; exit "${2:-1}"; }
+usage() { sed -n '/^# Usage:/,/^# 4 this avahi/p' "$0" | sed 's/^# \{0,1\}//'; }
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--verify)        MODE=verify; shift ;;
+	--revert)        MODE=revert; shift ;;
+	--check-support) MODE=support; shift ;;
+	--render)        MODE=render; RENDER_SRC=${2:-}; [ -n "$RENDER_SRC" ] || die "--render needs a file" 2; shift 2 ;;
+	--config)        CONF=${2:-}; [ -n "$CONF" ] || die "--config needs a file" 2; shift 2 ;;
+	--avahi-conf)    AVAHI_CONF=${2:-}; [ -n "$AVAHI_CONF" ] || die "--avahi-conf needs a file" 2
+	                 SAVED=$AVAHI_CONF.pre-waydroid-ext; shift 2 ;;
+	--quiet)         QUIET=1; shift ;;
+	--no-restart)    RESTART=0; shift ;;
+	-h|--help)       usage; exit 0 ;;
+	*)               die "unknown argument: $1" 2 ;;
+	esac
+done
+
+tmpd=$(mktemp -d)
+trap 'rm -rf "$tmpd"' EXIT INT TERM
+want=$tmpd/want
+
+# ------------------------------------------------------------------ the config
+#
+# key=value, because every other configuration file in this repository is, and
+# because the values this one carries are avahi's own and arrive in that shape.
+read_config() {
+	[ -f "$CONF" ] || die "no configuration at $CONF" 2
+	: >"$want"
+	while IFS= read -r line || [ -n "$line" ]; do
+		line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+		case "$line" in '' | \#*) continue ;; esac
+		case "$line" in *=*) ;; *) die "$CONF: not key=value: $line" 2 ;; esac
+		key=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
+		value=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//')
+		if [ "$key" = firewall-zone ]; then
+			FIREWALL_ZONE=$value
+			continue
+		fi
+		case " $AVAHI_KEYS " in
+		*" $key "*) ;;
+		*) die "$CONF: $key is not a key this tool may set.
+    avahi refuses to start on an unknown key in avahi-daemon.conf, so only
+    these are accepted: $AVAHI_KEYS firewall-zone" 2 ;;
+		esac
+		# A value carrying whitespace, a quote or a newline would be written
+		# verbatim into avahi's config. Refuse it here rather than hand the
+		# daemon a file it will not parse.
+		case "$value" in
+		*[!A-Za-z0-9._,:-]*) die "$CONF: $key has a value this tool will not write: $value" 2 ;;
+		esac
+		# Empty means "leave avahi's own default alone", which is how reflect-ipv
+		# stays at no without this tool having an opinion written into the file.
+		[ -n "$value" ] || continue
+		printf '%s=%s\n' "$key" "$value" >>"$want"
+	done <"$CONF"
+}
+
+# ------------------------------------------------------------------- the merge
+#
+# Section-aware, and that is the whole difficulty. The dexopt reconciler's
+# drop-the-key-and-append is correct for a flat property file and WRONG here: an
+# `enable-reflector=yes` appended to the end of avahi-daemon.conf lands inside
+# [rlimits], where it is an unknown key, and the daemon then refuses to start.
+#
+# So: replace the key where it already stands in [reflector], commented or not,
+# which both preserves the file's shape and makes a re-run a byte-for-byte no-op.
+# Append to the end of the section only when the key is absent from it, and
+# append the section itself only when there is none. Blank lines at the end of
+# the section are held back so an appended key goes above them rather than
+# between sections.
+render() {
+	awk -v WANT="$want" -v SECTION=reflector '
+	function flush_held(   i) {
+		for (i = 1; i <= held; i++) print hold[i]
+		held = 0
+	}
+	function emit_missing(   i, k) {
+		for (i = 1; i <= n; i++) {
+			k = order[i]
+			if (!(k in done)) { print k "=" want[k]; done[k] = 1 }
+		}
+	}
+	BEGIN {
+		n = 0; held = 0; insec = 0
+		while ((getline l < WANT) > 0) {
+			if (l == "") continue
+			e = index(l, "=")
+			k = substr(l, 1, e - 1)
+			if (!(k in want)) order[++n] = k
+			want[k] = substr(l, e + 1)
+		}
+		close(WANT)
+	}
+	/^[ \t]*\[/ {
+		if (insec) emit_missing()
+		flush_held()
+		insec = ($0 ~ "^[ \t]*\\[" SECTION "\\][ \t]*$")
+		print
+		next
+	}
+	{
+		if (insec) {
+			if ($0 ~ /^[ \t]*$/) { hold[++held] = $0; next }
+			line = $0
+			sub(/^[ \t]*/, "", line)
+			sub(/^#[ \t]*/, "", line)
+			e = index(line, "=")
+			if (e > 0) {
+				k = substr(line, 1, e - 1)
+				sub(/[ \t]*$/, "", k)
+				if (k in want) {
+					flush_held()
+					if (!(k in done)) { print k "=" want[k]; done[k] = 1 }
+					next
+				}
+			}
+		}
+		flush_held()
+		print
+	}
+	END {
+		if (insec) { emit_missing(); flush_held(); exit }
+		flush_held()
+		missing = 0
+		for (i = 1; i <= n; i++) if (!(order[i] in done)) missing = 1
+		if (missing) { print ""; print "[" SECTION "]"; emit_missing() }
+	}' "$1"
+}
+
+# -------------------------------------------------------------- the avahi gate
+#
+# docs/47 verified "avahi-daemon contains no conf.d path string" by grepping the
+# binary, and the same grep is the only trustworthy answer to "does this build
+# know reflect-filters?" -- the version string in Fedora's 0.9~rc2 package says
+# 0.8 and is stale, while the feature demonstrably works. `grep -a` so a binary
+# is treated as text; the key names are long and distinctive enough that a chance
+# hit is not a real worry, and a false positive only returns us to the behaviour
+# this gate exists to replace.
+avahi_binary() {
+	if [ -n "${WAYDROID_MDNS_AVAHI_BIN:-}" ]; then
+		printf '%s' "$WAYDROID_MDNS_AVAHI_BIN"
+		return 0
+	fi
+	for p in /usr/sbin/avahi-daemon /sbin/avahi-daemon /usr/bin/avahi-daemon; do
+		if [ -x "$p" ]; then
+			printf '%s' "$p"
+			return 0
+		fi
+	done
+	command -v avahi-daemon 2>/dev/null || return 1
+}
+
+check_support() {
+	bin=$(avahi_binary) || {
+		warn "no avahi-daemon binary found, so no key can be checked against it"
+		return 4
+	}
+	rc=0
+	while IFS= read -r l; do
+		k=${l%%=*}
+		if grep -qa -- "$k" "$bin"; then
+			say "supported: $k  ($bin)"
+		else
+			warn "$bin does not know the key '$k'"
+			rc=4
+		fi
+	done <"$want"
+	[ "$rc" = 0 ] || warn "avahi refuses to start on an unknown key, so nothing will be written.
+    Remove that key from $CONF -- with reflect-filters removed the reflector
+    becomes unfiltered, which also puts Android's own _adb._tcp onto the LAN."
+	return "$rc"
+}
+
+# ------------------------------------------------------------------ the halves
+avahi_apply() {
+	[ -f "$AVAHI_CONF" ] || die "$AVAHI_CONF not found -- is avahi installed?"
+	check_support || exit 4
+	render "$AVAHI_CONF" >"$tmpd/new"
+	if cmp -s "$tmpd/new" "$AVAHI_CONF"; then
+		say "unchanged: $AVAHI_CONF"
+		return 0
+	fi
+
+	# The pristine copy, and never overwritten by a re-run with an
+	# already-modified file -- the detail that makes the dexopt reconciler
+	# trustworthy on its second run and would make this one a liar without it.
+	[ -f "$SAVED" ] || cp -p "$AVAHI_CONF" "$SAVED"
+	cp -p "$AVAHI_CONF" "$tmpd/rollback"
+
+	# `cat >` and not `install`: this file belongs to avahi, and writing through
+	# the existing inode keeps its owner, mode and SELinux label exactly as the
+	# avahi package set them. `install` would create a new file and hand it this
+	# process's idea of a context, which on an SELinux host is how an edit turns
+	# into a daemon that cannot read its own configuration.
+	cat "$tmpd/new" >"$AVAHI_CONF"
+	say "updated:  $AVAHI_CONF  (original kept at $SAVED)"
+
+	if ! systemctl is-active --quiet avahi-daemon.service 2>/dev/null; then
+		say "avahi-daemon is not running; the file is correct for its next start"
+		return 0
+	fi
+	if [ "$RESTART" = 0 ]; then
+		# warn and not say, so --quiet cannot hide it: the file is right and the
+		# running daemon is not, and that is a state somebody has to be told
+		# about. This is the path the RPM's %post takes -- a package here does
+		# not restart somebody else's daemon, it names the restart.
+		warn "avahi-daemon is still running the configuration it had (--no-restart).
+    Apply it with:  systemctl restart avahi-daemon.service
+    Or leave it: waydroid-mdns-reflector.service reconciles again at every boot."
+		return 0
+	fi
+	if systemctl restart avahi-daemon.service 2>/dev/null &&
+	   systemctl is-active --quiet avahi-daemon.service 2>/dev/null; then
+		say "restarted avahi-daemon"
+		return 0
+	fi
+	# The self-heal. Nothing else in this project edits a host daemon's own
+	# config, so nothing else needs it; here it is the difference between a
+	# failed reconcile and a host with no mDNS and nobody at the keyboard.
+	cat "$tmpd/rollback" >"$AVAHI_CONF"
+	systemctl restart avahi-daemon.service >/dev/null 2>&1 || :
+	die "avahi-daemon would not start with the new configuration.
+    $AVAHI_CONF has been put back as it was and avahi restarted on it.
+    systemctl status avahi-daemon.service -- and see docs/45-mdns-reflection.md"
+}
+
+firewall_zone() {
+	if [ -n "$FIREWALL_ZONE" ]; then
+		printf '%s' "$FIREWALL_ZONE"
+		return 0
+	fi
+	# firewalld's default zone, which on the reference host IS `public` -- the
+	# zone the LAN interface is in. Deriving it beats hardcoding a zone name
+	# that is only right by coincidence on another machine.
+	firewall-cmd --get-default-zone 2>/dev/null || printf ''
+}
+
+firewall_apply() {
+	case "$FIREWALL_ZONE" in
+	none) say "firewall: skipped, firewall-zone=none"; return 0 ;;
+	esac
+	if ! command -v firewall-cmd >/dev/null 2>&1; then
+		say "firewall: no firewall-cmd, so nothing to add -- one-shot mDNS clients
+          need the reply to an ephemeral port to arrive; if this host filters
+          inbound UDP by some other means, allow source port 5353."
+		return 0
+	fi
+	if firewall-cmd --state >/dev/null 2>&1; then
+		z=$(firewall_zone)
+		[ -n "$z" ] || die "could not determine a firewalld zone; set firewall-zone in $CONF" 2
+		if firewall-cmd --zone="$z" --query-rich-rule="$RICH_RULE" >/dev/null 2>&1; then
+			say "firewall: already live in zone $z"
+		else
+			firewall-cmd --zone="$z" --add-rich-rule="$RICH_RULE" >/dev/null
+			say "firewall: added to the running configuration of zone $z"
+		fi
+		if firewall-cmd --permanent --zone="$z" --query-rich-rule="$RICH_RULE" >/dev/null 2>&1; then
+			say "firewall: already permanent in zone $z"
+		else
+			firewall-cmd --permanent --zone="$z" --add-rich-rule="$RICH_RULE" >/dev/null
+			say "firewall: made permanent in zone $z"
+		fi
+		# No --reload. See the header.
+		return 0
+	fi
+	if command -v firewall-offline-cmd >/dev/null 2>&1; then
+		z=${FIREWALL_ZONE:-public}
+		if firewall-offline-cmd --zone="$z" --query-rich-rule="$RICH_RULE" >/dev/null 2>&1; then
+			say "firewall: already permanent in zone $z (firewalld stopped)"
+		else
+			firewall-offline-cmd --zone="$z" --add-rich-rule="$RICH_RULE" >/dev/null
+			say "firewall: made permanent in zone $z (firewalld stopped; live at its next start)"
+		fi
+		return 0
+	fi
+	say "firewall: firewalld is installed and not running, and there is no
+          firewall-offline-cmd to write its permanent configuration with."
+}
+
+# ----------------------------------------------------------------------- verify
+verify() {
+	drift=0
+	if [ ! -f "$AVAHI_CONF" ]; then
+		warn "$AVAHI_CONF not found"
+		drift=1
+	else
+		render "$AVAHI_CONF" >"$tmpd/new"
+		if cmp -s "$tmpd/new" "$AVAHI_CONF"; then
+			say "ok    $AVAHI_CONF agrees with $CONF"
+		else
+			say "drift $AVAHI_CONF:"
+			diff -u "$AVAHI_CONF" "$tmpd/new" | sed 's/^/      /' || :
+			drift=1
+		fi
+	fi
+	check_support >/dev/null 2>&1 || drift=1
+	case "$FIREWALL_ZONE" in
+	none) say "ok    firewall half disabled, firewall-zone=none" ;;
+	*)
+		if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+			z=$(firewall_zone)
+			if firewall-cmd --zone="$z" --query-rich-rule="$RICH_RULE" >/dev/null 2>&1; then
+				say "ok    source-port rule live in zone $z"
+			else
+				say "drift source-port rule absent from the running configuration of zone $z"
+				drift=1
+			fi
+			if firewall-cmd --permanent --zone="$z" --query-rich-rule="$RICH_RULE" >/dev/null 2>&1; then
+				say "ok    source-port rule permanent in zone $z"
+			else
+				say "drift source-port rule absent from the permanent configuration of zone $z"
+				drift=1
+			fi
+		else
+			say "skip  firewalld is not running; its half cannot be read"
+		fi ;;
+	esac
+	[ "$drift" = 0 ] || return 3
+	return 0
+}
+
+# ----------------------------------------------------------------------- revert
+revert() {
+	if [ -f "$SAVED" ]; then
+		cp -p "$AVAHI_CONF" "$tmpd/rollback"
+		cat "$SAVED" >"$AVAHI_CONF"
+		rm -f "$SAVED"
+		say "restored: $AVAHI_CONF from the copy taken before the first edit"
+	elif [ -f "$AVAHI_CONF" ]; then
+		# No saved copy, so put the reflector back to avahi's shipped behaviour
+		# without pretending the file is byte-identical to stock again. docs/53
+		# is blunt that no version of this leaves no trace.
+		printf 'enable-reflector=no\n' >"$want"
+		render "$AVAHI_CONF" >"$tmpd/new"
+		awk '!(/^[ \t]*reflect-filters[ \t]*=/)' "$tmpd/new" >"$tmpd/new2"
+		cat "$tmpd/new2" >"$AVAHI_CONF"
+		say "disabled: the reflector in $AVAHI_CONF
+          There was no $SAVED, so the file is not byte-identical to avahi's
+          own again -- enable-reflector is set to no rather than commented out."
+	fi
+	if [ -f "$AVAHI_CONF" ] && systemctl is-active --quiet avahi-daemon.service 2>/dev/null; then
+		systemctl restart avahi-daemon.service >/dev/null 2>&1 || warn "avahi-daemon did not restart"
+	fi
+	if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+		z=$(firewall_zone)
+		if [ -n "$z" ]; then
+			firewall-cmd --zone="$z" --remove-rich-rule="$RICH_RULE" >/dev/null 2>&1 &&
+				say "firewall: removed from the running configuration of zone $z" || :
+			firewall-cmd --permanent --zone="$z" --remove-rich-rule="$RICH_RULE" >/dev/null 2>&1 &&
+				say "firewall: removed from the permanent configuration of zone $z" || :
+		fi
+	fi
+}
+
+case "$MODE" in
+render)
+	read_config
+	[ -f "$RENDER_SRC" ] || die "no such file: $RENDER_SRC" 2
+	render "$RENDER_SRC" ;;
+support)
+	read_config
+	check_support ;;
+verify)
+	read_config
+	verify ;;
+revert)
+	read_config
+	revert ;;
+apply)
+	read_config
+	avahi_apply
+	firewall_apply ;;
+esac

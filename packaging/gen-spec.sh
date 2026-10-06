@@ -218,6 +218,13 @@ render_one() {
 		# tag in the spec, which is exactly where @GLOBALS@ is spliced. Until
 		# this line existed a .mod could set GLOBALS and be silently ignored.
 		printf '%s\n' "$GLOBALS" | sed '/^[[:space:]]*$/d' >"$tmp/GLOBALS"
+		# Same class of gap, found the same way: CHECK is in the defaults above
+		# and was written only by the overlay arm, so a host modification could
+		# declare a %check and have it quietly dropped. Unlike the overlay arm,
+		# which synthesises the manifest check itself, the block here is whatever
+		# the .mod says -- so it must include the `%check` line, and a mod with
+		# nothing to check leaves the variable unset and renders no section.
+		printf '%s\n' "$CHECK" | sed '/^[[:space:]]*$/d' >"$tmp/CHECK"
 		printf '%s\n' "$INSTALL" | sed '/^[[:space:]]*$/d' >"$tmp/INSTALL"
 		printf '%s\n' "$PAYLOAD_FILES" | sed '/^[[:space:]]*$/d' >"$tmp/FILES"
 		printf '%s\n' "$SCRIPTLETS" | sed '/^[[:space:]]*$/d' >"$tmp/SCRIPTLETS"

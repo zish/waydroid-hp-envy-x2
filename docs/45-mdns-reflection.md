@@ -366,9 +366,24 @@ Print Service, and the Canon is listed.
 
 ## Reverting
 
+With the package installed, one command does both halves -- the config file and the firewall
+rule -- and it is what `%preun` names:
+
+```bash
+sudo waydroid-mdns-reflector --revert
+```
+
+By hand, which is what was done before the package existed. Note the two different saved copies:
+`.pre-reflector` is the one made by hand on 2026-09-11, `.pre-waydroid-ext` is the one the
+reconciler makes the first time it changes anything.
+
 ```bash
 sudo cp /etc/avahi/avahi-daemon.conf.pre-reflector /etc/avahi/avahi-daemon.conf
 sudo systemctl restart avahi-daemon
+sudo firewall-cmd --zone=public \
+    --remove-rich-rule='rule family="ipv4" source-port port="5353" protocol="udp" accept'
+sudo firewall-cmd --permanent --zone=public \
+    --remove-rich-rule='rule family="ipv4" source-port port="5353" protocol="udp" accept'
 ```
 
 And, if the print service should go back to its shipped state:
@@ -377,16 +392,105 @@ And, if the print service should go back to its shipped state:
 sudo waydroid shell -- sh -c "settings delete secure enabled_print_services"
 ```
 
-## Not yet packaged, and why that needs a decision
+## Packaged, 2026-10-06 -- `waydroid-ext-mdns` 1.0.0
 
-The repo convention is that `artifacts/<topic>/install.sh` honours `DESTDIR`/`PREFIX` and
-doubles as the RPM `%install` step ([36-packaging.md](36-packaging.md)). **That convention is
-awkward here and was deliberately not followed yet.** The change is a two-line edit to a
-*stock Fedora config file*; shipping the whole file from a package would clobber any future
-Fedora change to `avahi-daemon.conf`, and avahi has no `conf.d` drop-in directory to use
-instead. The options are to ship the full file and accept the clobber, or to apply the edit
-idempotently at install time. That is a real decision, not an oversight -- until it is made,
-this stays a documented manual change with the original preserved alongside.
+The decision this section used to leave open is made, and it is the second of the two options
+it named: **apply the edit idempotently, do not ship the file.** The repo convention is that
+`artifacts/<topic>/install.sh` honours `DESTDIR`/`PREFIX` and doubles as the RPM `%install`
+step ([36-packaging.md](36-packaging.md)), and the awkwardness was real -- the change is two
+lines in a *stock Fedora config file*, so shipping the whole file would clobber every future
+Fedora change to `avahi-daemon.conf`, and avahi has no `conf.d` drop-in to use instead.
+
+What the package ships is therefore a reconciler rather than a file:
+
+| | |
+|---|---|
+| `/usr/bin/waydroid-mdns-reflector` | the reconciler: merge, gate, firewall rule, verify, revert |
+| `/usr/lib/systemd/system/waydroid-mdns-reflector.service` | `WantedBy=multi-user.target`, `After=` avahi and firewalld |
+| `/etc/waydroid-mdns.conf` | `%config(noreplace)` -- the filter list, and `firewall-zone` |
+
+[`packaging/mods/mdns.mod`](../packaging/mods/mdns.mod) carries the full reasoning. The four
+things worth having here, because they are findings and not packaging detail:
+
+**The merge has to be section-aware, and the obvious implementation is dangerous.** The
+pattern this repository already had for an idempotent config merge is
+`artifacts/dexopt/install.sh`: drop any existing line for the key, append ours. That is correct
+for a flat property file and **wrong here** -- an `enable-reflector=yes` appended to the end of
+`avahi-daemon.conf` lands inside `[rlimits]`, where it is an unknown key, and the daemon then
+refuses to start. So the merge replaces each key where it already stands in `[reflector]`,
+commented or not, which is also why a re-run is a byte-for-byte no-op.
+
+**The other edge of "avahi errors on unknown config keys" is the real hazard.** That fact is
+used as *evidence* above -- a clean start with `reflect-filters` set is a real test. Turned
+around, it means a package that writes `reflect-filters` onto a host whose avahi predates it
+does not produce an unfiltered reflector. It produces **a host with no mDNS at all, including
+the host's own**, from an `rpm -i`. And the version string cannot be the test, for the reason
+already recorded here: Fedora's `0.9~rc2` reports `0.8`. So the reconciler greps the daemon
+binary for every key before writing anything -- the same `grep -a` technique
+[docs/47](47-package-split.md) used to establish that avahi has no `conf.d` path string -- and
+**refuses the whole change** rather than dropping the unsupported key, because dropping it
+would push Android's own `_adb._tcp` onto the LAN, which the filter exists to prevent. If the
+daemon still will not come back after an edit, the edit is rolled back and avahi is restarted
+on the configuration it had.
+
+**The firewalld half stops being a file edit.** Capturing `firewalld-public.xml` next to
+`avahi-daemon.conf` above made the two look like one problem; they are not. The rich rule goes
+in through `firewall-cmd`, which is additive, idempotently queryable with `--query-rich-rule`
+and removable by name, so firewalld's zone file stays firewalld's. A **packaged firewalld
+service definition** would have been nicer still -- `/usr/lib/firewalld/services` is a
+directory a package may populate and a service may carry a `<source-port>` -- and was rejected
+on one fact: a firewalld service applies to **both address families**, and the rule measured
+above is `family="ipv4"`. Reflecting v6 is deliberately off, so the v6 half would be pure
+widening for no discovery anybody gets.
+
+**`cmp` against this document's own artifacts is the build-time check.** The package's `%check`
+renders [../artifacts/mdns/avahi-daemon.conf.orig](../artifacts/mdns/avahi-daemon.conf.orig)
+through the merge and requires the result to equal
+[../artifacts/mdns/avahi-daemon.conf](../artifacts/mdns/avahi-daemon.conf) **byte for byte** --
+that is, the file that was on the host when a test page came out of the Canon. Nine further
+cases cover idempotence, the absent-section and duplicate-key paths, both refusals, the
+capability gate in both directions, and the rule the tool builds against the captured zone
+file. `sh artifacts/mdns/selftest.sh` runs them from a checkout; they need no avahi, no
+firewalld, no root and no network.
+
+### What the package cannot do, stated plainly
+
+**An uninstall does not put `avahi-daemon.conf` back.** Afterwards `rpm -V avahi` reports that
+file as modified, because it is -- two of its sixty-odd lines are ours. This is the one edge of
+its kind in the project and [docs/53](53-release-readiness.md) already said there is no version
+of it that leaves no trace. What exists instead: the pre-edit copy is kept beside the file as
+`avahi-daemon.conf.pre-waydroid-ext`, `waydroid-mdns-reflector --revert` restores it and removes
+the rich rule from both the runtime and permanent configurations, and `%preun` names that command
+while the tool that runs it is still installed. Reverting from the scriptlet instead was rejected
+twice over -- on rpm-ostree it would run against the compose, and by then the administrator may
+have edited those same two lines.
+
+**The `%post` writes the file and does not restart avahi.** It runs the reconciler with
+`--no-restart`, which leaves the file correct and says on stderr -- unsuppressable by `--quiet`
+-- that the daemon is still on the old configuration and what one command applies it. Same
+choice `waydroid-ext-overlay-sync` makes about the container restart; avahi is not even our
+daemon, which makes it easier rather than harder. The firewall half applies live either way,
+and nothing ever calls `firewall-cmd --reload`, for the reason given above.
+
+**`ExecStartPre` is not honoured, deliberately.** [docs/47](47-package-split.md) prescribes "a
+`%post` and an `ExecStartPre`" for each non-overlay reconciler. mDNS is discovery over a live
+socket -- the Canon appeared in a session that was already running -- so there is nothing for
+`waydroid-container.service` to be ordered against, and a `WantedBy=multi-user.target` oneshot
+is the same guarantee without inventing a dependency on the container.
+
+### Exercised, and what was not
+
+The merge, both refusal paths, the capability gate in both directions, `--verify` before and
+after, `--revert` with and without a saved copy, and `rpmbuild` plus
+`packaging/test-install.sh` (7 passed, 0 failed, and it is the first host package here to clear
+rpmlint's `no-%check-section`). All of that ran on the dev box, where it is byte-for-byte
+checkable.
+
+**Not exercised: the two paths that need a live avahi.** The restart after a changed file, and
+the roll-back-and-restart when the daemon refuses to come up, both branch on
+`systemctl is-active avahi-daemon`, and there is no avahi on the dev box. They want one run on
+bigtab01 before this is relied on -- which is the same visit that would finally settle the
+reboot question below.
 
 ## Open questions
 
@@ -394,10 +498,11 @@ this stays a documented manual change with the original preserved alongside.
   but has not had a job put through it specifically. Near-certain to work, since it is the same
   IPP-to-CUPS path, but not tested.
 - The rich rule is permanent but has **not been watched across a reboot** -- neither has the
-  avahi reflector (below). One reboot settles both.
-- The firewalld rule is captured in `artifacts/mdns/` but not packaged; it has the same
-  unresolved packaging question as `avahi-daemon.conf`, though a firewalld zone is the easier
-  of the two since it is a whole file firewalld already owns.
+  avahi reflector (below). One reboot settles both, and it is now the same reboot that would
+  exercise `waydroid-mdns-reflector.service` and the two restart paths the dev box cannot reach.
+- ~~The firewalld rule is captured in `artifacts/mdns/` but not packaged~~ -- **packaged
+  2026-10-06**, and not as a file: `firewall-cmd --add-rich-rule` is additive and removable by
+  name, so firewalld's zone file stays firewalld's. See above.
 - Is the shade-holds-focus state persistent or a one-off? Worth knowing generally -- it would
   block any future UI-dependent test, not just this one.
 - Does the reflector survive a reboot cleanly, with `waydroid0` appearing after avahi starts?

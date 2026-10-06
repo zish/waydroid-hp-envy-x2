@@ -41,8 +41,23 @@ cannot have once the group, `camera-hal`, `camera-gbm` and `overlay-sync` are in
 transaction. The group went to 1.0.1 for the dependency change.
 
 **Superseded 2026-09-27: 22 modifications are written and all 22 produce something
-installable**, `wifid` included, once `--prebuilt` is used for the two compiled daemons. `dexopt`
-is a 23rd with a `.mod` file that is deliberately not shipped. When this was written the count
+installable**, `wifid` included, once `--prebuilt` is used for the two compiled daemons.
+
+**Recounted 2026-10-06: there are 26 `.mod` files, 25 of them shipped.** `dexopt` is the one
+that declares `SHIPPED=no`. "22 and a 23rd" was an undercount on the day it was written — six
+`.mod` files were created on 2026-09-27 and the tally did not catch all of them — which is what
+a count maintained by hand does. `packaging/gen-spec.sh --list` is the answer that cannot go
+stale, and it marks the unshipped one.
+
+**The only modification added since 2026-09-28 is `mdns`**, on 2026-10-06, and it is the one
+the installable claim above is extended to: built, linted to the same baseline as the rest, and
+`packaging/test-install.sh mdns` passes 7 of 7. It is also **the first host modification here to
+declare a `%check`**, which needed a one-line fix to `gen-spec.sh` — `CHECK` was in its defaults
+and written only by the overlay arm, so until then a host `.mod` could declare a `%check` and
+have it silently dropped. The 25 pre-existing specs render byte-identically before and after
+that fix, which is how it was checked.
+
+When the 2026-09-27 count was written the previous one
 was: **of the fourteen modifications here, twelve produce something installable**: `overlay-sync`,
 `sensord`, `camera-gbm`, `btd`, `pidguard`, `restartd`, `backlight` — no longer inert, because
 the `waydroid-sensord` it grants a permission to is now a package, so its `Recommends`
@@ -116,8 +131,11 @@ bigtab01 that failure surfaces inside an rpm-ostree deployment build rather than
 anybody reads. It also contradicts the rule this repository already adopted for `backlight`'s
 `semodule` scriptlets: no scriptlet may fail a transaction.
 
-`--selftest` is not decoration. Every package here happens to ship no `%config` file, so the
-two checks that matter most never fire on real input, and a check that has never failed is not
+`--selftest` is not decoration. ~~Every package here happens to ship no `%config` file~~ --
+**four do, as of 2026-10-06**: `wifid`, `wifi-sync`, `mdns` and the unshipped `dexopt`, so the
+preserve-an-edited-`%config` check now fires on real input as well. The fixtures stay, because
+the *other* check still does not: nothing here ships a plain file under `/etc`, which is exactly
+the mistake being hunted, and a check that has never failed is not
 known to work. It builds two deliberate fixtures — one correct, one shipping an `/etc` file
 plain — and asserts the harness reaches the right verdict on each.
 
@@ -153,6 +171,7 @@ plain — and asserts the harness reaches the right verdict on each.
 | `wifi-sync` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
 | `dexopt` | yes | yes | **yes** | plus `non-etc-or-var-file-marked-as-conffile` — **written, not shipped**, see below |
 | `appfuse` | yes | yes | **yes** | yes — the backlight baseline exactly: `no-signature`, `invalid-url Source0`, `no-%check-section`, `no-manual-page-for-binary` |
+| `mdns` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` — and **without** `no-%check-section`, which it is the first host package here to clear |
 
 ### The seven host packages added 2026-09-27
 

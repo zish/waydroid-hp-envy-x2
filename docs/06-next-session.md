@@ -11,7 +11,8 @@ reproduced, and the long list of causes they rule out.
 Comet Lake-U, Fedora Silverblue 44, GNOME, Waydroid 1.6.3 — is being set up, and the owner is wiping
 it and installing WayDroid-ATV's Android 16 images to debug a boot failure whose symptom was not
 recorded the first time. Start from [63-second-host-and-android-16.md](63-second-host-and-android-16.md):
-it has the package-portability verdict (22 of 25 move, 19 unchanged), the three documented A16
+it has the package-portability verdict (22 of 25 move, 19 unchanged; 23 of 26 and 20 unchanged
+since `mdns` was packaged on 2026-10-06), the three documented A16
 failure modes with which ones to expect on an Intel Gen9.5 iGPU, and a six-step checklist for the
 attempt. Nothing in it has been run on that machine.
 

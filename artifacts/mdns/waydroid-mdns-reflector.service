@@ -1,0 +1,42 @@
+# Re-assert the host's mDNS reflector configuration, every boot.
+#
+# Not because anything erases it -- /etc/avahi/avahi-daemon.conf is a real file
+# on a real filesystem and nothing here regenerates it, unlike the overlay and
+# waydroid_base.prop. The reason is narrower and still worth a unit: the file
+# belongs to the avahi package, and an `avahi` update whose own
+# avahi-daemon.conf has changed leaves an .rpmnew beside ours. An administrator
+# who takes the new file has silently turned the reflector off, and nothing
+# would say so until somebody tried to print. This unit notices on the next
+# boot and puts the two keys back.
+#
+# It is also the half of the design that works on an rpm-ostree host, where a
+# %post runs against the compose rather than the booted system and firewall-cmd
+# in a compose is meaningless. There the reboot that `rpm-ostree install`
+# already requires is when the work actually happens. docs/47-package-split.md.
+#
+# After= and not Before=avahi-daemon.service. Before= would save the restart
+# that follows an edit, at the price of making this package an ordering
+# dependency of a host daemon that runs perfectly well without us, and of
+# chaining avahi's start behind firewalld's. The restart only happens on the
+# boot after something actually drifted, which on a healthy host is never.
+#
+# Deliberately NOT Requires= or RequiredBy= anything, and nothing about the
+# container: mDNS is discovery over a live socket, so there is nothing for
+# waydroid-container.service to be ordered against, and a reflector that failed
+# to configure must not stop Android from booting.
+
+[Unit]
+Description=Reconcile the host mDNS reflector that serves Waydroid
+Documentation=https://github.com/zish/waydroid-hp-envy-x2/blob/HEAD/docs/45-mdns-reflection.md
+After=avahi-daemon.service firewalld.service
+ConditionPathExists=@SYSCONFDIR@/waydroid-mdns.conf
+ConditionPathExists=/etc/avahi/avahi-daemon.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# --quiet: the journal gets a line only when something actually changed.
+ExecStart=@BINDIR@/waydroid-mdns-reflector --quiet
+
+[Install]
+WantedBy=multi-user.target

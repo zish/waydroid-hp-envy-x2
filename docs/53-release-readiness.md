@@ -16,7 +16,7 @@ are ahead of the code in several places and reading them alone gives the wrong a
 
 | Question | Answer |
 |---|---|
-| Is every change available as an RPM? | **Not yet, but most of the way: 22 modifications written of ~38 named as of 2026-09-27, and all 22 produce something installable.** Was 7 of ~36 with 4 installable when this was written |
+| Is every change available as an RPM? | **Not yet, but most of the way: 26 `.mod` files as of 2026-10-06, 25 of them shipped** — `packaging/gen-spec.sh --list` is the count that cannot go stale. Said 22 of ~38 on 2026-09-27, which was itself an undercount; was 7 of ~36 with 4 installable when this was written |
 | Could a general user build and install? | **No** — the two compiled daemons cannot be built off this dev box at all |
 | Are repository paths portable? | **Nearly** — 5 exceptions, all named below; git history is no worse than HEAD |
 | Anything genuinely un-RPM-able? | **Four things**, all small, none of them blocking |
@@ -100,10 +100,10 @@ section: the only thing that catches it is running it.
 
 **Superseded 2026-09-27 for most of this list.** `mediad`, `wifi-sync`, the cage session,
 graceful exit, android-power, binder-nice and the ITE8350 resume machinery were all packaged that
-day, which leaves this section naming only: **graceful shutdown**, **mdns**, the
-**`lxc.net.0.name` edit**, `tools`, the Widevine overlay files, and `dexopt` — which has a `.mod`
-file written but is deliberately NOT shipped, for three reasons recorded under item 1 below. The
-original text follows.
+day, which leaves this section naming only: **graceful shutdown**, ~~**mdns**~~ — packaged
+2026-10-06, see the avahi edge below — the **`lxc.net.0.name` edit**, `tools`, the Widevine
+overlay files, and `dexopt` — which has a `.mod` file written but is deliberately NOT shipped, for
+three reasons recorded under item 1 below. The original text follows.
 
 Cross-referencing `packaging/README.md`'s host audit against the fourteen mods: `sensord` and its
 `ILight` half, `mediad`, `wifi-sync`, the cage session, graceful exit and shutdown,
@@ -207,10 +207,29 @@ edit of another package's file. Afterwards `rpm -V avahi` lies and the file stop
 avahi's own updates. docs/47 already prescribes the idempotent-reconciler treatment; there is no
 version of it that leaves no trace.
 
+**Packaged anyway, 2026-10-06, and the sentence above is still true.** `waydroid-ext-mdns` 1.0.0
+takes the treatment docs/47 prescribed, and what it changes is the *size* of the trace rather
+than its existence: two of that file's sixty-odd lines are ours and the rest keep tracking
+avahi's updates, so `rpm -V avahi` reports two lines instead of a replaced file. The uninstall
+does not undo it — `%preun` says so and names `waydroid-mdns-reflector --revert`, which restores
+the pre-edit copy and removes the firewall rule. Three things found in the writing that this
+audit could not have known:
+
+- The merge **cannot** be `dexopt`'s. Appending a key to a sectioned config file lands it in the
+  wrong section, and avahi refuses to start on an unknown key — so the obvious reuse would have
+  taken the host's whole mDNS stack down from an `rpm -i`.
+- The same fact needs a gate, not just care. `reflect-filters` is a 0.9 feature and Fedora's
+  `0.9~rc2` reports `0.8`, so the reconciler greps the daemon binary for every key before writing
+  and refuses the whole change if one is missing, rather than degrading to an unfiltered reflector.
+- The **firewalld half stops being an in-place edit entirely**, which is what this audit's next
+  paragraph asked for. A rich rule added by `firewall-cmd` is additive, queryable and removable
+  by name, so firewalld's zone file is never touched.
+
 Everything else — `lxc.net.0.name`, the dexopt properties, the firewalld rule — fits the
 reconciler pattern `artifacts/dexopt/install.sh` already implements. The firewalld one should
 stop being a file edit at all: `firewall-cmd --permanent --add-rich-rule` is additive, named and
-removable.
+removable. **The firewalld one is done** (2026-10-06, above); `lxc.net.0.name` and the dexopt
+properties are not.
 
 ## CI/CD: lefthook as the gate, Actions as the pipeline
 

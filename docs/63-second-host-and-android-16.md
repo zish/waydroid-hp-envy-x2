@@ -9,7 +9,9 @@ and voids most of the Android-side half.*
 
 ## One-paragraph summary
 
-**22 of the 25 built packages move to a second x86_64 Fedora host, 19 of them unchanged.** The
+**22 of the 25 built packages move to a second x86_64 Fedora host, 19 of them unchanged** — 23 of
+26 and 20 unchanged since `mdns` was packaged on 2026-10-06, counted on the same evidence rather
+than re-measured on the second host, which still has nothing from this project on it. The
 reason is that the thing a port would have had to chase does not exist: Waydroid's newest release
 is **1.6.3, published 2026-05-28**, which is what bigtab01 already runs, and `main` is only seven
 commits ahead of it with exactly one that touches a MAINLINE x86_64 host. The real coupling was
@@ -74,11 +76,20 @@ Measured from `packaging/mods/*.mod` and from `build/rpm/RPMS/` (46 rpm files, 2
 at their newest versions), not from the design notes — [docs/53](53-release-readiness.md) is blunt
 about why that distinction matters.
 
+**`mdns` 1.0.0 joins the list on 2026-10-06, in the unchanged group**, which makes it 26 packages
+and 17 unchanged. It names no hardware, no CPU and no interface: the firewalld zone comes from
+`firewall-cmd --get-default-zone` rather than being hardcoded to `public`, and the service filter
+list is `%config(noreplace)`. Its one target assumption is an avahi that knows `reflect-filters`,
+which the reconciler checks by grepping the daemon binary and refuses to proceed without — Fedora
+44 ships the same `0.9~rc2` as bigtab01, so it holds, and on a host where it does not the package
+declines rather than taking that host's mDNS down. What is *not* portable is the usefulness: the
+reflector only has something to reflect if there is a print server or a Chromecast on that LAN.
+
 **Installs unchanged — 16.** No image coupling, no hardware named, no per-machine value:
 `overlay-sync` 1.1.0 (first, since every overlay component hard-requires it), `binder-nice`,
 `pidguard`, `restartd`, `media`, `btd` 1.1.0, `pwd` 1.3.0, `android-power`, `graceful-exit`, `cage`,
 `backlight` 1.0.3, `appfuse`, `wifi-sync` 1.1.0, `wifi-framework`, `brightness-overlay` 1.0.1,
-`camera` (group).
+`camera` (group) — and, from 2026-10-06, `mdns` 1.0.0, making **17**.
 
 **Installs, needs one thing — 3.**
 
@@ -106,8 +117,10 @@ hub, which is the bug a metapackage spreads). `dexopt` is built and deliberately
 `0,2` CPU set is Broadwell-shaped anyway.
 
 **What does not come along at all:** the four Widevine overlay files (licensing — the fetcher was
-never written), `graceful-shutdown`, `mdns`, the `lxc.net.0.name` edit, `tools`, six of the seven
-groups, and all four APKs. So `media`, `btd` and `pwd` would install their daemons with no app to
+never written), `graceful-shutdown`, ~~`mdns`~~ — **packaged 2026-10-06**, so it now comes along
+and is in fact one of the more portable ones, since nothing in it names this laptop and the
+firewalld zone is derived from `--get-default-zone` rather than hardcoded — the `lxc.net.0.name`
+edit, `tools`, six of the seven groups, and all four APKs. So `media`, `btd` and `pwd` would install their daemons with no app to
 drive them. Also **`media.mod` is at 1.1.0 and only `media-1.0.0` is built** — rebuild before
 copying anything.
 

@@ -92,12 +92,15 @@ fi
 
 # ---------------------------------------------------------------------- selftest
 #
-# Every package in this repository happens to ship no %config file, so the two
-# checks that matter most below -- that an edited %config survives as .rpmsave,
-# and that a plain file under /etc is caught before it ships -- never fire on
-# real input. A check that has never failed is not known to work. So --selftest
-# builds two deliberate fixtures, one correct and one wrong, and asserts this
-# script reaches the right verdict on each.
+# This said "every package in this repository happens to ship no %config file",
+# and as of 2026-10-06 four do: wifid, wifi-sync, mdns and the unshipped dexopt.
+# So the first of the two checks that matter most below -- that an edited %config
+# survives as .rpmsave -- now fires on real input. The second still does not, and
+# by design: nothing here ships a plain file under /etc, which is exactly the
+# mistake being hunted, so there is no real input that can exercise it. A check
+# that has never failed is not known to work. So --selftest builds two deliberate
+# fixtures, one correct and one wrong, and asserts this script reaches the right
+# verdict on each.
 
 selftest() {
 	ft="$WORK/fixtures"

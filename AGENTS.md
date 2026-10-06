@@ -13,7 +13,8 @@ track hits a hard wall.
 **A second host, opened 2026-10-06.** A Dell Inspiron (Comet Lake-U, Fedora Silverblue 44, GNOME,
 Waydroid 1.6.3) is being evaluated as a target for this project's packages and for
 [WayDroid-ATV](https://github.com/WayDroid-ATV/waydroid-builds)'s Android 16 images.
-**22 of the 25 built packages move there, 19 unchanged** — and there is no Waydroid version gap to
+**22 of the 25 built packages move there, 19 unchanged** (23 of 26 and 20 unchanged since `mdns`
+was packaged on 2026-10-06) — and there is no Waydroid version gap to
 cross, because 1.6.3 *is* the newest release. Android 16 is a trade rather than an upgrade: it keeps
 the thirteen host-side packages and voids most of the Android-side half. See
 [docs/63-second-host-and-android-16.md](docs/63-second-host-and-android-16.md), which also carries
@@ -1028,7 +1029,12 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   `build-mod.sh` ([docs/47-package-split.md](docs/47-package-split.md)); the four hand-written
   specs and `build-rpms.sh` are the superseded layout and still the only thing the legacy path
   can build. `packaging/README.md` records what has actually been through `rpmbuild`.
-  **Read it before assuming anything is packaged**: revised 2026-09-24, there are 14 `.mod`
+  **Read it before assuming anything is packaged**, and get the count from
+  `packaging/gen-spec.sh --list` rather than from prose — it marks the unshipped ones and cannot
+  go stale. **26 `.mod` files as of 2026-10-06, 25 shipped**; the newest is `mdns`, which is also
+  the first host modification to declare a `CHECK` (its `%check` reproduces the verified
+  `avahi-daemon.conf` from the stock one byte for byte, and `gen-spec.sh` needed a one-line fix
+  before a host `.mod` could declare one at all). Revised 2026-09-24, there were 14 `.mod`
   files against ~36 modifications and 12 produce an *installable* package — the two that do
   not are `wifid`, which is SRPM-only here because its source build needs Fedora's
   `libgbinder-devel`, and `wifi-hostd`, which hard-requires it.

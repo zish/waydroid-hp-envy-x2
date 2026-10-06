@@ -57,8 +57,8 @@ Three caveats that follow from the same mount line, and are worth having written
 |---|---|---|---|
 | `lxc.net.0.name = wlan0` | `/var/lib/waydroid/lxc/waydroid/config` | Waydroid, regenerated | no — and `waydroid upgrade` erases the edit ([docs/34](34-wifi-second-radio.md)) |
 | dexopt properties | `/var/lib/waydroid/waydroid_base.prop` | Waydroid, regenerated | yes — `install.sh` writes `.pre-dexopt` |
-| mDNS reflector | `/etc/avahi/avahi-daemon.conf` | the `avahi` package | repo copy only ([artifacts/mdns](../artifacts/mdns)) |
-| mDNS source-port rule | firewalld `public.xml` | firewalld | repo copy only |
+| mDNS reflector | `/etc/avahi/avahi-daemon.conf` | the `avahi` package | yes, since 2026-10-06 — the reconciler writes `.pre-waydroid-ext`; also a repo copy ([artifacts/mdns](../artifacts/mdns)) |
+| mDNS source-port rule | ~~firewalld `public.xml`~~ | firewalld | n/a since 2026-10-06 — no longer a file edit at all, see below |
 | `use_compaction=true` | Android `device_config`, in `/data` | Android | n/a — lost every restart ([docs/43](43-app-freezer.md)) |
 
 These are in-place modifications of files that belong to somebody else, and they are the
@@ -71,6 +71,23 @@ overwrite the saved original with an already-modified copy on a second run.
 
 The firewalld edit should not be an edit at all: firewalld takes a permanent rich rule via
 `firewall-cmd`, which is additive and removable by name. Only avahi genuinely has no drop-in.
+
+**Both halves done 2026-10-06 in `waydroid-ext-mdns`**, the firewalld one exactly as described
+here. A *packaged firewalld service definition* in `/usr/lib/firewalld/services` was the tempting
+third option and was rejected: a firewalld service applies to both address families, and the rule
+[docs/45](45-mdns-reflection.md) measured the exposure of is `family="ipv4"`.
+
+One sharpening of the table above while writing it: **`/etc/firewalld/zones/public.xml` is not a
+packaged file at all**, which is why this row is less like the avahi one than it looked. firewalld
+keeps its shipped defaults in `/usr/lib/firewalld/zones` and uses `/etc/firewalld/zones` for
+customisation, so the file captured as
+[artifacts/mdns/firewalld-public.xml](../artifacts/mdns/firewalld-public.xml) is not avahi's
+situation — nothing is being edited out from under another package, and `rpm -V firewalld` has
+nothing to say about it. The repo's own `.orig` copy is the evidence: it already carried `ssh`,
+`mdns` and `dhcpv6-client` before any of this, so that file was the host's customisation and not
+pristine package content. The two-tier layout itself is from `firewalld.zone(5)` and has **not**
+been re-verified on bigtab01, because firewalld is not installed on the dev box; it does not change
+the conclusion either way, since `firewall-cmd` is what writes there in both readings.
 
 ### The `.orig` files are not restore points — they are the upstream tripwire
 
@@ -175,7 +192,7 @@ with `waydroid-ext-overlay-sync` 1.1.0 on 2026-09-26, and only the fetched row i
 | `waydroid-ext-binder-nice` | noarch | `RLIMIT_NICE` drop-in — one file, ~1 000 000 log lines a boot | [40](40-binder-nice.md) |
 | `waydroid-ext-backlight-selinux` | noarch | CIL module + udev rule | [42](42-backlight-selinux.md) |
 | `waydroid-ext-appfuse` | noarch | CIL module + boot-time loader — makes `openProxyFileDescriptor` work | [55](55-appfuse.md) |
-| `waydroid-ext-mdns` | noarch | avahi reflector + firewalld rule reconciler | [45](45-mdns-reflection.md) |
+| `waydroid-ext-mdns` | noarch | avahi reflector + firewalld rule reconciler — **written 2026-10-06** | [45](45-mdns-reflection.md) |
 | `waydroid-ext-dexopt` | noarch | dexopt property reconciler, values in `%config(noreplace)` | [43](43-app-freezer.md) |
 | `waydroid-ext-lxc-config` | noarch | **new** — reconciles `lxc.net.0.name` before container start | [34](34-wifi-second-radio.md) |
 | `waydroid-ext-tools` | noarch | `bin/*-test.sh` and the stdlib probes | — |
@@ -299,6 +316,19 @@ The same shape covers the non-overlay reconcilers: `waydroid-ext-dexopt`,
 `waydroid-ext-mdns` and `waydroid-ext-lxc-config` each ship a reconciler that is a no-op on an
 uninitialised host and is wired to both a `%post` and an `ExecStartPre`.
 
+**Corrected 2026-10-06, by `waydroid-ext-mdns` 1.0.0 being written — the `ExecStartPre` half is
+wrong for that one.** The reconciler and the `%post` are as prescribed, but mDNS is discovery
+over a live socket, not an input Android latches at container start: the Canon appeared in a
+session that was already running. So there is nothing for `waydroid-container.service` to be
+ordered against, and the package ships a `WantedBy=multi-user.target` oneshot ordered `After=`
+avahi and firewalld instead — the same guarantee without inventing a dependency on the container.
+The `ExecStartPre` shape stays right for `dexopt` and `lxc-config`, whose inputs genuinely are
+read at container start. Two further departures that only show up in the writing, both in
+[`packaging/mods/mdns.mod`](../packaging/mods/mdns.mod): the `%post` uses `--no-restart`, because
+restarting avahi — another package's daemon — inside an rpm transaction is not this project's
+choice to make, and the reconciler refuses to write at all unless the installed avahi binary is
+known to carry every key it is about to set.
+
 ## Gaps this design exposed
 
 - ~~**The manifest format cannot express a symlink.**~~ **Closed 2026-09-26** by the `link` row
@@ -370,7 +400,13 @@ and neither wants a diversion:
   `avahi-daemon` contains no `conf.d` path string. So it is an in-place edit, and the right
   treatment is the one `artifacts/dexopt/install.sh` already uses: idempotent merge, keep a
   `.pre-waydroid-ext` copy the first time anything changes, refuse to overwrite that copy on a
-  re-run. A diversion here would be worse than an edit on three counts: `rpm -V avahi` would
+  re-run. **Done 2026-10-06**, with one correction to this prescription that only appeared in the
+  writing: `dexopt`'s merge drops the line for a key and appends ours, which is right for a flat
+  property file and **wrong** for a sectioned one — an appended `enable-reflector=yes` lands
+  inside `[rlimits]`, where it is an unknown key, and avahi then refuses to start. The merge has
+  to replace each key where it already stands. [docs/45](45-mdns-reflection.md) has the rest,
+  including the capability gate that keeps the same fact from being triggered by an avahi too old
+  for `reflect-filters`. A diversion here would be worse than an edit on three counts: `rpm -V avahi` would
   start lying, a diverted file stops receiving avahi's own security updates, and on an
   rpm-ostree host the scriptlet that set it up would run against the compose rather than the
   booted system.
