@@ -688,7 +688,8 @@ Goal 4 is now **Wi-Fi** — scoped 2026-09-07, nothing built; see
 media is now goal 6. It is untouched and remains the cheapest remaining item, but the owner
 deprioritised it below Wi-Fi.
 
-Goal 5 is **audio**, added 2026-09-11; scoped, nothing built. See
+Goal 5 is **audio**, added 2026-09-11. Scoped here, then built and parked on a branch
+(below). See
 [44-audio-alsa-backend.md](44-audio-alsa-backend.md). Phase 1 is a `--audio-backend
 {auto,alsa,pulse,none}` CLI option probed before Android boots; phase 2 is a DAW-grade HAL. Three
 things to know before touching it. Nobody is building a native PipeWire client for Waydroid and
@@ -697,9 +698,31 @@ name `"pulse"`, which is just a config alias — so redirecting it is small. Sha
 host is not possible (one substream per PCM here, dmix cannot cross the container's IPC namespace,
 PipeWire opens `hw:` directly), so this means dedicating a device, exactly like the second radio in
 [34](34-wifi-second-radio.md). And an availability probe run as root will lie, because root opens
-`/dev/snd/*` regardless while Android's audioserver is uid 1041 — `/dev/video0` being
-world-accessible is the only reason the camera works today. Nothing about audio has ever been
-tested on this machine, including whether it works at all right now.
+`/dev/snd/*` regardless while Android's audioserver is uid 1041 -- `/dev/video0` being
+world-accessible is the only reason the camera works today.
+
+**Built, measured, and then deliberately kept off master -- 2026-10-06.** Everything above
+this paragraph is the original scoping, and it is now out of date: goal 5 went a long way
+past "nothing built". It is on branch **`goal5-audio-alsa`** (tip `a72c6b2`, seven commits
+on top of master's current head), and bigtab01 was **reverted to the stock arrangement**
+afterwards, so master and the machine both describe Waydroid's default audio again. Read
+[44-audio-alsa-backend.md](44-audio-alsa-backend.md) **on that branch**: master's copy is
+the pre-build scoping document and stops before anything was measured.
+
+What is on the branch, all of it runtime-verified:
+
+| | |
+|---|---|
+| a real fast audio path | the gate was `No FastMixer`, not the policy XML. The HAL hardcoded a 1024-frame buffer for every format; **one patched byte** makes it 256. HAL frame count 1024 -> 256, normal frame count 768, FastMixer alive at `mixPeriod=5.33 ms`, 0 underruns and 0 delayed writes at 100% host CPU |
+| an ordinary app on it | `audio-probe` measures `LOW_LATENCY` **granted**: 512 frames = **10.67 ms**, against a 48 ms ordinary floor; `PROPERTY_OUTPUT_FRAMES_PER_BUFFER` 1024 -> 256 |
+| the host with no sound server | `bin/pipewire-off.sh` leaves **0 PipeWire processes** while keeping the libraries every other app links |
+| host Bluetooth audio without one | BlueALSA v5.0.0, A2DP to real headphones. The blocker was a **`dontaudit`'ed SELinux denial** -- `system_dbusd_t` writing BlueALSA's PCM pipe -- so nothing was ever logged |
+
+And what is **not** done, which is why it was parked rather than finished: nothing in Waydroid
+reaches `pcm.bluealsa` (the Android-to-BlueALSA bridge is unbuilt, and `snd-aloop` plus a host
+bridge is the cheap route); capture is still broken by a format mismatch in the HAL; AAudio
+EXCLUSIVE needs five HAL functions that do not exist; and `get_presentation_position` is the
+highest-value thing left, since it fixes `getTimestamp` and A/V sync without MMAP.
 
 Goal 7 is **Android's per-app freezer**, added 2026-09-10. See
 [43-app-freezer.md](43-app-freezer.md), substantially rewritten on 2026-09-12 and extended on
