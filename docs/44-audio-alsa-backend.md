@@ -1609,6 +1609,98 @@ the NDK can build (the [docs/08](08-camera-fixed.md) pattern), but it is a proje
 AAudio in SHARED mode already rides the FastMixer, so it gets today's 10.67 ms. EXCLUSIVE is what
 would bypass the mixer entirely.
 
+## PipeWire removed from the running process list, 2026-10-06
+
+Goal, in the owner's words: "remove pipewire completely from the list of running processes, while
+still retaining the same abilities." Done, with `bin/pipewire-off.sh off`. **Zero PipeWire
+processes, no session restart, no greeter risk, and Waydroid's audio unaffected** -- verified with a
+tone playing: card open at `S16_LE/48000/period 256/buffer 1024`, FastMixer in `MIX_WRITE`,
+`writeErrors=0 underruns=0 overruns=0`, and `pgrep -x pipewire|wireplumber` returning 0.
+
+### WirePlumber is PipeWire, and uninstalling is the wrong lever
+
+WirePlumber is PipeWire's **session manager** -- a separate binary and package, part of the same
+stack. Stopping it alone leaves `pipewire` and `filter-chain` running with nothing configuring
+them, so it is not the whole job.
+
+Uninstalling is worse than it looks. `pipewire` is a **base-image** package on Sericea, so removal
+needs `rpm-ostree override remove` and a reboot; and `pipewire-libs` provides
+`libpipewire-0.3.so.0`, which is required by **firefox, waybar, xdg-desktop-portal,
+xdg-desktop-portal-wlr and uresourced**. Taking the library would take those with it. The initial
+package-level query was misleading: `rpm -q --whatrequires pipewire` named only
+`waydroid-ext-pwd`, our own package, because everything else depends on the *soname*, not the
+package name.
+
+Masking the units gets the stated goal exactly -- nothing running -- while every library stays in
+place for those programs to keep linking. Six units, all of which *run*:
+
+```
+pipewire.service  pipewire.socket  pipewire-pulse.service
+wireplumber.service  filter-chain.service  waydroid-pwd.service
+```
+
+### The upstream bug does not have to block it
+
+docs/44 recorded Waydroid's unconditional pulse-socket mount entry as blocking PipeWire's removal.
+It does block the obvious approach. `lxc.py:204`:
+
+```python
+pulse_host_socket = os.path.join(session["pulse_runtime_path"], "native")
+make_entry(pulse_host_socket, pulse_container_socket[1:])
+```
+
+`generate_session_lxc_config`'s `make_entry` skips its existence check whenever `dist` is given,
+then calls `add_node_entry(..., check=False)`, which appends regardless. Default options are
+`rbind,create=file 0 0` -- **no `optional`**, unlike its sibling in `generate_nodes_lxc_config`.
+The live entry, confirmed in `config_session`:
+
+```
+lxc.mount.entry = /run/user/1000/pulse/native run/xdg/pulse/native none rbind,create=file 0 0
+```
+
+A bind mount needs its **source** to exist. Remove whatever creates
+`/run/user/1000/pulse/native` and the next session start dies on a fatal mount entry -- at the
+SDDM greeter, with no autologin, needing someone at the keyboard.
+
+**The way through is to notice who actually creates that socket.** `pipewire-pulse.socket` is a
+*pure systemd socket unit* -- `ListenStream=%t/pulse/native`, `ConditionUser=!root`, and **no
+`Requires=` on `pipewire.service`**. systemd binds it. `pipewire-pulse.service` is
+socket-activated and, with nothing connecting any more, already sat `inactive dead` while the
+socket sat `active listening`.
+
+So: **mask everything that runs, and leave `pipewire-pulse.socket` enabled.** The mount source is
+recreated at every login by systemd with zero PipeWire behind it. No shim file, and no tmpfiles
+ordering race against an SDDM-launched session script -- which was the first design considered and
+rejected, because betting a login against `systemd-tmpfiles-setup.service` winning a race is
+exactly how the greeter trap happens. If anything ever does connect to that socket, systemd tries
+to start the masked service and the connection is refused; nothing in the container connects,
+because the HAL resolves `"pulse"` through `asound.conf` to `hw:1,0`.
+
+`off` verifies the socket survived and **rolls itself back** if it did not, rather than leaving the
+machine un-loginable.
+
+### Why nothing was lost here, specifically
+
+Measured before masking, and this is what makes it safe on *this* host rather than in general:
+
+- `wpctl status` had an **empty Audio section** -- card 1's profile is Off because Android owns it.
+  The graph was carrying nothing.
+- Of everything linking `libpipewire-0.3.so.0`, **none were running**: firefox 0, waybar 0,
+  xdg-desktop-portal 0, xdg-desktop-portal-wlr 0, pavucontrol 0. This is a `cage` kiosk, not a Sway
+  desktop.
+- The only live PipeWire client was `waydroid-pwd`, our own bridge for driving the host graph from
+  Android, which is pointless once the graph is gone and is masked with the rest.
+- `waydroid-cage-session` never calls `systemctl` or touches PipeWire, so masking cannot make the
+  session script fail. Checked, because a `set -e` script starting a masked unit would be another
+  greeter trap.
+
+What is genuinely given up: **host Bluetooth audio** (WirePlumber's `bluez5` monitor is what claims
+BlueZ's media endpoint -- nothing is paired today, so nothing breaks yet), screencast via
+`xdg-desktop-portal-wlr`, and waybar's volume module. On a kiosk running neither, the only real
+loss is A2DP, which is what the bluez-alsa plan is for.
+
+`bin/pipewire-off.sh on` reverses all of it immediately, with no restart.
+
 ### Still open after this
 
 - **`SCHED_FIFO` for the FastMixer.** It wants it; the container's `Max realtime priority` is 10

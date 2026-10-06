@@ -886,6 +886,40 @@ patching its own output. Now derives from `/etc/waydroid-extra/images/vendor.img
 without mounting, verified to reproduce the stock sha256. `debugfs`'s dump destination must be
 created by root.
 
+**2026-10-06: PipeWire is gone from the running process list.** `bin/pipewire-off.sh off` --
+**zero PipeWire processes, no session restart, no greeter risk**, Waydroid audio verified unaffected
+with a tone playing (card `S16_LE/48000/256x4`, FastMixer `MIX_WRITE`,
+`writeErrors=0 underruns=0 overruns=0`).
+
+WirePlumber is PipeWire's session manager, so it is part of the same job, not the whole of it. Six
+units run and are masked: `pipewire.service`, `pipewire.socket`, `pipewire-pulse.service`,
+`wireplumber.service`, `filter-chain.service`, `waydroid-pwd.service`.
+
+**Uninstalling is the wrong lever and the package query misleads.**
+`rpm -q --whatrequires pipewire` names only `waydroid-ext-pwd`, our own package -- but
+`libpipewire-0.3.so.0` from `pipewire-libs` is required by **firefox, waybar,
+xdg-desktop-portal, xdg-desktop-portal-wlr and uresourced**, which depend on the soname rather than
+the package name. `pipewire` is also base-image, so removal means `rpm-ostree override remove` plus
+a reboot. Masking keeps every library in place.
+
+**The upstream pulse-mount bug turned out not to block this.** It does block the obvious approach:
+`lxc.py:204` appends `lxc.mount.entry = /run/user/1000/pulse/native ... rbind,create=file 0 0`
+unconditionally with no `optional`, and a bind mount needs its source to exist -- so killing
+whatever creates that socket strands the next login at the greeter. **But systemd creates it, not
+PipeWire**: `pipewire-pulse.socket` is a pure socket unit (`ListenStream=%t/pulse/native`, no
+`Requires=` on pipewire.service) and was already `active listening` with the service `inactive
+dead`. So mask everything that runs and **leave `pipewire-pulse.socket` enabled** -- the mount
+source reappears every login with nothing behind it. A tmpfiles shim was considered first and
+rejected: racing `systemd-tmpfiles-setup.service` against an SDDM-launched session script to keep a
+login working is how the greeter trap happens. `off` checks the socket survived and rolls itself
+back if not.
+
+Safe on *this* host specifically because `wpctl status` had an empty Audio section (Android owns
+card 1) and none of firefox/waybar/either portal/pavucontrol were running -- it is a cage kiosk.
+`waydroid-cage-session` never calls `systemctl`, checked for the same reason. **Given up:** host
+Bluetooth audio (WirePlumber's `bluez5` monitor claims BlueZ's media endpoint; nothing is paired
+yet), screencast, waybar's volume module. A2DP is what bluez-alsa would restore.
+
 **Open, and worth doing next.** A true acoustic round-trip number, which needs no cable and no
 physical step: the built-in mic is on the same card, `hw:1,0`'s capture substream is free, and
 `/dev/snd/pcmC1D0c` is already 0666 from the arm's udev rule — play a chirp from Android, record
