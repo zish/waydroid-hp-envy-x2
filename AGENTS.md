@@ -10,6 +10,15 @@ the same hardware drivers, which originate on the Linux side, so it makes the go
 harder rather than easier while discarding a mature userspace. Revisit only if the Waydroid
 track hits a hard wall.
 
+**A second host, opened 2026-10-06.** A Dell Inspiron (Comet Lake-U, Fedora Silverblue 44, GNOME,
+Waydroid 1.6.3) is being evaluated as a target for this project's packages and for
+[WayDroid-ATV](https://github.com/WayDroid-ATV/waydroid-builds)'s Android 16 images.
+**22 of the 25 built packages move there, 19 unchanged** — and there is no Waydroid version gap to
+cross, because 1.6.3 *is* the newest release. Android 16 is a trade rather than an upgrade: it keeps
+the thirteen host-side packages and voids most of the Android-side half. See
+[docs/63-second-host-and-android-16.md](docs/63-second-host-and-android-16.md), which also carries
+the next-attempt checklist. Nothing in it has been run on that machine yet.
+
 ## The host
 
 | | |
