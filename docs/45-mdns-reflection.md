@@ -480,17 +480,41 @@ is the same guarantee without inventing a dependency on the container.
 
 ### Exercised, and what was not
 
-The merge, both refusal paths, the capability gate in both directions, `--verify` before and
-after, `--revert` with and without a saved copy, and `rpmbuild` plus
+On the dev box: the merge, both refusal paths, the capability gate in both directions,
+`--verify` before and after, `--revert` with and without a saved copy, and `rpmbuild` plus
 `packaging/test-install.sh` (7 passed, 0 failed, and it is the first host package here to clear
-rpmlint's `no-%check-section`). All of that ran on the dev box, where it is byte-for-byte
-checkable.
+rpmlint's `no-%check-section`).
 
-**Not exercised: the two paths that need a live avahi.** The restart after a changed file, and
-the roll-back-and-restart when the daemon refuses to come up, both branch on
-`systemctl is-active avahi-daemon`, and there is no avahi on the dev box. They want one run on
-bigtab01 before this is relied on -- which is the same visit that would finally settle the
-reboot question below.
+**Installed on bigtab01 on 2026-10-06** -- the fifth migration, written up in
+[packaging/README.md](../packaging/README.md), which also records the one thing that went wrong
+and was not ours. Two results belong here rather than there, because they are about this document's
+own claims:
+
+- **The host's `avahi-daemon.conf` is byte-identical to
+  [../artifacts/mdns/avahi-daemon.conf](../artifacts/mdns/avahi-daemon.conf)** (`49d456d8…`), and
+  its `.pre-reflector` to [the stock copy](../artifacts/mdns/avahi-daemon.conf.orig)
+  (`8da9c30c…`). So the `%check` is now checked against the live host and not only against the
+  repository, and the stock file has **not** moved under us -- which matters, because the host was
+  rebased to a new base image the same day.
+- `waydroid-mdns-reflector --verify` exits **0** on the host: the config agrees, and the
+  source-port rule is present in both the runtime and permanent configurations of zone `public`.
+  The zone was *derived* from `firewall-cmd --get-default-zone` rather than hardcoded, and it
+  resolved to `public`, which is the zone `wlp1s0` is in.
+
+**Still not exercised, and the reason changed.** The restart after a changed file and the
+roll-back-and-restart when the daemon refuses both branch on `systemctl is-active avahi-daemon`.
+On the dev box there is no avahi; on bigtab01 there is, but the reconciler found the file already
+correct, reported `unchanged`, and never reached either branch -- `avahi-daemon`'s
+`ActiveEnterTimestamp` is still this boot's. Reaching them means deliberately perturbing one key
+first, which is safe: the self-heal is what catches it, and nothing in this package touches the
+container.
+
+**The container-side probe could not run either.** bigtab01 has been at the SDDM greeter since it
+booted, with `Session: STOPPED` and no `waydroid0`, so there was no namespace to `nsenter` into.
+Host-side is healthy -- `avahi-browse -rtp _ipp._tcp` returns the Canon with `mopria-certified=1.3`
+and the `URF=` keys intact. Note that `systemctl is-active waydroid-container.service` reporting
+`active` is **not** the test for this: that is the container *manager*, not a running container,
+and `waydroid status` is what answers.
 
 ## Open questions
 

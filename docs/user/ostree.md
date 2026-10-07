@@ -53,6 +53,48 @@ to stage it again.**
 > This follows from the unit definition above and from `/run` being tmpfs, both of which are
 > verified. It has not been confirmed by deliberately power-cutting a machine mid-stage.
 
+## `--apply-live` can report failure after having already applied
+
+`rpm-ostree install --apply-live` lands the change now *and* stages the same deployment for the
+next boot, which is how most of this project's packages reached their host. It runs a sequence, and
+a step **after** the filesystem work can fail while the filesystem work has already succeeded:
+
+```
+Updating /usr...done
+Updating /etc...done
+Running systemd-tmpfiles for /run and /var...done
+error: Running tmpfiles for /run and /var: Running systemd worker: exit status: 73
+```
+
+The exit code says the command failed. The package is installed anyway — `rpm -q` answers and the
+files are on disk, `%config` files in `/etc` included. So **do not read a non-zero exit as "nothing
+happened"**, and do not re-run the install on that assumption; check first.
+
+**What the failure costs you is the bookkeeping, not the files.** Compare these two:
+
+| In `rpm-ostree status` | Meaning |
+|---|---|
+| `LiveCommit: <hash>` equal to the pending deployment's `Commit` | the running filesystem is consistent with what the next boot lands on, and nothing is owed |
+| `InterruptedLiveCommit: <hash>` | the content applied, and rpm-ostree does not consider the sequence finished |
+
+With `InterruptedLiveCommit` set, expect a further `--apply-live` on that host to object until
+either the underlying fault is fixed or the machine is rebooted into the staged deployment. A
+reboot clears it.
+
+**One cause seen in practice, on a host that had been working for weeks:** `/var` owned by a
+regular user instead of `root`. systemd 259 refuses what it calls an unsafe path transition when a
+parent directory is owned by a non-root user, which makes the tmpfiles step fail. It is harmless at
+boot — the boot-time unit logs the same complaints and still reports `Finished` — so it can sit
+unnoticed until an `--apply-live` turns it into an error.
+
+```bash
+ls -ld /var                       # expect root root
+sudo systemd-tmpfiles --dry-run --create --remove --boot --prefix=/run --prefix=/var
+```
+
+The second command names every path it objects to without changing anything, which is how to tell
+this cause from another.
+
 ## How to tell which state you are in
 
 ```bash

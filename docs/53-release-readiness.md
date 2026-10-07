@@ -80,6 +80,15 @@ second one put `overlay-sync` and `camera-gbm` in force and so ended the "none o
 installed" answer for the overlay half too, and the third took the overlay to 4 of its 13 files.
 See `packaging/README.md`, *First real migration*, *Second migration* and *Third migration*.
 
+**Closed 2026-10-06: all 25 shipped modifications are installed on bigtab01.** `mdns` was the last
+one and went on the day it was written (`packaging/README.md`, *Fifth migration*). `dexopt` is the
+only `.mod` not there and it declares `SHIPPED=no`, so there is nothing left for this question to
+be about. Two caveats that are not the headline and should not be lost in it: **`media` runs 1.0.0
+while `media.mod` declares 1.1.0**, which has never been built, so "everything declared" is not the
+same claim as "everything installed"; and the fifth migration left the host with
+`InterruptedLiveCommit` set, from a pre-existing `/var` ownership fault rather than from any
+package, which a reboot clears and which the next deploy onto that host should expect.
+
 ### A third reason `wifid` cannot do a full build, which nobody had written down
 
 [packaging/mods/wifid.mod](../packaging/mods/wifid.mod) sets:

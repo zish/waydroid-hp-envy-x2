@@ -50,8 +50,14 @@ a count maintained by hand does. `packaging/gen-spec.sh --list` is the answer th
 stale, and it marks the unshipped one.
 
 **The only modification added since 2026-09-28 is `mdns`**, on 2026-10-06, and it is the one
-the installable claim above is extended to: built, linted to the same baseline as the rest, and
-`packaging/test-install.sh mdns` passes 7 of 7. It is also **the first host modification here to
+the installable claim above is extended to: built, linted to the same baseline as the rest,
+`packaging/test-install.sh mdns` passes 7 of 7, and **installed on bigtab01 the same day** -- which
+makes all 25 shipped modifications installed there. See the fifth migration below.
+
+One version drift found while counting, and not fixed here: **`media.mod` declares 1.1.0, only
+`media-1.0.0` is built, and 1.0.0 is what bigtab01 runs.** [docs/63](../docs/63-second-host-and-android-16.md)
+already flagged it. So "everything built is deployed" is true and "everything declared is deployed"
+is not. It is also **the first host modification here to
 declare a `%check`**, which needed a one-line fix to `gen-spec.sh` — `CHECK` was in its defaults
 and written only by the overlay arm, so until then a host `.mod` could declare a `%check` and
 have it silently dropped. The 25 pre-existing specs render byte-identically before and after
@@ -846,6 +852,119 @@ load "packaged" even when the selected file is a `/usr/local` shadow, so the DIF
 names which file is in use, so it is confusing rather than wrong. It is inherited verbatim from
 `waydroid-backlight-policy`, which has it too, and fixing it in one and not the other would be
 worse than leaving both. Worth a coordinated one-word change next time either is versioned.
+
+### Fifth migration — mdns, done 2026-10-06, and `--apply-live` reported failure after succeeding
+
+`waydroid-ext-mdns` 1.0.0 is installed and live. **That makes 25 `waydroid-ext-*` packages
+layered on bigtab01, which is every shipped modification** — `dexopt` is the only `.mod` not
+there, and it declares `SHIPPED=no`. The "zero percent" answer above has gone from historical to
+fully closed.
+
+The base had moved under us first, and benignly: the host was rebased to `44.20261006.0`
+(`BaseCommit 880df8c8…`) earlier the same day, carrying all 24 existing LocalPackages forward.
+The `8b4dcffc…` base that the first migration above names is now the third, rollback deployment.
+
+**The install reported `error: Running tmpfiles for /run and /var: Running systemd worker: exit
+status: 73` — and had already done everything.** Worth being precise about, because the exit code
+says the opposite:
+
+```
+Updating /usr...done
+Updating /etc...done
+Running systemd-tmpfiles for /run and /var...done
+error: Running tmpfiles for /run and /var: Running systemd worker: exit status: 73
+```
+
+Verified afterwards: `rpm -q waydroid-ext-mdns` answers, and all four packaged paths are on disk
+including `/etc/waydroid-mdns.conf` — which incidentally settles a question the package was written
+not knowing the answer to, **`--apply-live` does place a `%config` file in `/etc`**, it is not
+deferred to the boot-time merge.
+
+**The cause is a pre-existing host defect, not this package and not rpm-ostree.** `/var` is owned
+by `jmelanso:jmelanso` rather than `root:root`, and systemd 259 refuses what it calls an unsafe
+path transition when a parent is owned by a non-root user:
+
+```
+$ ls -ld /var
+drwxr-xr-x. 1 jmelanso jmelanso 272 Oct  6 16:13 /var
+$ sudo systemd-tmpfiles --dry-run --create --remove --boot --prefix=/run --prefix=/var
+Detected unsafe path transition /var (owned by jmelanso) → /var/lib (owned by root) …
+```
+
+Established as pre-existing rather than assumed: the same warnings are in this boot's own
+`systemd-tmpfiles-setup.service` journal at **16:13:23**, and the package was installed at
+**19:36:44** — over three hours later. 301 occurrences in the last seven days. Nothing this project
+ships or runs chowns `/var`; every `chown` in the tree is scoped to one file inside Android's data,
+or a BlueZ or PipeWire temp file. At boot the same complaints are non-fatal and the unit still
+reports `Finished`; it is rpm-ostree's own invocation that treats a non-zero result as an error.
+**The fix is `chown root:root /var` and it was deliberately not done here** — it is outside this
+migration and is the owner's call.
+
+**The consequence that does matter: `InterruptedLiveCommit`, not `LiveCommit`.** The section above
+gives `LiveCommit` equalling the pending `Commit` as the test for a consistent live apply. That is
+not what this one recorded:
+
+```
+  fedora:…/sericea                           <- staged
+                   Commit: 56041d99…
+                     Diff: 1 added
+* fedora:…/sericea                           <- booted
+                   Commit: 3db807ed…
+    InterruptedLiveCommit: 56041d99…
+                 Unlocked: transient
+```
+
+The hash is right — it is the staged deployment's commit — so the content applied is the correct
+content, and the package works. What rpm-ostree is recording is that its apply sequence did not
+finish. **A reboot into the staged deployment clears it**, and until then a further `--apply-live`
+should be expected to object. Anyone deploying the next package onto this host should fix `/var`
+or reboot first, rather than rediscovering this.
+
+**Nothing was restarted and nothing needed to be.** `avahi-daemon`'s `ActiveEnterTimestamp` is
+still `16:13:27`, this boot's start: the reconciler found `/etc/avahi/avahi-daemon.conf` already
+byte-identical to what it wants, reported `unchanged`, and never touched the daemon. The container
+was not touched either. `systemctl restart waydroid-mdns-reflector.service` — *restart*, not
+`start`, for the `Type=oneshot` + `RemainAfterExit=yes` reason the third migration recorded —
+returned `Result=success`, `ExecMainStatus=0`, and logged nothing beyond start and finish, which is
+`--quiet` behaving correctly.
+
+Verified in place:
+
+```
+$ sudo waydroid-mdns-reflector --verify
+ok    /etc/avahi/avahi-daemon.conf agrees with /etc/waydroid-mdns.conf
+ok    source-port rule live in zone public
+ok    source-port rule permanent in zone public      # exit 0
+```
+
+**Two hashes are now checked against the live host, not just the repository.** This is the real
+value of the deploy, because it is what the package's `%check` asserts:
+
+| | sha256 | |
+|---|---|---|
+| `/etc/avahi/avahi-daemon.conf` | `49d456d8…` | **equals** `artifacts/mdns/avahi-daemon.conf` |
+| `/etc/avahi/avahi-daemon.conf.pre-reflector` | `8da9c30c…` | **equals** `artifacts/mdns/avahi-daemon.conf.orig` |
+
+So the stock file has not moved under us despite the same-day base upgrade, and the repository's
+captured artifacts are a faithful record of the host. `.pre-reflector` was copied to
+`.pre-waydroid-ext` by hand as part of this migration: the reconciler never writes that copy on a
+host it already agrees with, so without the copy a later `--revert` would have taken its degraded
+path instead of restoring byte-exactly. **That step is specific to bigtab01** and is not needed on
+a host where the reconciler makes the change itself.
+
+**What could not be verified, and why.** The machine has been sitting at the SDDM greeter since it
+booted at 16:13 — no session has ever started this boot, `waydroid status` reports
+`Session: STOPPED`, and `waydroid0` does not exist. (`systemctl is-active
+waydroid-container.service` says `active` and is not the test: that is the container *manager*, not
+a running container.) So the container-netns probe in
+[docs/45](../docs/45-mdns-reflection.md) could not run, and neither could the two branches of the
+reconciler that need a live avahi. Host-side is healthy — `avahi-browse -rtp _ipp._tcp` returns the
+Canon with `mopria-certified=1.3` and the `URF=` keys intact, and the reflector keys are in force.
+
+One thing that fell out of the greeter state and is worth collecting at the next login: avahi has
+joined `lo` and `wlp1s0` only, because `waydroid0` is created at session start. That is exactly
+[docs/45](../docs/45-mdns-reflection.md)'s last open question — whether avahi picks the bridge up by
+hotplug when it appears after the daemon — and the next session start answers it for free.
 
 ## What was deployed on bigtab01 before that — audited 2026-09-15
 

@@ -1031,7 +1031,12 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   can build. `packaging/README.md` records what has actually been through `rpmbuild`.
   **Read it before assuming anything is packaged**, and get the count from
   `packaging/gen-spec.sh --list` rather than from prose — it marks the unshipped ones and cannot
-  go stale. **26 `.mod` files as of 2026-10-06, 25 shipped**; the newest is `mdns`, which is also
+  go stale. **26 `.mod` files as of 2026-10-06, 25 shipped, and all 25 installed on bigtab01** —
+  `mdns` was the last and closed that gap; `dexopt` is the only one absent and declares
+  `SHIPPED=no`. Two caveats behind the headline: `media` runs 1.0.0 against a `.mod` declaring
+  1.1.0 that was never built, and the fifth migration left `InterruptedLiveCommit` set from a
+  pre-existing `/var` ownership fault (`packaging/README.md`, *Fifth migration*;
+  [docs/user/ostree.md](docs/user/ostree.md) has the general case). The newest is `mdns`, which is also
   the first host modification to declare a `CHECK` (its `%check` reproduces the verified
   `avahi-daemon.conf` from the stock one byte for byte, and `gen-spec.sh` needed a one-line fix
   before a host `.mod` could declare one at all). Revised 2026-09-24, there were 14 `.mod`
