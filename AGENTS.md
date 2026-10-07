@@ -20,6 +20,16 @@ the thirteen host-side packages and voids most of the Android-side half. See
 [docs/63-second-host-and-android-16.md](docs/63-second-host-and-android-16.md), which also carries
 the next-attempt checklist. Nothing in it has been run on that machine yet.
 
+**App mode is a supported configuration from 2026-10-07, by the owner's decision.** On the Dell,
+Waydroid runs **as an app inside a normal GNOME session**, not as the session. Keep that working:
+anything that only makes sense when Android *is* the session — `cage`, and the `kiosk` group
+around it — is opt-in, never assumed. Two consequences are already known and are in docs/63:
+`waydroid-ext-backlight` is **predicted to break GNOME's brightness keys**, because its CIL names
+four domains that may write the panel and `systemd_logind_t` is not one of them — the same shape of
+regression [docs/42](docs/42-backlight-selinux.md) paid for with 978 failed boots; and
+`waydroid-ext-android-power` is already safe there, because it checks `GetSession` and exits 0 when
+no container is running.
+
 ## The host
 
 | | |
@@ -73,6 +83,12 @@ that line is still valid.
   took effect, and under cage there is no autologin, so the machine sat at the greeter until
   someone logged in at the console. `waydroid status` showing `Session: STOPPED` with
   `waydroid-container.service` still `active` is the signature of having done this.
+  **That logout step is bigtab01's, not the rule.** It is needed here only because the compositor
+  and the Waydroid session are the same thing. Where Waydroid runs as an app inside a desktop
+  session — the second host, [docs/63](docs/63-second-host-and-android-16.md) — `waydroid session
+  stop` and relaunching the app re-runs `mount_rootfs()` with no logout and no greeter. The rule
+  that does not change is *session*, not container: `systemctl restart
+  waydroid-container.service` applies neither the overlay nor `config_nodes` on either host.
   Always confirm a file is in effect by reading it from *inside* the
   container, never by `ls`-ing the overlay directory. See
   [docs/32-wifi-stage3.md](docs/32-wifi-stage3.md); this bit a Stage 0 file that had silently not

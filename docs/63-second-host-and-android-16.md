@@ -9,8 +9,8 @@ and voids most of the Android-side half.*
 
 ## One-paragraph summary
 
-**22 of the 25 built packages move to a second x86_64 Fedora host, 19 of them unchanged** — 23 of
-26 and 20 unchanged since `mdns` was packaged on 2026-10-06, counted on the same evidence rather
+**22 of the 25 built packages move to a second x86_64 Fedora host, 16 of them unchanged** — 23 of
+26 and 17 unchanged since `mdns` was packaged on 2026-10-06, counted on the same evidence rather
 than re-measured on the second host, which still has nothing from this project on it. The
 reason is that the thing a port would have had to chase does not exist: Waydroid's newest release
 is **1.6.3, published 2026-05-28**, which is what bigtab01 already runs, and `main` is only seven
@@ -109,7 +109,7 @@ reflector only has something to reflect if there is a print server or a Chromeca
 
 `waydroid-overlay-sync --check-upstream` exists for precisely this and is the pre-flight on any new
 host. The cheap way to make it a non-question is to copy bigtab01's own `system.img`/`vendor.img`
-across, at which point all 22 apply verbatim.
+across, at which point all 23 apply verbatim.
 
 **Do not install — 3.** `hw-ite8350` and `hw-envyx2` name this laptop (and are only *inert*
 elsewhere since 1.0.1 — 1.0.0 failed its resume unit about 11 s after every resume on a box with no
@@ -161,6 +161,64 @@ merely "the same but newer":
   load-bearing scriptlets precisely because rpm-ostree runs them against the compose rather than the
   booted system, and [docs/user/ostree.md](user/ostree.md) already exists. 16 GB against bigtab01's
   8 is not a factor in anything measured here.
+
+## App mode, not kiosk — a standing constraint from 2026-10-07
+
+**The owner will run Waydroid as an app from a normal GNOME session on the Dell, not as the
+session.** Stated as a requirement rather than a preference: compatibility with app mode is to be
+maintained from here on, which makes any package that only makes sense when Android *is* the session
+opt-in rather than assumed.
+
+What that changes, read off the payload rather than inferred from the package names:
+
+| Package | App mode on GNOME |
+|---|---|
+| `cage` | **Do not install.** Its entire payload is a `wayland-sessions` entry and the wrapper behind it, whose purpose is making Android the session |
+| `graceful-exit` | **Half of it works, and it is the half that matters.** The sway `bindsym` drop-in is inert — GNOME never reads `/usr/share/sway/config.d`. The user unit does not depend on sway: it is `WantedBy=graphical-session.target` with the work in `ExecStop=`, and GNOME starts and stops that target, so a GNOME logout should still shut Android down rather than SIGKILL it. **Untested on GNOME** — on bigtab01 it is explicitly a backstop that *races* sway's teardown ([docs/24](24-graceful-logout.md)), and whether GNOME gives it a cleaner window is unknown |
+| `android-power` | **Compatible, and already guarded.** `waydroid-android-lock` asks `GetSession` for the container state and exits 0 with a message when it is not `RUNNING` — the normal case in app mode with the app not launched. `waydroid-android-key` writes to the guest's `wl_keyboard` FIFO through `/proc/<pid>/root/dev` and never touches the compositor |
+| `backlight` | **Expect it to break GNOME's brightness keys.** Do not install it there without testing — see below |
+| Everything else | Mode-agnostic |
+
+### The `backlight` prediction, because it would present as an unrelated regression
+
+[`waydroid_backlight.cil`](../artifacts/backlight/waydroid_backlight.cil) gives
+`/sys/class/backlight/*/brightness` a private type and then names exactly four domains that may
+write it: `waydroid_t`, `udev_t`, `unconfined_t` and `init_t`. **`systemd_logind_t` is not among
+them** — and on GNOME the brightness keys go through gnome-settings-daemon to **logind**, not through
+the daemon this module was written for.
+
+That is the same shape of regression [docs/42](42-backlight-selinux.md) already paid for once:
+granting the private type silently removed `init_t`'s base-policy access to that file, and
+`systemd-backlight` then failed on **every boot for a day, 978 times**, leaving the host permanently
+`degraded`. The fix was one added `allow` line. If app-mode brightness is wanted on the Dell the same
+fix shape applies to `systemd_logind_t`.
+
+**This is read off the policy file, not measured.** The measurement is one keypress on the Dell, and
+it should be taken before the module is trusted there.
+
+### One thing app mode makes strictly better: deploying an overlay change
+
+AGENTS.md's procedure — log out of the `waydroid-cage` session at SDDM and log back in — exists
+because on bigtab01 the compositor and the Waydroid session are the same thing. In app mode they are
+not: GNOME is the compositor and the Waydroid session is a child of it. So `waydroid session stop`
+followed by relaunching the app re-runs `mount_rootfs()` and picks up a new overlay file **with no
+logout and no greeter**.
+
+The underlying rule is unchanged — the overlay merge and the LXC `config_nodes` entries are read at
+*session* start, and `systemctl restart waydroid-container.service` still applies neither — but the
+cheap way to restart a session exists there and does not here.
+
+The two scripts that refuse to run without a compositor socket, `bin/camera-test.sh` and
+`bin/sensor-hub-reset.sh --restart` (guarded 2026-10-01, commit `f3dbc14`), stay correct in app mode
+for a different reason than the one they were written for. The guard tests
+`$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, which on a GNOME desktop exists, so they proceed — and there
+`waydroid session stop` costs a relaunch rather than a physical login. Run over ssh to the Dell they
+will still refuse, which is over-cautious rather than wrong, and `--force` covers it.
+
+Finally, the `kiosk` group in [docs/47](47-package-split.md) — `cage`, `graceful-exit`,
+`graceful-shutdown`, `android-power` — is kiosk-only by name and by content. App mode wants
+`android-power`, and probably `graceful-exit`, installed individually. That group is unbuilt, so this
+is a note on the design rather than a change to anything shipped.
 
 ## Android 16 via WayDroid-ATV
 
