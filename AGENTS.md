@@ -13,7 +13,7 @@ track hits a hard wall.
 **A second host, opened 2026-10-06.** A Dell Inspiron (Comet Lake-U, Fedora Silverblue 44, GNOME,
 Waydroid 1.6.3) is being evaluated as a target for this project's packages and for
 [WayDroid-ATV](https://github.com/WayDroid-ATV/waydroid-builds)'s Android 16 images.
-**22 of the 25 built packages move there, 19 unchanged** (23 of 26 and 20 unchanged since `mdns`
+**22 of the 25 built packages move there, 16 unchanged** (23 of 26 and 17 unchanged since `mdns`
 was packaged on 2026-10-06) — and there is no Waydroid version gap to
 cross, because 1.6.3 *is* the newest release. Android 16 is a trade rather than an upgrade: it keeps
 the thirteen host-side packages and voids most of the Android-side half. See
