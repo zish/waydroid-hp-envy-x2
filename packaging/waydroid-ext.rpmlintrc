@@ -131,6 +131,25 @@ addFilter("waydroid-ext-(brightness-overlay|wifi-framework|wifi-hostd|camera-hal
 # deploy anything -- but failing before installation beats failing at boot.
 addFilter("waydroid-ext-(camera-hal|battery).*no-binary")
 
+# --------------------------------------- the Android-version capability token
+#
+# A .mod that declares ANDROID= renders one `Provides: waydroid-ext-android(N)`
+# per entry, so a host can ask `rpm -q --whatprovides 'waydroid-ext-android(16)'`
+# rather than reading twenty-seven spec files. rpmlint wants an explicit Provides
+# to carry a version, which is right for a provide that stands in for a package
+# and wrong for a capability token: the version is the thing INSIDE the
+# parentheses, exactly as it is for config(), bundled() and mimehandler().
+#
+# Scoped to the token name and not to a package list, deliberately. Every mod
+# that classifies itself will trip this and none of them is a new decision, but
+# any OTHER unversioned explicit Provides anywhere in the repository still shows
+# up and still has to be looked at.
+# (The trailing "(" is left out of the pattern on purpose: rpmlint takes these
+# as raw regexes, so a backslash here is a literal backslash and "\\(" opens an
+# unterminated group that aborts the whole lint run. The token name alone is
+# already as narrow as the paren would make it.)
+addFilter("unversioned-explicit-provides waydroid-ext-android")
+
 # ------------------------------------------- rm of our own state on uninstall
 #
 # All three SELinux packages' %postun remove /var/lib/waydroid-<name>/policy.sha256,

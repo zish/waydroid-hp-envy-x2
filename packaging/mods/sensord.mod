@@ -47,6 +47,13 @@ KIND=host
 # package would install on an aarch64 host and fail there rather than on the shelf.
 ARCH=x86_64
 
+# Android 13 only, and this is a measured negative rather than an untried one.
+# The A16 vendor image contains NO HIDL sensors HAL and declares none in its
+# VINTF manifest -- the seam docs/14 is built on is gone image-side, and A16's
+# sensors HAL is AOSP's AIDL example in /vendor/apex. Porting is a rewrite, not
+# a re-measurement. docs/64.
+ANDROID="13"
+
 SUMMARY="Serve Android's sensors and lights HALs from the host's IIO sensor hub"
 
 # GPL-3.0-or-later, which is what sensors/LICENSE says and what the superseded

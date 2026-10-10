@@ -49,6 +49,12 @@ KIND=overlay
 # on the shelf.
 ARCH=x86_64
 
+# Android 13 only, and the cheapest of the four to extend: A16 ships the same
+# binary at the same path with a different hash, so the LENS_FACING offset is
+# re-derivable rather than lost. When it is, this becomes ANDROID="13 16" with
+# a second derive row keyed on the A16 stock hash. docs/64.
+ANDROID="13"
+
 SUMMARY="External camera seen as a rear camera, capped where the HAL can convert"
 
 # Both files derive from AOSP: hardware/interfaces/camera/device/3.4/default

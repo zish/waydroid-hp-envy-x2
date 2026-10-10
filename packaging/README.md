@@ -14,6 +14,57 @@ is an overlayfs lowerdir over a read-only image), names the seven overlay files 
 a stock file and are therefore the surface an image upgrade can break, and carries the
 Debian/Ubuntu and other-distro roadmap. Read it before touching anything here.
 
+## Which Android a modification applies to — the `ANDROID` field, added 2026-10-09
+
+There are now two images in play — bigtab01's LineageOS 20 (Android 13, API 33) and the
+WayDroid-ATV LineageOS 23.2 build (Android 16, API 36) — and until this field existed nothing
+in a `.mod` said which one a modification was valid for. A `.mod` may now declare:
+
+```sh
+ANDROID="13"        # known to apply to Android 13
+ANDROID="13 16"     # both
+ANDROID="any"       # contains nothing image-specific
+```
+
+Each entry renders one `Provides: waydroid-ext-android(N)`, so a host can ask
+`rpm -q --whatprovides 'waydroid-ext-android(16)'` instead of reading twenty-seven spec files.
+`gen-spec.sh --list` shows the value, or `?` where it is unset.
+
+**`any` is a claim about content, not about testing.** It means the modification contains
+nothing an image could invalidate — host policy, host configuration, a host daemon that speaks
+no versioned Android interface. A modification that merely has not been *tried* on an image does
+not get listed for it.
+
+**Unset is the default and renders nothing.** All twenty-seven specs were confirmed to render
+byte-for-byte identically with the field in place and unset, the same way `gen-spec.sh`'s
+earlier `CHECK` fix was checked. Classifying the remaining mods by guesswork would be worse
+than admitting the gap, so `--list` shows `?` and the backlog stays visible. Six are classified
+so far, each from measured evidence in [docs/64](../docs/64-vidiot01-atv-host.md): `sensord`,
+`wifid`, `battery`, `camera-hal` and `camera-gbm` as `13`, and `binder-policy` as `any`.
+
+**This is deliberately not a branch.** [docs/47](../docs/47-package-split.md) already answered
+the same question for supporting Debian and Arch alongside Fedora — one spec set, the expensive
+content written once, each target's template only the part that genuinely differs. Android
+version is another axis of the same kind, and 17 of 26 modifications are unchanged between the
+two images; a branch would make those seventeen the thing maintained twice.
+
+### `%check` coverage, counted properly
+
+Worth stating precisely, because counting only the mods that *declare* `CHECK=` badly
+understates it: **8 of 27 have a `%check`.** Overlay-kind mods get one **synthesised** by
+`gen-spec.sh` — it verifies every payload file against the manifest and fails the build if a
+`derive` or `link` row ships bytes it must never ship — so all six have one without declaring
+anything. Two host-kind mods declare their own: `mdns` and `binder-policy`. The gap is the
+other seventeen host mods, and the two group mods.
+
+`wifid` is the third declared check, added 2026-10-09, and it is a **tripwire rather than a
+test**: which service-manager protocol the daemon must speak is a property of the image
+(`aidl3` at API 33, `aidl6` at API 36), `service.cpp` hardcodes it as a `#define`, and one
+compiled constant cannot be both. So the check pins the constant to what `ANDROID=` claims and
+fails the build if they drift apart. Confirmed to fire by flipping `SM_PROTOCOL` to `aidl6` in
+a copy of the tree. `battery` and `camera-hal` — the other two divergent modifications — are
+overlay-kind and already covered by the synthesised check.
+
 ## Built is not the same as installable — audited 2026-09-22, revised 2026-09-24
 
 The table below says which modifications survive `rpmbuild`. It does not say whether the

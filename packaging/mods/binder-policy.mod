@@ -97,6 +97,15 @@ KIND=host
 # names a CPU or a machine.
 ARCH=noarch
 
+# `any`, and the word means what the generator defines it to mean: this
+# modification contains nothing image-specific. It is two allow rules about
+# container-selinux's spc_t and container_runtime_t, which are the host's
+# types and not the image's, so no image can invalidate it. WHETHER it is
+# NEEDED does depend on the image -- only an image whose HALs are APEX-packaged
+# is denied without it -- but a modification that is inert is not one that is
+# wrong, and on A13 it loads and changes nothing.
+ANDROID="any"
+
 SUMMARY="Let Android's APEX-packaged HALs use binder, so the container boots"
 
 LICENSE="GPL-3.0-or-later"
