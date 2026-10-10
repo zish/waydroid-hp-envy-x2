@@ -20,7 +20,82 @@ the thirteen host-side packages and voids most of the Android-side half. See
 [docs/63-second-host-and-android-16.md](docs/63-second-host-and-android-16.md), which also carries
 the next-attempt checklist. Nothing in it has been run on that machine yet.
 
-**App mode is a supported configuration from 2026-10-07, by the owner's decision.** On the Dell,
+**The ATV track moved to `vidiot01` on 2026-10-08, and that host is NOT expendable.** The owner
+deployed the WayDroid-ATV **Android 16 20260803** images to `/etc/waydroid-extra/images` there, so
+the Dell is no longer the target. Read
+[docs/64-vidiot01-atv-host.md](docs/64-vidiot01-atv-host.md) before touching it.
+`vidiot01` is Fedora **43 Workstation — traditional, not ostree** (so `dnf`, no reboot to install a
+package), i5-9300H, Intel UHD 630 **Gen9.5** *plus a nouveau GTX 1050*, 31 GiB, **GNOME on Wayland
+via GDM**, SELinux **Enforcing**, Waydroid `1.6.3-1.fc43`. Reach it with `ssh vidiot01` (key-based,
+user `jmelanson`); **`sudo` there needs a password**, so privileged steps go through the scoped
+`sudoers` drop-in described in docs/64.
+
+Three things about it that are easy to get wrong:
+
+- **It hosts this project's dev container *and* the `vidiot` AP.** The container runs on *host*
+  networking, so the container's `127.0.0.1` is the host's, and NetworkManager's **`Hotspot1`**
+  profile serves `10.42.0.1/24` to other live devices ([docs/45](docs/45-mdns-reflection.md)).
+  **Never touch NetworkManager on `vidiot01`** — one change can drop third-party devices off the
+  air and sever the only access path in the same action.
+- **Waydroid does its own host networking there, in a shell script, and you must read it first.**
+  `/usr/lib/waydroid/data/scripts/waydroid-net.sh` creates the `waydroid0` bridge itself (deleting
+  and recreating any existing one), sets `net.ipv4.ip_forward=1`, runs
+  `firewall-cmd --zone=trusted --add-interface=waydroid0`, installs nft `inet lxc` / `ip lxc`
+  tables with a MASQUERADE rule for `192.168.240.0/24`, and starts a dnsmasq on `192.168.240.1`.
+  Creating the bridge by hand beforehand is harmless but pointless. It **coexists** with
+  `Hotspot1` — verified across two boots: AP still beaconing, 5 stations associated, `wlp0s20f3`
+  still in `nm-shared` while `waydroid0` goes to `trusted`, and the nft tables disjoint
+  (`nm-shared-wlp0s20f3` versus `lxc`, and the script only ever flushes tables it named `lxc`).
+  But that is coexistence, not abstention. Do not repeat the mistake docs/64 records: a
+  `--include=*.py` grep concluded "Waydroid touches no networking", which is true of the Python
+  and false of the product.
+- **`waydroid upgrade` is refused there**, because `/etc/waydroid-extra/images` is a *preinstalled*
+  path. docs/63's claim that image upgrades would work on the second host was about the Dell and
+  **does not carry over**.
+
+**Android 16 BOOTS on `vidiot01` as of 2026-10-08, and
+[`artifacts/binder/waydroid_binder.cil`](artifacts/binder/waydroid_binder.cil) is what makes it
+boot.** A/B pair with the host Enforcing throughout: **bare** → no `sys.boot_completed` in 240 s,
+`bootanim` forever, six services `[restarting]`, **657** AVCs all
+`denied { call } spc_t → container_runtime_t`; **with the module** → booted in **18 seconds**,
+**zero** binder AVCs, every service running, setup wizard on screen
+([screencap](artifacts/binder/a16-boot-vidiot01.png)). **Fedora's own `waydroid` policy module
+(`selinux-policy-43.10-1.fc43`) grants those binder permissions to `waydroid_t`, `unconfined_t` and
+`unconfined_service_t` but NOT to `spc_t`** — so this is a distribution policy gap to send upstream,
+not a local workaround. Two traps worth carrying: **`ausearch` does not surface these denials**
+(no SYSCALL record to anchor to — it reported zero on a boot that produced 657, so grep
+`/var/log/audit/audit.log` instead), and **`waydroid-net.sh` does the host networking** — it creates
+the `waydroid0` bridge itself, sets `ip_forward=1`, runs `firewall-cmd --add-interface`, installs
+nft MASQUERADE rules and a dnsmasq. It coexists with `Hotspot1` (verified across two boots: AP still
+beaconing, 5 stations associated, nft tables disjoint), but read that script before assuming
+Waydroid leaves host networking alone — the Python does, the shell script does not.
+
+**The GUI also works on `vidiot01`, verified 2026-10-08.** The container's hwcomposer is itself the
+Wayland client: it connects to the bind-mounted `/run/xdg/wayland-0`, binds `xdg_wm_base`, and
+creates a real `xdg_toplevel` titled and app-id'd `Waydroid`, which Mutter configures
+**maximised at 1920x1048**. No `wl_display.error` anywhere in the stream. **The trap here is
+expensive and not Waydroid's fault**: `vidiot01` is a laptop whose only connected output is `eDP-1`,
+and GNOME blanks and locks it after 900 s. With the panel off, Mutter still configures the window and
+keeps firing frame callbacks, so every host-side signal looks healthy while
+`wp_presentation_feedback` reports **0 presented / 380 discarded** — awake it is **298 presented / 0
+discarded in 5 s**. Check `/sys/class/drm/card1-eDP-1/{status,enabled,dpms}` and
+`loginctl show-session 2 -p LockedHint` before debugging a GUI fault there. Two more traps: the
+hwcomposer **appears to log nothing** because libwayland's `wl_log` writes to stderr and Android
+`init` points that at `/dev/null`, and **host-side `ss -x` / `/proc/net/unix` cannot see the
+container's sockets** at all, since AF_UNIX is netns-scoped — use
+`nsenter -t <pid> -n`, or `strace -f` the container's `init`.
+
+**The two long-open A16 questions are answered, 2026-10-08, from the image rather than by booting:**
+**`wifid` is a re-measurement** (`SM_PROTOCOL` must go `aidl3`→`aidl6` at API 36, and the supplicant
+surface re-extracted against AIDL **v4**), while **`sensord` is a rewrite** — the A16 vendor image
+contains **no HIDL sensors HAL at all** and declares none, so the guest half of the seam
+[docs/14](docs/14-sensors.md) depends on is gone and an AIDL `ISensors` server would be needed.
+Of the three image-pinned packages, `camera-hal` is **re-derivable** (same binary, same path, new
+hash), `camera-gbm` is **relevant and needs a rebuild**, and `battery`'s target binary is **absent**
+— a re-find, not a re-derive. Details and hashes in docs/64.
+
+**App mode is a supported configuration from 2026-10-07, by the owner's decision.** On the ATV host
+(the Dell then, `vidiot01` now — both GNOME-on-Wayland, so this carries over unchanged),
 Waydroid runs **as an app inside a normal GNOME session**, not as the session. Keep that working:
 anything that only makes sense when Android *is* the session — `cage`, and the `kiosk` group
 around it — is opt-in, never assumed. Two consequences are already known and are in docs/63:
@@ -1047,7 +1122,8 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   can build. `packaging/README.md` records what has actually been through `rpmbuild`.
   **Read it before assuming anything is packaged**, and get the count from
   `packaging/gen-spec.sh --list` rather than from prose — it marks the unshipped ones and cannot
-  go stale. **26 `.mod` files as of 2026-10-06, 25 shipped, and all 25 installed on bigtab01** —
+  go stale. **27 `.mod` files as of 2026-10-09, 26 shipped; 25 of them installed on bigtab01** —
+  the 26th is `binder-policy`, built and tested but not yet installed anywhere —
   `mdns` was the last and closed that gap; `dexopt` is the only one absent and declares
   `SHIPPED=no`. Two caveats behind the headline: `media` runs 1.0.0 against a `.mod` declaring
   1.1.0 that was never built, and the fifth migration left `InterruptedLiveCommit` set from a

@@ -7,14 +7,44 @@ second, separate camera fix (lens facing) plus the `Fence::waitForever` stall.
 [12-camera](12-v4l2-frame-errors.md) records two intermittent camera faults that could NOT be
 reproduced, and the long list of causes they rule out.
 
-**The next session is not about bigtab01.** Opened 2026-10-06: a second host — a Dell Inspiron,
-Comet Lake-U, Fedora Silverblue 44, GNOME, Waydroid 1.6.3 — is being set up, and the owner is wiping
-it and installing WayDroid-ATV's Android 16 images to debug a boot failure whose symptom was not
-recorded the first time. Start from [63-second-host-and-android-16.md](63-second-host-and-android-16.md):
-it has the package-portability verdict (22 of 25 move, 16 unchanged; 23 of 26 and 17 unchanged
-since `mdns` was packaged on 2026-10-06), the three documented A16
-failure modes with which ones to expect on an Intel Gen9.5 iGPU, and a six-step checklist for the
-attempt. Nothing in it has been run on that machine.
+**The next session is not about bigtab01.** Opened 2026-10-06 against a Dell Inspiron, and
+**retargeted on 2026-10-08 to `vidiot01`**, which is where the owner actually deployed WayDroid-ATV's
+Android 16 **20260803** images (`/etc/waydroid-extra/images`).
+**Start from [64-vidiot01-atv-host.md](64-vidiot01-atv-host.md)**, then
+[63-second-host-and-android-16.md](63-second-host-and-android-16.md) for the package-portability
+verdict (22 of 25 move, 16 unchanged; 23 of 26 and 17 unchanged since `mdns` was packaged on
+2026-10-06), the three documented A16 failure modes, and the six-step attempt checklist — 63 is
+annotated where `vidiot01` supersedes it.
+
+64 has `vidiot01` as *measured*, three pre-flight findings that would each have cost a boot
+(`waydroid0` missing; `waydroid upgrade` refused; the inverted `card0`/`card1` on a hybrid GPU), and
+**the answers to 63's two open questions, obtained by opening the image rather than booting it**:
+`wifid` is a re-measurement, `sensord` is a rewrite. It also re-measures the three image-pinned
+packages into three different situations rather than one — only `battery`'s target binary is
+genuinely gone.
+
+**`vidiot01` is not expendable**: it hosts this dev container on host networking *and* the `vidiot`
+AP that other devices use, so NetworkManager there is off-limits.
+
+**Android 16 now boots there.** The A/B pair ran 2026-10-08 with the host Enforcing:
+bare → no boot in 240 s and 657 `spc_t → container_runtime_t` binder denials; with
+[`artifacts/binder/waydroid_binder.cil`](../artifacts/binder/waydroid_binder.cil) loaded → booted in
+**18 seconds**, zero denials, setup wizard on screen. **The module is verified.** Fedora's own
+`waydroid` policy module has the same gap, so the next piece of work on it is upstream, not local.
+
+**And the GUI works there, verified 2026-10-08** — a real `xdg_toplevel` titled `Waydroid`, which
+Mutter configures maximised at 1920x1048, with frames confirmed on screen by `wp_presentation_feedback`
+(298 presented / 0 discarded in 5 s). Beware the host's blanked panel: asleep, the same healthy-looking
+window reports 0 presented / 380 discarded. 64 has the detail and the traps.
+
+**Where to pick up:** the setup wizard has not been completed, so nothing past first boot has been
+exercised — no launcher, no app, and nothing asked of camera, audio, sensors or Wi-Fi. The cheapest
+next measurements are the generated **Vulkan** props (gralloc is now measured:
+`ro.hardware.gralloc=minigbm`, so the `gbm_mesa` wrapper and the [08](08-camera-fixed.md) bug are off
+the active path), `idle-delay 0` plus a deliberate screen blank to test whether ATV #37's composer
+crash is really gone — the *wake* direction has now been survived by accident, the *blank* direction
+has not been tried — and re-deriving `camera-hal`'s offset against the A16 binary, whose new stock
+hash is recorded in 64.
 
 ## One-paragraph state
 

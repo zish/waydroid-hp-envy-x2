@@ -1,5 +1,11 @@
 # 63 — A second host, and what Android 16 would cost
 
+> **Superseded in part, 2026-10-08.** The ATV track moved to **`vidiot01`**, not the Dell. See
+> [64-vidiot01-atv-host.md](64-vidiot01-atv-host.md) for that host as *measured*, and for the two
+> questions this note left open — `sensord` and `wifid` against A16 — both of which are now
+> **answered** from the image. The package-portability verdict below still stands; three specific
+> claims do not, and each is annotated inline.
+
 *2026-10-06. The owner asked how much of this project can be moved onto a newer laptop running
 "the latest Waydroid", and then whether [WayDroid-ATV](https://github.com/WayDroid-ATV/waydroid-builds)'s
 Android 16 images are worth chasing on it. The first answer is better than expected and for an
@@ -22,7 +28,10 @@ is either host-side and image-agnostic, or a text file whose replacement survive
 as a merge rather than a cliff. The second host — a Dell Inspiron, Comet Lake-U, Fedora Silverblue
 44 — is a **better** target than bigtab01 in two ways: its images will live somewhere
 `waydroid upgrade` is willing to touch, and Silverblue is the rpm-ostree case this project's
-packaging was designed around from the start. Android 16 is where it gets expensive, and the
+packaging was designed around from the start. *(Both of those two ways are specific to the Dell and
+**neither holds on `vidiot01`**, which is where the work actually went — see
+[64](64-vidiot01-atv-host.md). It is still easier than bigtab01, for a different reason: it is a
+traditional dnf host, so nothing needs a reboot.)* Android 16 is where it gets expensive, and the
 expense is not the CPU.
 
 ## What "the latest Waydroid" turned out to mean
@@ -150,14 +159,14 @@ Reported by the owner, 2026-10-06:
 Two ways this host is **easier** than bigtab01, both worth knowing before anyone assumes it is
 merely "the same but newer":
 
-- **Image upgrades will work there.** Waydroid's defaults are
+- **Image upgrades will work there.** *(Void on `vidiot01` — see [64](64-vidiot01-atv-host.md). This was a property of where a fresh `init` lands images, and the owner deployed to `/etc/waydroid-extra/images`, which **is** a preinstalled path, so `waydroid upgrade` refuses there exactly as on bigtab01.)* Waydroid's defaults are
   `images_path = /var/lib/waydroid/images` and
   `preinstalled_images_paths = ["/etc/waydroid-extra/images", "/usr/share/waydroid-extra/images"]`.
   bigtab01's images sit in the second of those, which is why the upgrader refuses by design and why
   [docs/25](25-waydroid-in-cage.md) records an image swap there as a manual operation. A fresh
   `waydroid init -f` on the Dell lands in `/var/lib/waydroid/images`, which is not preinstalled, so
   `waydroid upgrade` is available.
-- **Silverblue is the case the packaging was built for.** [docs/47](47-package-split.md) forbids
+- **Silverblue is the case the packaging was built for.** *(Not applicable to `vidiot01`, which is traditional Fedora 43 Workstation — strictly easier, since installs need no `rpm-ostree` round-trip and no reboot. [47](47-package-split.md)'s scriptlet ban remains a portability rule worth keeping.)* [docs/47](47-package-split.md) forbids
   load-bearing scriptlets precisely because rpm-ostree runs them against the compose rather than the
   booted system, and [docs/user/ostree.md](user/ostree.md) already exists. 16 GB against bigtab01's
   8 is not a factor in anything measured here.
@@ -276,7 +285,7 @@ test vehicle that already exists.
 | The 13 host-side packages | **Carry over.** Image-agnostic by construction |
 | `battery`, `camera-hal` | **Void.** Byte offsets into a rebuilt binary mean nothing; the `derive` rows would refuse and the fix would simply be absent |
 | `camera-gbm` | **Depends on the gralloc path.** The selection logic read off `lxc.py` sets `ro.hardware.gralloc=gbm` for MAINLINE-with-DRI — the `gbm_mesa` family, which is the path [docs/08](08-camera-fixed.md) fixed, not ATV's `minigbm_intel`. #37's temporary relief was setting `minigbm_gbm_mesa` explicitly. So our wrapper bug may well be *live* on A16, and our fix would need rebuilding against A16's minigbm |
-| `sensord`, `wifid` | **The real risk, and unmeasured.** `sensord` serves HIDL `ISensors@1.0`; `wifid` serves wificond AIDL and supplicant `aidl3` ([docs/31](31-wifi-stage2.md)). Android 16's interface versions have moved and nobody here has checked which the ATV image binds. These are the two features that took longest to build |
+| `sensord`, `wifid` | **Measured 2026-10-08 — see [64](64-vidiot01-atv-host.md): `wifid` is a re-measurement, `sensord` is a rewrite.** The A16 vendor image contains *no* HIDL sensors HAL and declares none, so there is nothing for a HIDL `ISensors@1.0` server to stand in for; `wifid` needs `SM_PROTOCOL` `aidl3`→`aidl6` and its supplicant surface re-extracted against AIDL v4. Original wording follows. **The real risk, and unmeasured.** `sensord` serves HIDL `ISensors@1.0`; `wifid` serves wificond AIDL and supplicant `aidl3` ([docs/31](31-wifi-stage2.md)). Android 16's interface versions have moved and nobody here has checked which the ATV image binds. These are the two features that took longest to build |
 | `appfuse` | CIL declares identifiers read out of **Android 13's** vold ([docs/55](55-appfuse.md)). Needs re-measuring |
 
 Stated plainly: Android 16 buys a maintained image, VA-API and current app compatibility, and costs
@@ -312,8 +321,10 @@ The owner is wiping the Dell and fetching the current A16 images. In order:
 
 - **Nothing here was run on the Dell.** The previous ATV attempt's symptom was not recorded, which
   is why step 5 exists.
-- **Whether `sensord` and `wifid` work against an Android 16 image is unknown**, and it is the
-  question that decides whether porting to A16 is worth doing at all.
+- ~~**Whether `sensord` and `wifid` work against an Android 16 image is unknown**, and it is the
+  question that decides whether porting to A16 is worth doing at all.~~ **Answered 2026-10-08 from
+  the image itself, in [64](64-vidiot01-atv-host.md): `wifid` is a re-measurement, `sensord` is a
+  rewrite.** Neither answer needed a boot.
 - Whether the current lineage-20 OTA build still matches our two `derive` rows was not checked —
   ATV's OTA index was reachable but Waydroid's own was not, from here. `--check-upstream` on the
   target answers it in one command and is cheaper than guessing.

@@ -16,7 +16,7 @@ are ahead of the code in several places and reading them alone gives the wrong a
 
 | Question | Answer |
 |---|---|
-| Is every change available as an RPM? | **Not yet, but most of the way: 26 `.mod` files as of 2026-10-06, 25 of them shipped** — `packaging/gen-spec.sh --list` is the count that cannot go stale. Said 22 of ~38 on 2026-09-27, which was itself an undercount; was 7 of ~36 with 4 installable when this was written |
+| Is every change available as an RPM? | **Not yet, but most of the way: 27 `.mod` files as of 2026-10-09, 26 of them shipped** — `packaging/gen-spec.sh --list` is the count that cannot go stale. `binder-policy` is the one added on 2026-10-09, and it is the first here that is not host-specific at all. Said 22 of ~38 on 2026-09-27, which was itself an undercount; was 7 of ~36 with 4 installable when this was written |
 | Could a general user build and install? | **No** — the two compiled daemons cannot be built off this dev box at all |
 | Are repository paths portable? | **Nearly** — 5 exceptions, all named below; git history is no worse than HEAD |
 | Anything genuinely un-RPM-able? | **Four things**, all small, none of them blocking |

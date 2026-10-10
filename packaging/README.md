@@ -43,7 +43,19 @@ transaction. The group went to 1.0.1 for the dependency change.
 **Superseded 2026-09-27: 22 modifications are written and all 22 produce something
 installable**, `wifid` included, once `--prebuilt` is used for the two compiled daemons.
 
-**Recounted 2026-10-06: there are 26 `.mod` files, 25 of them shipped.** `dexopt` is the one
+**Recounted 2026-10-09: there are 27 `.mod` files, 26 of them shipped.** The 27th is
+`binder-policy`, added 2026-10-09. **It is built, linted and install-tested but NOT yet
+installed anywhere**, so there is no sixth migration section below and the "every shipped
+modification is installed on bigtab01" claim further down is now 25 of 26 rather than all of
+them. It lints to **2 errors and 2 warnings** — one better than the baseline every other
+package here hits, because it is the second host-kind mod to carry a `%check` (after `mdns`),
+so `no-%check-section` does not fire. `packaging/test-install.sh binder-policy` passes 6 of 6.
+
+It is also the first modification here that is **not host-specific at all**: noarch, nothing
+compiled, no value in it that names a machine. docs/53's "a general user cannot build and
+install" blocker is about the two compiled daemons and does not apply to this one.
+
+**Recounted 2026-10-06: there were 26 `.mod` files, 25 of them shipped.** `dexopt` is the one
 that declares `SHIPPED=no`. "22 and a 23rd" was an undercount on the day it was written — six
 `.mod` files were created on 2026-09-27 and the tally did not catch all of them — which is what
 a count maintained by hand does. `packaging/gen-spec.sh --list` is the answer that cannot go

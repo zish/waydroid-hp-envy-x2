@@ -1,0 +1,242 @@
+;; waydroid_binder -- let Android's APEX-packaged HALs and system_server talk
+;; to each other over binder on a Fedora host.
+;;
+;; STATUS: VERIFIED 2026-10-08 on vidiot01. An A/B boot pair, host Enforcing
+;; throughout, settles what the rest of this file could only diagnose:
+;;
+;;   BARE   (no module)  sys.boot_completed never set in 240 s.
+;;                       init.svc.bootanim running, six services [restarting],
+;;                       657 AVCs, every one of them
+;;                         denied { call } spc_t -> container_runtime_t
+;;                       and `binder: N:N transaction credentials failed` in
+;;                       the kernel ring buffer alongside them.
+;;
+;;   MODULE (this file)  sys.boot_completed = 1 after 18 SECONDS.
+;;                       init.svc.bootanim stopped, zygote running, and
+;;                       vendor.sensors-default -- which had been crash-looping
+;;                       -- running. ZERO binder AVCs after the module was
+;;                       loaded, against 852 before it. No further
+;;                       `transaction credentials failed` in the kernel log.
+;;                       SurfaceFlinger's focused window is
+;;                       com.google.android.setupwizard/.user.WelcomeActivity
+;;                       and a screencap of it is beside this file as
+;;                       a16-boot-vidiot01.png.
+;;
+;; That makes the module proven AS A WHOLE. It is NOT
+;; proven permission-by-permission on vidiot01: that host only ever LOGGED the
+;; first denial, `call` in the spc_t -> container_runtime_t direction, which is
+;; exactly the behaviour the rest of this file is about -- SELinux stops at the
+;; first failure, so the other three were never reachable to be logged. They
+;; were proven individually on jeremy-laptop02, each at the cost of a boot, and
+;; a green boot here cannot retroactively isolate which of the four it needed.
+;; Do not read "vidiot01 only logged one denial" as "three rules are surplus".
+;;
+;; WHY THIS IS NOT JUST A LOCAL WORKAROUND -- Fedora's own policy has the gap.
+;;
+;; Fedora 43 (selinux-policy-43.10-1.fc43) ALREADY ships a `waydroid` policy
+;; module, loaded at priority 200, and it already thinks about binder. Decompiled
+;; from the live system with `semodule -E waydroid` and `/usr/libexec/selinux/hll/pp`:
+;;
+;;   (allow waydroid_t container_runtime_t (binder (call transfer)))
+;;   (allow container_runtime_t waydroid_t (binder (call)))
+;;   (allow container_runtime_t self (binder (call set_context_mgr transfer)))
+;;   (allow container_runtime_t unconfined_service_t (binder (call)))
+;;   (allow container_runtime_t unconfined_t (binder (call transfer)))
+;;   (allow unconfined_service_t container_runtime_t (binder (call transfer)))
+;;   (allow unconfined_t container_runtime_t (binder (call transfer)))
+;;
+;; Three source domains are covered -- waydroid_t, unconfined_t,
+;; unconfined_service_t -- and spc_t is not one of them. There are no dontaudit
+;; rules for the binder class. So this is a genuine hole in the distribution's
+;; policy rather than a quirk of one machine, and it is worth proposing upstream
+;; to selinux-policy rather than carrying forever as a local module. Note also
+;; that waydroid_t, which that module is built around, is NOT the domain Waydroid
+;; actually runs in here: under LXC the container is container_runtime_t and the
+;; APEX HALs are spc_t, which is likely why the gap went unnoticed.
+;;
+;; TEST HOST, and how to read the provenance in this file. The ATV track moved
+;; from jeremy-laptop02 to vidiot01 on 2026-10-08 (Fedora 43 Workstation --
+;; traditional, not ostree -- Waydroid 1.6.3-1.fc43, SELinux Enforcing/targeted,
+;; i5-9300H, Intel UHD 630 Gen9.5 plus a nouveau GTX 1050, GNOME on Wayland).
+;; The per-permission measurements below were taken on jeremy-laptop02 and are
+;; left exactly as recorded there. The A/B pair above is vidiot01's, and it
+;; confirms the domain pair independently: `ps -eo label` on vidiot01 shows
+;; servicemanager and surfaceflinger in container_runtime_t and 38 processes in
+;; spc_t. Host details and pre-flight findings are in docs/64.
+;;
+;; ONE TOOLING TRAP, measured here. `ausearch -m avc -ts today` reports
+;; "<no matches>" on vidiot01 while /var/log/audit/audit.log holds hundreds of
+;; these records -- binder denials raised from kernel binder threads carry no
+;; SYSCALL context for ausearch to anchor to. Grep the log directly. An
+;; ausearch-based check will tell you this module was never needed.
+;;
+;; WHY THIS EXISTS
+;;
+;; On jeremy-laptop02 (Fedora Silverblue 44, Waydroid 1.6.3, SELinux Enforcing)
+;; the WayDroid-ATV Android 16 image never completes boot:
+;;
+;;   LineageOS 23.2-20260803-UNOFFICIAL-WayDroidATV-waydroid_x86_64
+;;   ro.build.version.sdk = 36
+;;
+;; sys.boot_completed is never set, init.svc.bootanim runs forever, and six
+;; APEX-packaged HAL services crash-loop ~58 times each:
+;;
+;;   media.swcodec
+;;   android.hardware.sensors-service.example
+;;   android.hardware.gatekeeper-service.nonsecure
+;;   android.hardware.memtrack-service.example
+;;   android.hardware.security.authgraph-service.nonsecure
+;;   android.hardware.security.secretkeeper-service.nonsecure
+;;
+;; They die registering with servicemanager:
+;;
+;;   'Check failed: status == STATUS_OK (status=-129, STATUS_OK=0)'
+;;   'Attempted to retrieve value from failed HIDL call:
+;;      Status(EX_TRANSACTION_FAILED): FAILED_TRANSACTION'
+;;   'Failed to register service ...ISecretkeeper/nonsecure because of UNKNOWN_ERROR.'
+;;
+;; -129 is EX_TRANSACTION_FAILED. The cause is on the HOST, measured 2026-10-08:
+;;
+;;   avc: denied { call } for comm="android.hardwar"
+;;        scontext=system_u:system_r:spc_t:s0
+;;        tcontext=system_u:system_r:container_runtime_t:s0
+;;        tclass=binder permissive=0
+;;
+;; 4936 of them in one 30-minute window. The kernel says the same thing from
+;; the other side, 1064 times:
+;;
+;;   binder: N:N transaction credentials failed
+;;
+;; That string is binder's security_binder_transaction() LSM hook failing --
+;; drivers/android/binder.c -- which on Fedora is selinux_binder_transaction(),
+;; and that hook is where tclass=binder `call` is checked. The two messages are
+;; one event seen from userspace and from the driver.
+;;
+;; WHY ANDROID 16 AND NOT THE IMAGES THAT WORK
+;;
+;; The process labels are split. servicemanager, zygote and surfaceflinger run
+;; as container_runtime_t; the six failing services all live under
+;; /apex/com.android.hardware.* and run as spc_t. So they must cross a domain
+;; boundary to register, and that crossing is what is denied. Images that ship
+;; these HALs outside an APEX run them in init's own domain, never cross, and
+;; never hit this. This is a host-policy gap that Android 16 is simply the first
+;; image here to expose -- it is NOT specific to WayDroid-ATV, and bigtab01 will
+;; hit it the moment an APEX-HAL image lands there.
+;;
+;; CORROBORATED FROM THE IMAGE, 2026-10-08, independently of any host's audit
+;; log. /vendor/apex/ in the 20260803 image holds exactly five APEXes:
+;;
+;;   com.android.hardware.gatekeeper.nonsecure.apex
+;;   com.android.hardware.memtrack.apex
+;;   com.android.hardware.security.authgraph.apex
+;;   com.android.hardware.security.secretkeeper.apex
+;;   com.android.hardware.sensors.apex
+;;
+;; Those map ONE-TO-ONE onto five of the six crash-looping services above; the
+;; sixth, media.swcodec, is a system-side APEX. The image also carries
+;;
+;;   service vendor.sensors-default \
+;;     /apex/com.android.hardware.sensors/bin/hw/android.hardware.sensors-service.example
+;;
+;; So "the failing set is exactly the APEX-packaged HAL set" now rests on two
+;; independent observations -- host AVCs on one machine, image contents read on
+;; another -- which rules out the six being a coincidence. On its own it would
+;; not have made the rule set proven; the completed boot recorded at the top of
+;; this file is what does that. See docs/64.
+;;
+;; WHAT WAS RULED OUT FIRST, so nobody re-walks it
+;;
+;;   Android's own SELinux   `getenforce` inside the container returns Disabled.
+;;                           Not an image-policy problem; there are no Android
+;;                           AVCs at all, because there is no Android policy.
+;;   binder devices          /dev/binder, /dev/hwbinder, /dev/vndbinder all
+;;                           present in the container, host-side via binderfs.
+;;   vm.unprivileged_userfaultfd
+;;                           Was 0; Android 13+ ART wants 1 and system_server
+;;                           warns `userfaultfd: MOVE ioctl seems unsupported`.
+;;                           Set to 1 and re-tested: IDENTICAL failure, same six
+;;                           services, same counts. A real misconfiguration, and
+;;                           not this one. Fix it if you like; it changes nothing.
+;;   VINTF                   servicemanager does log `Could not find ... in the
+;;                           VINTF manifest` for audio.effect, audio.core and
+;;                           power.stats. Those are unrelated optional
+;;                           interfaces -- memtrack, which DOES fail here, is
+;;                           reported `Found ... in device VINTF manifest`.
+;;
+;; WHY NOT A PRIVATE TYPE, AS THE OTHER TWO MODULES ARGUE FOR
+;;
+;; waydroid_backlight.cil and waydroid_appfuse.cil both narrow a grant by
+;; inventing a private type. That tool does not apply here. Both ends of this
+;; transaction are pre-existing process domains the base policy already defines,
+;; and the permission is IPC between them, not access to an object we can
+;; relabel. There is nothing to give a new type to. What narrowness is available
+;; is taken: two named domains, one class, and only the permissions proven below
+;; -- not `semanage permissive -a spc_t`, which was how this was diagnosed and
+;; which relaxes EVERY check on a domain that runs all privileged containers.
+;;
+;; HOW THE PERMISSION SET WAS ESTABLISHED
+;;
+;; Enforcing shows only the first failure in a chain: a blocked `call` means
+;; `transfer` is never attempted and so can never be denied or logged. Running
+;; `audit2allow` over the enforcing run yields exactly one rule and a false
+;; sense of completeness:
+;;
+;;   allow spc_t container_runtime_t:binder call;
+;;
+;; This is the trap docs/42 paid 978 failed boots for. So spc_t was made
+;; permissive -- `semanage permissive -a spc_t`, host still globally Enforcing --
+;; and the boot re-run on 2026-10-08. Permissive logs what it would have blocked,
+;; which is how the rest of the set becomes visible:
+;;
+;;   {call}     spc_t -> container_runtime_t   binder  perm=1    (now allowed)
+;;   {transfer} spc_t -> container_runtime_t   binder  perm=1    <- INVISIBLE before
+;;   {call}     container_runtime_t -> spc_t   binder  perm=0  1352x  <- REVERSE
+;;
+;; All six HAL crash-loops stopped. The boot still failed, one layer further in,
+;; and the new abort names the remaining rule exactly:
+;;
+;;   system_server, 51 aborts:
+;;     'Could not connect to declared sensors AIDL HAL after 20 retries'
+;;
+;; The sensors HAL now starts and registers; system_server, in
+;; container_runtime_t, cannot call INTO it in spc_t. Hence the reverse rule.
+;; Binder IPC is bidirectional and a reply traverses the hook in the opposite
+;; direction, so both directions have to be granted, not just the caller's.
+
+;; Proven: 4936 denials under Enforcing, then observed satisfied at perm=1.
+;; `transfer` proven by the permissive run -- it is NOT reachable under
+;; Enforcing and will not appear in an audit2allow of a failed boot.
+(allow spc_t container_runtime_t (binder (call transfer)))
+
+;; Both proven, and each one cost a boot to find. `call` first: 1352 denials at
+;; perm=0 during the permissive run, named by system_server's abort message
+;; above. Then `transfer`, which was NOT reachable until `call` was granted --
+;; with the two-rule version of this module loaded and the host fully Enforcing,
+;; the boot produced exactly one denial, 1276 times:
+;;
+;;   avc: denied { transfer }
+;;        scontext=system_u:system_r:container_runtime_t:s0
+;;        tcontext=system_u:system_r:spc_t:s0
+;;        tclass=binder permissive=0
+;;
+;; This is the same shape of trap three times over: each granted permission
+;; reveals the next, because SELinux stops at the first failure and the rest of
+;; the chain is never attempted. The only reliable way to see one layer is to
+;; grant the layer above it. Do NOT widen this to (binder (all)) -- the four
+;; permissions below are the complete observed set, and `impersonate`, the
+;; fourth binder permission, was never requested by anything in three runs.
+(allow container_runtime_t spc_t (binder (call transfer)))
+
+;; NOT INCLUDED, and why -- an artifact, not a dependency:
+;;
+;;   allow systemd_coredump_t container_runtime_t:process signull;
+;;
+;; audit2allow proposes this from the same window. It is systemd-coredump
+;; signalling the processes that were crash-looping. It is a CONSEQUENCE of the
+;; bug, not a requirement of the fix; with nothing aborting there is nothing for
+;; coredump to signal. Adding it would grant a permission to paper over crashes
+;; that should not be happening.
+;;
+;; Written in CIL rather than .te for the same reason as the other two modules:
+;; semodule compiles CIL directly, so this needs no selinux-policy-devel, which
+;; on an rpm-ostree host would cost a layered install and a reboot.
