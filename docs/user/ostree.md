@@ -53,6 +53,67 @@ to stage it again.**
 > This follows from the unit definition above and from `/run` being tmpfs, both of which are
 > verified. It has not been confirmed by deliberately power-cutting a machine mid-stage.
 
+## A staged deployment's `/etc` looks empty of your files, and that is correct
+
+If you look inside a staged deployment before rebooting, your own `/etc` is not there:
+
+```console
+$ ls /ostree/deploy/fedora/deploy/<staged-commit>.0/etc/waydroid-extra
+ls: cannot access '.../etc/waydroid-extra': No such file or directory
+```
+
+Nothing is wrong. **ostree merges `/etc` during finalization, not when the deployment is staged.**
+Until `ExecStop` runs, a staged deployment's `/etc` is the new commit's *default* `/etc` and nothing
+more. That is deliberate: it means `/etc` edits you make *after* staging are still picked up, rather
+than frozen at install time.
+
+The quickest way to tell an unmerged `/etc` from a damaged one is to look for a file no machine could
+boot without:
+
+| In the staged deployment's `/etc` | Means |
+|---|---|
+| no `fstab` (and no `crypttab`, if you use one) | not merged yet — normal, you are looking at the commit's default `/etc` |
+| `fstab` present but your own files missing | something really is wrong |
+
+The merge itself is in the finalization log, and so is its cost:
+
+```
+Stopping ostree-finalize-staged.service...
+ostree[...]: Finalizing staged deployment
+ostree[...]: Copying /etc changes: 35 modified, 0 removed, 157 added
+ostree[...]: Refreshing SELinux policy
+ostree[...]: Refreshed SELinux policy in 9439 ms
+ostree[...]: Finalized deployment
+```
+
+On the reference machine that whole `ExecStop` took **23 seconds**: 2 s for the 157 added files, 9 s
+to refresh the SELinux policy, the rest bookkeeping and `syncfs`. Read it back after the fact with
+`journalctl -b -1 -u ostree-finalize-staged`.
+
+**Why this matters more on a Waydroid host than on a stock one.** Waydroid keeps the Android system
+and vendor images under `images_path`, which is `/etc/waydroid-extra/images` by default — so `/etc`
+holds multiple gigabytes that get merged at shutdown. On the reference machine that is **3.0 GB**
+(`system.img` 2.58 GB, `vendor.img` 582 MB), and it is carried into each new deployment: every
+finalized deployment's `/etc` reports the full 3.0 GB under `du`. Two consequences:
+
+- **There is a time budget.** `ostree-finalize-staged.service` ships `TimeoutStopSec=5min` rather
+  than the 45 s `DefaultTimeoutStopSec`, so there is real headroom. But the 2 s above was measured
+  with `/var` on **btrfs**, where the copy is nearly free. On a filesystem without reflink support
+  the same merge is a genuine multi-gigabyte byte copy, and five minutes is the whole budget.
+- **This is the worst possible moment to cut power.** A shutdown that appears to sit still shortly
+  after you asked for a reboot is finalization doing its job, not a hang. Interrupting it puts you
+  in the hard power-off row of [The scenarios](#the-scenarios), and the staged deployment is gone.
+
+One thing this explains away: a staged deployment that has *just* been superseded by another
+`rpm-ostree` command never had a merged `/etc` to lose, so nothing about its empty-looking `/etc`
+tells you whether your local packages survived. Read `rpm-ostree status` for that instead — the
+staged entry lists its own `LocalPackages`.
+
+> The 23 s, the log lines, the 3.0 GB and the `TimeoutStopSec` are measured. That the gigabytes are
+> **reflinked** rather than byte-copied is inferred: 2 s is not a 3 GB copy on that hardware, and
+> each deployment's images have their own inodes, which rules out hardlinks. Confirm it on your own
+> host by comparing physical extents with `filefrag -v` on two deployments' `system.img`.
+
 ## `--apply-live` can report failure after having already applied
 
 `rpm-ostree install --apply-live` lands the change now *and* stages the same deployment for the
