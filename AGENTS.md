@@ -806,6 +806,162 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    out of `vold`.
    See [docs/55-appfuse.md](docs/55-appfuse.md).
 
+10. **A TPM behind Android's keystore — swtpm on bigtab01, the real fTPM on vidiot01.** **Added
+    2026-10-10 at the owner's request as two items; scoped the same day as one component with two
+    backends, nothing built.** The request reads as "point Android at the TPM" and cannot be done
+    that way: **nothing in Android speaks TPM 2.0**, so the only consumer is the keystore HAL —
+    HIDL `IKeymasterDevice` 4.0 on A13, AIDL `IKeyMintDevice` plus `ISecureClock` and
+    `ISharedSecret` on A16, both measured running as software services in their images. Deploying
+    swtpm is an afternoon; **the HAL is the project.**
+    **The two machines are not symmetric, and the asymmetry is the whole assessment.** vidiot01 has
+    an **Intel PTT firmware TPM 2.0** (`TPM2_PT_MANUFACTURER` = `INTC`, revision 1.38) on
+    `/dev/tpm0` *and* `/dev/tpmrm0`, with `swtpm`, `tpm2-tools` and `tpm2-tss` already installed —
+    keys sealed there are genuinely unextractable from the machine. **bigtab01 has a TPM 1.2 that is
+    invisible to the OS**: the owner confirmed the hardware on 2026-10-10, and nothing is exposed —
+    no TPM device in any of its ten ACPI tables (no `MSFT0101` string, no `PNP0C31` EisaId in the
+    DSDT, the six static SSDTs or the three loaded at runtime), neither a `TCPA` nor a `TPM2` table,
+    nothing in `/sys/class/tpm/`, and `ima: No TPM chip found` in the journal. The DSDT *calls*
+    `\_SB.TPM.PTS` with no device declared behind it, which is what a device hidden in firmware
+    setup looks like. **So the first action is five minutes in that firmware, not code**, and the
+    outcome worth hoping for is a **1.2 → 2.0 mode switch** — HP shipped those on much of its
+    2015-era fleet — because that puts bigtab01 on vidiot01's single code path with real hardware.
+    **Can the 1.2 be used if that is all there is? Yes, for one job, and it still should not be the
+    backend.** `tpm2-tools` cannot speak to a 1.2 chip at all (the 1.2 stack is TrouSerS, still
+    built for F44 as `trousers-0.3.15-17.fc44`), and 1.2 is RSA-plus-SHA-1 with no ECC, AES or
+    HMAC-SHA256 — so it cannot run Android's crypto. It *can* do the only thing the recommended
+    hybrid design asks of a TPM, which is seal/unseal and wrap a key, exactly as ChromeOS's Chaps
+    did on TPM 1.x. The decision that follows is a design decision rather than a build one:
+    **write the backend contract narrowly — seal, unseal, wrap, unwrap, nothing else — so a 1.2
+    chip, a smartcard or the Yubikey already attached to that machine could satisfy it, and leave
+    the 1.2 implementation unwritten.** swtpm stays the rig because it keeps one TPM 2.0 code path
+    shared with vidiot01; what it does not do is buy any security property, the state being a file
+    on the same disk.
+    **Three things that change the plan, all measured.** It is fast enough: ECDSA create/load/sign
+    land at 0.18–0.21 s each and RSA-2048 keygen at 0.12–0.15 s over five runs, every number an
+    upper bound because it includes `sudo` and TSS startup. It is **already in use** — four
+    persistent handles and two NV indices are resident, in the layout a Windows install leaves, so
+    **nothing here should ever run `tpm2_clear`**; the owner hierarchy takes no password, so our
+    primary needs no clearing. And it has **three transient object slots**, which forces the design:
+    wrapped blobs on disk, load and flush per operation, a hard concurrency cap.
+    **The recommendation is a `strongbox` instance, not a replacement for `default`.** Both
+    interfaces are instanced; Android surfaces the second as `FEATURE_STRONGBOX_KEYSTORE` and apps
+    reach it only by asking. Failure is then contained to apps that opted in, the gate is one
+    overlay feature XML — the [docs/31](docs/31-wifi-stage2.md) stage-0 mechanism again — and no
+    stock service has to be stood down the `wificond.rc` way. Replacing `default` would put the
+    lockscreen and every app's keys behind our first draft at 0.2 s an operation. The honest cost is
+    that almost nothing asks for StrongBox, so the visible result is a feature flag and a probe APK.
+    **Attestation is an explicit non-goal and cannot be delivered.** `attestKey` needs a chain rooted
+    in a Google-signed key; a TPM can only self-sign, and its EK certificate attests to an Intel
+    fTPM rather than to an Android device. Key *protection* is achievable; hardware attestation is
+    not, on either machine, ever.
+    **Two traps are already paid for and one is new.** SELinux is **not** in the way — measured with
+    `selinux.selinux_check_access()` rather than waited for in `ausearch`, per
+    [docs/42](docs/42-backlight-selinux.md): `unconfined_service_t`, `unconfined_t` and
+    `container_runtime_t` all hold `read write open ioctl` on `tpm_device_t`, so no policy module is
+    needed. The daemon needs root or group `tss` for `/dev/tpmrm0` (0660 `root:tss`). And **A16 will
+    hit the binder `transfer` denial where A13 will not**: `IKeyMintDevice::begin()` returns an
+    `IKeyMintOperation` binder, which is exactly the `dontaudit`ed permission that cost
+    [docs/35](docs/35-wifi-stage5.md) a day and presents as a bare `DeadObjectException`.
+    **Where the firmware answer actually lives, and what cannot answer it.** SMBIOS cannot: the TPM
+    Device record is DMI **type 43**, added in SMBIOS 3.1, and bigtab01's Insyde **F.0F** firmware
+    (2016-05-30, *HP ENVY x2 Detachable PC 13*, SKU `J9M66UAR#ABA`) reports SMBIOS **2.7**, so there
+    is no record to read while the device is hidden. UEFI cannot either — **none** of its 73
+    `efivars` is a TCG, TPM or physical-presence variable. So it is setup, under **Security**
+    (*Security Device Support* / *TPM Device* / *Intel Platform Trust Technology*, then *TPM State*,
+    then a *TPM Version* or *TPM Device Mode* selector, which **is** the switch if it exists) — and
+    DMI type 24 says an **administrator password is set**, so that password is needed to get in. If
+    settings exist but no version selector, enable it and read
+    `/sys/class/tpm/tpm0/tpm_version_major`, which answers `1` or `2` definitively. If there is no
+    TPM entry at all — likely on a consumer Insyde BIOS, since HP's *TPM Configuration Utility* was
+    a commercial-line tool — one attended test remains: `tpm_tis` is built in
+    (`CONFIG_TCG_TIS=y`), so `rpm-ostree kargs --append-if-missing=tpm_tis.force=1` plus a reboot
+    probes the standard TIS window with no ACPI declaration needed. Do that with the machine in
+    front of you, since a reboot there means LUKS and starting `sshd` by hand.
+    **And swtpm does not depend on any of it — demonstrated 2026-10-10 in the dev container**, which
+    has no usable TPM at all. `libtss2-tcti-swtpm.so` ships in tpm2-tss on the dev box, F43 *and*
+    F44, so no custom TCTI is needed: a software TPM 2.0 (`IBM`/`SW`, 3 transient slots — the same
+    as the Intel PTT — 65 persistent, NV surviving across client connections) answered
+    `tpm2_createprimary` in **0.015 s** and an ECC key create in **0.014 s**, with no privilege. That
+    is ~12× the hardware's speed, which is a **warning**: timing claims belong to vidiot01, never to
+    the rig. Two gotchas: the TCTI appends `.ctrl` itself, so the control socket must be
+    `<server-path>.ctrl` or it fails with *Failed to set locality*; and swtpm rejects a long unixio
+    path outright. Prefer the unix-socket shape over `swtpm cuse` (a `/dev/vtpmX` whose SELinux label
+    would need dealing with) and over mssim-over-TCP (a port on the machine that serves the `vidiot`
+    AP) — and note swtpm's control channel is **not** the MS simulator protocol, so `tcti-mssim`
+    against it fails on `MS_SIM_NV_ON`.
+    **Before any of it, check bigtab01's firmware for PTT.** If a real TPM is hiding behind a
+    disabled setting, that machine joins vidiot01's story — and gets the thing a TPM is actually
+    worth there, which is not Android at all: [docs/02](docs/02-ssh-access.md)'s cold-boot LUKS
+    prompt could become a TPM-sealed unlock. swtpm cannot do that, because its state would live on
+    the disk it is unlocking.
+    Prior art to read first, closest match last: `divegeek/JavaCardKeymaster` and
+    `ThalesGroup/javacard-keymint-hal` for the StrongBox-instance shape,
+    `Infineon/optiga-tpm-aosp` for tpm2-tss inside AOSP against a simulator, and ChromeOS's
+    **`arc-keymaster`** — a host daemon serving Android's keymaster HAL backed by the host TPM
+    through Chaps and cryptohome, which is this project's own daemon architecture already shipping
+    for this exact interface.
+    See [docs/65-tpm-keystore.md](docs/65-tpm-keystore.md).
+11. **A fingerprint HAL fed by libfprint — Chipsailing on bigtab01, Goodix on vidiot01.** **Added
+    2026-10-10 at the owner's request as two items; scoped the same day as one, nothing built.**
+    libfprint is already the abstraction over the two readers, so the Android side cannot tell
+    `2541:0236` from `27c6:538d` and must not be written twice, the way `NmBackend` is one
+    implementation of [docs/29](docs/29-wifi-plan.md)'s contract. That seam is what lets the reader
+    be chosen per host rather than per Android version — which is what the hardware turned out to
+    require.
+    **The Android side starts from the best position this project has had.** On **both** images the
+    biometric framework is present, running and serving **zero sensors**: `biometric`, `auth` and
+    `lock_settings` are all registered, `android.software.secure_lock_screen` is declared, and
+    `dumpsys biometric` reports an empty `Sensors:` list. Neither image declares
+    `android.hardware.fingerprint` (of 76 features on A13, 85 on A16), neither has a fingerprint
+    feature XML among 22+24 and 19+26 permission files, and neither carries a fingerprint HAL binary
+    or AIDL library at all. That is [docs/31](docs/31-wifi-stage2.md)'s stage 0 exactly — one overlay
+    XML wakes a dormant framework and the failure after it is informative. Both images carry the
+    AIDL *and* HIDL framework paths, measured from their own dex; **write AIDL**, which serves both.
+    **The shortcut does not exist**: AOSP's property-driven virtual fingerprint HAL is in neither
+    image, so there is nothing to drive from the host for free.
+    **The host side holds two surprises, one in each direction.** Stock **libfprint 1.94.100** — the
+    same version on both hosts — **knows neither reader**: a scan of the library's own device tables
+    finds zero hits for `2541:0236` and zero for `27c6:538d`, against exactly one hit each for two
+    control devices, and the library carries no Chipsailing string of any kind. But the owner's work
+    on it, at `../libfprint-goodix-538d-redhat`, is an **RPM packaging project with CI** rather than
+    a bare checkout: two separate forks pinned in `upstreams.json` (`syshlted/libfprint-goodix-538d`
+    on base v1.94.100, `syshlted/libfprint-Chipsailing-CS9711` on base v1.94.10), the **Goodix one
+    already building, linting and running upstream's test suite in `%check`**, the CS9711 pinned and
+    runnable through a rootless-podman dev rig (`scripts/fprint-dev.sh`) but **not yet given a
+    spec**. So "deploy the owner's libfprint" is an install, not a project — and the one real
+    constraint is that both specs are `Name: libfprint`, so **one host gets one reader** until the
+    two drivers ever share a tree.
+    **One false lead, recorded because it reads as proof:**
+    `/usr/lib/udev/hwdb.d/60-autosuspend-fingerprint-reader.hwdb` lists both readers by exact ID on
+    both hosts, and that file belongs to **`systemd-udev`**, not to libfprint. It is an autosuspend
+    quirk list, not a support claim.
+    **The readers are not where the two items put them, and that improves the plan.** Neither is
+    attached to either Waydroid host today (bigtab01 has a Yubikey, a webcam and Bluetooth; vidiot01
+    a webcam, Bluetooth and two USB disks, with no fingerprint device on either root hub), and the
+    owner placed them on 2026-10-10: **the Goodix is integrated in a personal laptop** and cannot
+    move, while **the Chipsailing is external USB** and can. Since the Android side cannot tell the
+    readers apart, **the CS9711 is the reader for both Waydroid hosts and the A16 half needs no
+    Goodix at all** — which removes the only hard hardware blocker here. The Goodix stays a
+    libfprint-side concern, already packaged, unless Waydroid ever runs on the laptop that has it.
+    Measured too: the **CS9711 is an image sensor matched in software** (its fork pins SIGFM, plain
+    C, OpenCV dropped) while the **Goodix is match-on-chip**, so the authoritative template store is
+    in a different place for each — and the CS9711's matching runs on bigtab01's two-core Broadwell,
+    which is where its timing has to be measured rather than on the laptop it was developed on.
+    **Four decisions before code, and one of them defers the hard problem.** `getSensorProps`
+    declares the sensor CONVENIENCE, WEAK or STRONG, and only STRONG needs a verifiable
+    `HardwareAuthToken` — so **start at CONVENIENCE**, get unlock working, and promote after goal
+    10 makes `computeSharedHmac` ours. The prediction to test rather than believe: unlock will work
+    with an unverifiable token and `setUserAuthenticationRequired(true)` keys will not. Then: whether
+    `fprintd` or we own the reader (taking it directly costs the host's own login fingerprint auth,
+    which matters on vidiot01 and may not on bigtab01's kiosk); and that the Goodix family is
+    match-on-chip with finite slots, which Android's enrolment UI knows nothing about.
+    **The binder `transfer` trap applies here on both images**, and earlier than anywhere else:
+    `createSession()` takes an `ISessionCallback` binder *and* returns an `ISession` binder, so
+    binders cross both ways on the first useful call. Also: enrolling anything requires a lockscreen
+    credential first, which changes how bigtab01's kiosk comes back from sleep — decide that with
+    the owner at the machine, see [docs/52](docs/52-launcher-lock-and-wake.md).
+    See [docs/66-fingerprint-hal.md](docs/66-fingerprint-hal.md).
+
 **Screen brightness — DONE, and not on the list above.** Added at the owner's request on
 2026-09-09, between Wi-Fi Stage 5 and removable media. Android's brightness slider now drives the real
 panel backlight. The machine has **no ambient light sensor** — the ITE8350 declares only five

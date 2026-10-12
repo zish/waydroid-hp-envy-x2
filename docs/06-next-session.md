@@ -256,6 +256,27 @@ with `packaging/build-mod.sh --lint <name>`.
   [docs/53](53-release-readiness.md).
 - **Write `BUILDING.md`.** Neither compiled daemon can currently be built by anyone who cannot
   ssh to bigtab01.
+- **Two new goals, added 2026-10-10 at the owner's request and scoped the same day — goals 10 and
+  11.** Four items as asked for, two components as scoped, because each pair shares a backend seam.
+  **Goal 10, a TPM behind Android's keystore** ([65](65-tpm-keystore.md)): nothing in Android speaks
+  TPM 2.0, so the only consumer is the keystore HAL and the HAL is the whole project — swtpm on
+  bigtab01 is the development rig for vidiot01's **Intel PTT fTPM**, which is the real thing.
+  bigtab01 does have a **TPM 1.2**, and it is invisible to the OS: no TPM device in any of its ten
+  ACPI tables and `ima: No TPM chip found` in the journal, i.e. hidden in firmware setup. **The
+  first action on this item is five minutes in that firmware**, hoping for a 1.2 → 2.0 mode switch;
+  the 1.2 can only ever serve the seal-and-wrap role, which is why the backend contract should be
+  written narrowly enough for it and the 1.2 implementation left unwritten. Recommended shape is a
+  `strongbox` instance rather than a replacement for `default`; attestation is impossible and is an
+  explicit non-goal; and vidiot01's TPM already holds four persistent objects, so **never
+  `tpm2_clear` it**. **Goal 11, a fingerprint HAL fed by libfprint** ([66](66-fingerprint-hal.md)):
+  on **both** images the biometric framework is running with zero sensors and no feature XML, which
+  is stage 0 all over again. Stock libfprint 1.94.100 knows **neither** reader, but the owner's work
+  on it (`../libfprint-goodix-538d-redhat`) is a packaging project with CI in which the Goodix fork
+  already builds and tests, so that half is an install; the CS9711 needs a spec. The readers moved
+  the plan: the Goodix is integrated in a personal laptop and cannot travel, the **CS9711 is
+  external USB**, and the Android side cannot tell them apart — so **the CS9711 is the reader for
+  both Waydroid hosts** and the A16 half needs no Goodix. The remaining question for the owner is
+  bigtab01's firmware TPM setting.
 - **Enforcement is already in place for signed commits** — `bin/check-signed-commits.sh`, wired
   to `.git/hooks/pre-push` and to [lefthook.yml](../lefthook.yml). All 94 commits on master
   already pass. Note `lefthook install` replaces the native shim with lefthook's dispatcher.
@@ -542,6 +563,7 @@ container host, **not** to this environment — it is not the target kernel for 
 | Present | `gcc`, `make`, `ld`, **binutils** (`readelf`, `objdump`, `nm`, `strings`), `curl`, `wget`, `openssl`, `xxd` |
 | Missing | `clang` (the NDK brings its own), `rsync`, `rpm2cpio`, `cpio`, `bison`, `flex`, `bc` |
 | Added 2026-09-06 | `cmake`, `libglib2.0-dev`, `pkg-config` (for `sensors/build.sh`). **`python3` is present** — the earlier note here saying otherwise was wrong |
+| Added 2026-10-10 | `swtpm` 0.7.1 and `tpm2-tools` 5.7, for goal 10. Debian's `tpm2-tss` ships **`tcti-swtpm`**, so a full software TPM 2.0 runs here with no hardware and no privilege — demonstrated, see [65](65-tpm-keystore.md). Note `/dev/tpmrm0` *is* passed into this container from `vidiot01` but is unusable (`root:tss` 0660, and `coder` is not in that group) |
 | **`apt` + passwordless `sudo`** | **available** — install what you need here rather than on bigtab01 |
 | `docker` | **unavailable by design.** This box *is* a Docker container and docker-in-docker is not set up, so the `/home/coder/bin/docker` shim fails with *"No suitable executable found"*. **Do not try to fix it** — plan without a container runtime |
 
