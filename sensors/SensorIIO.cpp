@@ -191,7 +191,8 @@ SensorIIO::SensorIIO()
     : mCb(nullptr), mUserdata(nullptr), mPollIntervalMs(50),
       mAxisRotation(0), mAccelReportsGravity(true),
       mMagnScale(SCALE_MAGN_DEFAULT),
-      mEarthFieldUt(EARTH_FIELD_UT_DEFAULT)
+      mEarthFieldUt(EARTH_FIELD_UT_DEFAULT),
+      mPolls(0), mSamples(0)
 {
     LoadConfig();
 
@@ -796,6 +797,8 @@ void SensorIIO::PollOnce()
     int64_t now = now_boottime_ns();
     uint32_t read_this_tick = 0;
 
+    mPolls++;
+
     for (int i = 0; i < MAX_NUM_SENSORS; i++) {
         IioSensor &s = mSensors[i];
 
@@ -870,6 +873,7 @@ void SensorIIO::PollOnce()
         }
         s.last_event_ns = now;
 
+        mSamples++;
         if (mCb)
             mCb(mUserdata, i);
     }

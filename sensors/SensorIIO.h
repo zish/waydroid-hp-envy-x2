@@ -166,6 +166,13 @@ struct SensorIIO {
      * accelerometer and compass.  Used by `waydroid-sensord --selftest`. */
     int SelfTest();
 
+    /* How many times PollOnce has run, and how many samples it has handed to
+     * the callback.  `--idle-probe` needs to state that an idle daemon polls
+     * exactly zero times, which a CPU figure on its own cannot: 0.0% of a
+     * core and 0.4% of a core are both "small". */
+    uint64_t Polls() const { return mPolls; }
+    uint64_t Samples() const { return mSamples; }
+
 private:
     bool ReadSensor(IioSensor &s);
     bool ReadSensorAt(IioSensor &s);
@@ -188,6 +195,8 @@ private:
     bool mAccelReportsGravity;      /* hub reports gravity, not proper accel */
     double mMagnScale;
     double mEarthFieldUt;           /* local geomagnetic field strength      */
+    uint64_t mPolls;                /* PollOnce calls; see Polls()           */
+    uint64_t mSamples;              /* events handed to the callback         */
 };
 
 }  // namespace waydroid

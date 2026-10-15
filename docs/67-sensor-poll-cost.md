@@ -52,6 +52,9 @@ So the requested rate never reached the reader. Every client got a flat 50 ms: t
 `g_timeout_add` was called once in the `Sensors` constructor and nothing ever removed it, so the
 daemon woke 20 times a second for the life of the session whether or not anything was subscribed.
 
+Now `sensor_device_retune_timer()` arms, re-arms or stops it from `activate()` and `batch()`, and
+`waydroid-sensord --idle-probe` measures that it does — see below.
+
 ## Three smaller ones
 
 - **Each axis is its own HID round trip.** Measured: one attribute 1.15 ms of wall time, three
@@ -316,6 +319,44 @@ the same argument. Untested on purpose: this is the owner's daily driver and fiv
 enough. That also removes the only lever that could have throttled push mode's rate, which is part
 of why it is not being adopted.
 
+## Proving the idle path, without a zero-subscriber window
+
+This is the change that was hardest to demonstrate, and it stayed "code-verified only" for a
+while. An idle daemon is supposed to have no timer at all, but no idle window ever occurs on a
+running system: `FaceDownDetector` and `WindowOrientationListener` hold the accelerometer for the
+life of the session. Stopping them is not an option, and a session restart only produces a window
+during Android's boot, before anything is watching.
+
+The way through is that `activate()` and `batch()` are ordinary methods and need no binder at all
+— the same reason `--selftest` works. `waydroid-sensord --idle-probe` constructs the real
+`Sensors`, drives those methods directly, runs the real glib main loop between steps, and reports
+the timer state, the number of times `PollOnce` actually ran, and the CPU each phase cost. It
+registers no service and takes no lock, so it does not disturb the running daemon.
+
+Two counters were added for it: `SensorIIO::Polls()` and `Samples()`. A CPU figure alone cannot
+settle this, because 0.00% and 0.4% of a core both read as "small" — the claim is that the count
+is *exactly zero*, and that needs counting.
+
+Run on bigtab01, 4 s per phase:
+
+| phase | timer | polls (want) | samples | CPU |
+|---|---|---|---|---|
+| nothing subscribed | **off** | **0** (0) | 0 | 0.2 ms = **0.00% of a core** |
+| accelerometer on | 50 ms | 79 (80) | 66 | 25.3 ms = 0.63% |
+| accelerometer asks 200 ms | **200 ms** | 19 (20) | 16 | 6.7 ms = 0.17% |
+| magnetometer asks 66 ms too | **66 ms** | 57 (61) | 71 | 17.1 ms = 0.43% |
+| magnetometer released | **200 ms** | 19 (20) | 18 | 6.0 ms = 0.15% |
+| accelerometer released | **off** | **0** (0) | 0 | 0.1 ms = **0.00%** |
+
+So: no subscribers means no timer and no polls, `batch()` re-arms the timer at the rate asked for,
+and with two sensors subscribed the period follows the shorter of the two and goes back when the
+faster one leaves. The probe exits non-zero if any of that stops being true.
+
+Two details in that table are worth reading. In the second phase there are fewer samples (66) than
+polls (79) — that is the repeat suppression dropping values the hub never refreshed. In the fourth
+there are more samples (71) than polls (57), because one tick can produce an event for each of two
+subscribed sensors.
+
 ## Who actually keeps this awake
 
 **Corrected 2026-10-14.** An earlier draft said a bundled Facebook ads SDK held the accelerometer
@@ -464,8 +505,6 @@ rpm -qf: waydroid-ext-sensord-1.0.2-1.x86_64
 
 ## Not done, and what is unproven
 
-- **The idle-timer path is not observed live.** No zero-subscriber window occurs while a session
-  is up, because two framework listeners hold the accelerometer. Code-verified only.
 - **Long-running stability is still unmeasured.** `~/sensord-stability.sh` on the host samples CPU
   and RSS every 10 minutes, but it was started with `setsid nohup` and does **not** survive a
   reboot, so it has to be relaunched to collect anything.

@@ -25,6 +25,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -591,10 +592,141 @@ app_run(
     app->loop = NULL;
 }
 
+/*
+ * `waydroid-sensord --idle-probe`: show that the poll timer follows what is
+ * subscribed, measured rather than asserted.
+ *
+ * The change this exists to prove is that an unsubscribed daemon does not wake
+ * up at all.  That is unobservable on a running system -- Android's
+ * FaceDownDetector and WindowOrientationListener hold the accelerometer for
+ * the life of the session, so no zero-subscriber window ever occurs -- and it
+ * stayed "code-verified only" for exactly that reason.
+ *
+ * But activate() and batch() are plain methods, and nothing about them needs
+ * binder.  So this drives them directly, runs the real glib main loop between
+ * steps, and reports the timer state, the number of times PollOnce actually
+ * ran, and the CPU each phase cost.  No container, no session restart, no
+ * interference with the running daemon: it registers no service and takes no
+ * lock.
+ */
+static gboolean probe_quit(gpointer loop)
+{
+    g_main_loop_quit((GMainLoop *)loop);
+    return G_SOURCE_REMOVE;
+}
+
+static void probe_run_for(double secs)
+{
+    GMainLoop *loop = g_main_loop_new(NULL, FALSE);
+
+    /* The poll timer is attached to the default GMainContext, which this loop
+     * runs, so it dispatches here exactly as it does under app_run(). */
+    g_timeout_add((guint)(secs * 1000.0), probe_quit, loop);
+    g_main_loop_run(loop);
+    g_main_loop_unref(loop);
+}
+
+static double probe_cpu_ms(void)
+{
+    struct rusage ru;
+
+    getrusage(RUSAGE_SELF, &ru);
+    return (double)(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000.0 +
+           (double)(ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1000.0;
+}
+
+/* Run one phase and check the timer is in the state it should be. Returns the
+ * number of checks that failed. */
+static int probe_phase(Sensors *svc, const char *label, double secs,
+                       int want_tick_ms)
+{
+    SensorIIO *iio = svc->iio();
+    const uint64_t p0 = iio->Polls();
+    const uint64_t s0 = iio->Samples();
+    const double c0 = probe_cpu_ms();
+
+    probe_run_for(secs);
+
+    const uint64_t polls = iio->Polls() - p0;
+    const uint64_t samples = iio->Samples() - s0;
+    const double cpu = probe_cpu_ms() - c0;
+    const int tick = svc->pollTickMs();
+    const bool armed = svc->pollTimerArmed();
+    char state[16];
+    int bad = 0;
+
+    if (armed)
+        snprintf(state, sizeof(state), "%d ms", tick);
+    else
+        snprintf(state, sizeof(state), "off");
+
+    /* One poll per period, give or take a tick either side of the phase
+     * boundary -- and exactly zero when the timer is supposed to be stopped. */
+    double want = want_tick_ms ? secs * 1000.0 / want_tick_ms : 0.0;
+    if (armed != (want_tick_ms != 0) || tick != want_tick_ms)
+        bad++;
+    if (want_tick_ms == 0) {
+        if (polls != 0)
+            bad++;
+    } else if ((double)polls < want * 0.8 || (double)polls > want * 1.2 + 1.0) {
+        bad++;
+    }
+
+    printf("  %-32s timer %-7s polls %4llu (want %3.0f)  samples %4llu  "
+           "cpu %6.1f ms = %5.2f%% of a core   %s\n",
+           label, state, (unsigned long long)polls, want,
+           (unsigned long long)samples, cpu, 100.0 * cpu / (secs * 1000.0),
+           bad ? "FAIL" : "ok");
+    return bad;
+}
+
+static int idle_probe(double secs)
+{
+    Sensors *svc = new Sensors();
+    SensorIIO *iio = svc->iio();
+    const int base = iio->PollIntervalMs();
+    const int64_t ms = 1000000LL;
+    int bad = 0;
+
+    printf("waydroid-sensord idle-timer probe, %.1fs per phase, "
+           "poll_hz ceiling %d ms\n\n", secs, base);
+
+    if (!iio->IsSensorAvailable(ID_ACCELEROMETER) ||
+        !iio->IsSensorAvailable(ID_MAGNETIC_FIELD)) {
+        fprintf(stderr, "need the accelerometer and magnetometer present\n");
+        return RET_NOTFOUND;
+    }
+
+    bad += probe_phase(svc, "nothing subscribed", secs, 0);
+
+    svc->activate(ID_ACCELEROMETER, true);
+    bad += probe_phase(svc, "accelerometer on", secs, base);
+
+    svc->batch(ID_ACCELEROMETER, 200 * ms, 0);
+    bad += probe_phase(svc, "accelerometer asks 200 ms", secs, 200);
+
+    svc->activate(ID_MAGNETIC_FIELD, true);
+    svc->batch(ID_MAGNETIC_FIELD, 66666666LL, 0);
+    bad += probe_phase(svc, "magnetometer asks 66 ms too", secs, 66);
+
+    svc->activate(ID_MAGNETIC_FIELD, false);
+    bad += probe_phase(svc, "magnetometer released", secs, 200);
+
+    svc->activate(ID_ACCELEROMETER, false);
+    bad += probe_phase(svc, "accelerometer released", secs, 0);
+
+    printf("\n  %s\n", bad
+           ? "FAILED: the timer did not follow what was subscribed"
+           : "PASSED: no subscribers means no timer and no polls; the period "
+             "follows the shortest rate asked for");
+    return bad ? RET_ERR : RET_OK;
+}
+
 int main(int argc, char* argv[])
 {
     const char* device = DEFAULT_DEVICE;
     gboolean selftest = FALSE;
+    double idle_probe_secs = 0.0;
     gboolean backlight_info = FALSE;
     int backlight_set = -1;
     App app;
@@ -606,6 +738,12 @@ int main(int argc, char* argv[])
     for (int i = 1; i < argc; i++) {
         if (!g_strcmp0(argv[i], "--selftest")) {
             selftest = TRUE;
+        } else if (!g_strcmp0(argv[i], "--idle-probe")) {
+            /* Optional seconds-per-phase argument. */
+            idle_probe_secs = 4.0;
+            if (i + 1 < argc && argv[i + 1][0] >= '0' &&
+                argv[i + 1][0] <= '9')
+                idle_probe_secs = atof(argv[++i]);
         } else if (!g_strcmp0(argv[i], "--backlight-info")) {
             backlight_info = TRUE;
         } else if (!g_strcmp0(argv[i], "--backlight")) {
@@ -619,7 +757,8 @@ int main(int argc, char* argv[])
             gutil_log_default.level = GLOG_LEVEL_VERBOSE;
         } else if (!g_strcmp0(argv[i], "--help") ||
                    !g_strcmp0(argv[i], "-h")) {
-            printf("usage: %s [--selftest] [--verbose] [BINDER_DEVICE]\n"
+            printf("usage: %s [--selftest] [--idle-probe [SECS]] [--verbose]\n"
+                   "       %*s[BINDER_DEVICE]\n"
                    "\n"
                    "  Waydroid sensors HAL, sourcing data from Linux IIO.\n"
                    "  Registers %s/%s on BINDER_DEVICE\n"
@@ -630,11 +769,15 @@ int main(int argc, char* argv[])
                    "\n"
                    "  --selftest        read the sensors, cross-check them against\n"
                    "                    each other and exit; needs no container.\n"
+                   "  --idle-probe      subscribe and unsubscribe sensors directly and\n"
+                   "                    report what the poll timer did, SECS per phase\n"
+                   "                    (default 4). Needs no container or binder.\n"
                    "  --backlight-info  print the backlight device and the whole\n"
                    "                    0..255 -> raw mapping, and exit.\n"
                    "  --backlight N     set brightness to Android value N (0..255)\n"
                    "                    and exit. Needs no container either.\n",
-                   argv[0], DEFAULT_IFACE, DEFAULT_NAME, DEFAULT_DEVICE,
+                   argv[0], (int)strlen(argv[0]) + 1, "",
+                   DEFAULT_IFACE, DEFAULT_NAME, DEFAULT_DEVICE,
                    LIGHT_IFACE, LIGHT_NAME);
             return RET_OK;
         } else {
@@ -665,6 +808,9 @@ int main(int argc, char* argv[])
         }
         return RET_OK;
     }
+
+    if (idle_probe_secs > 0.0)
+        return idle_probe(idle_probe_secs);
 
     if (selftest) {
         printf("waydroid-sensord self-test\n\n");

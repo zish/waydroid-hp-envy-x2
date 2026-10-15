@@ -66,6 +66,11 @@ struct Sensors {
     /* Exposed so service.cpp can run --selftest without binder. */
     SensorIIO *iio() { return mSensorDevice->mIioDevice; }
 
+    /* Poll-timer state, for --idle-probe: whether a GSource exists at all,
+     * and the period it was armed with. */
+    bool pollTimerArmed() const { return mSensorDevice->poll_source != 0; }
+    int pollTickMs() const { return mSensorDevice->poll_tick_ms; }
+
 private:
     static constexpr int32_t kPollMaxBufferSize = 128;
     SensorDevice *mSensorDevice;

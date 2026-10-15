@@ -39,7 +39,7 @@
 # box matching a host it cannot install packages on, and wrong inside rpmbuild,
 # which must be offline and must bind to this buildroot's libraries.
 
-VERSION=1.0.3
+VERSION=1.0.4
 RELEASE=1
 KIND=host
 

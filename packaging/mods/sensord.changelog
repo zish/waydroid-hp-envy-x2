@@ -1,3 +1,28 @@
+* Thu Oct 15 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.4-1
+- Add --idle-probe, which subscribes and unsubscribes sensors directly through
+  activate() and batch(), runs the real main loop between steps, and reports
+  the poll timer's state, the number of times PollOnce ran and the CPU each
+  phase cost. No binder, no container, no service registration, so it does not
+  disturb a running daemon. It exits non-zero if the timer stops following what
+  is subscribed.
+- This exists because the claim that an idle daemon does not wake up at all was
+  unverifiable on a running system: two framework listeners hold the
+  accelerometer for the life of the session, so no zero-subscriber window ever
+  occurs. Measured now: nothing subscribed means the timer is off, PollOnce
+  runs exactly 0 times, and the process spends 0.2 ms over 4 seconds.
+- Add SensorIIO::Polls() and Samples() counters to support that. A CPU figure
+  alone cannot settle it, since 0.00%% and 0.4%% of a core both read as small.
+- No change to any behaviour the daemon exhibits while serving Android. The two
+  counter increments are the only code reached on the normal path.
+- Corrects 1.0.3's note on buffered mode. That entry cited magn_3d delivering
+  10.3 Hz against 10 Hz advertised; re-measured, magn_3d gives 0.00-0.17 Hz and
+  the earlier figure has not reproduced. What does hold, and is new, is that
+  accel_3d pushes at 44.66 Hz, dev_rotation at 30.99 Hz and gyro_3d at
+  20.16 Hz, all with no sysfs write at all -- faster than Android asks for in
+  every case. Push mode is nonetheless not being adopted; see
+  docs/67-sensor-poll-cost.md for the numbers and for the kernel divide-by-zero
+  that writing a hysteresis attribute can trigger on this hub.
+
 * Wed Oct 14 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.3-1
 - Stop using in_<type>_sampling_frequency to pace polled reads. 1.0.2 treated it
   as the rate beyond which a read would return the previous sample, and that is
