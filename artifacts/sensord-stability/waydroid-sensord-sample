@@ -1,0 +1,116 @@
+#!/bin/sh
+# Sample waydroid-sensord's cost and resource use. Read-only; appends one line
+# per run to $LOG and exits. Driven by waydroid-sensord-sample.timer.
+#
+# WHY THIS EXISTS
+#
+# docs/67 made three claims about the 1.0.2/1.0.3 poll-rate work that only time
+# can test:
+#
+#   * CPU is down to ~0.9% of a core and stays there,
+#   * holding the IIO file descriptors open does not leak them,
+#   * and RSS does not creep.
+#
+# The held descriptors are the interesting one. DisableSensorEvents
+# deliberately does NOT close them -- it runs on an hwbinder thread while
+# PollOnce may be mid-pread on those same fds, and the dangerous outcome of
+# closing them there is not EBADF but a recycled fd number quietly reading some
+# other file. So they are only dropped on the main thread, on a failed read or
+# a reprobe. That is correct but it is also exactly the shape of a leak, and
+# three descriptors per sensor across thousands of activate/deactivate cycles
+# would show up here long before it mattered.
+#
+# WHY A TIMER AND NOT A SLEEP LOOP
+#
+# The first version of this was a `while :; do ...; sleep 600; done` started
+# with `setsid nohup`, which did not survive a reboot -- so after every reboot
+# it silently collected nothing until someone remembered to start it again, and
+# docs/67 carried "long-running stability is still unmeasured" for that reason.
+#
+# WHY THE INTERVAL AVERAGE AND NOT JUST THE LIFETIME ONE
+#
+# `times/etimes` is the average since the process started, which is dominated
+# by its early history and cannot show a drift. The interval figure, computed
+# against the previous sample in $STATE, can.
+set -eu
+
+LOG=${LOG:-/var/log/waydroid-sensord-stability.log}
+STATE=${STATE:-/var/lib/waydroid-sensord-sample.state}
+MAXLINES=${MAXLINES:-20000}
+
+now=$(date -Is)
+
+# Match on comm, never on the full command line. `pgrep -f waydroid-sensord`
+# matches the grep, the ssh wrapper and this script's own arguments -- the trap
+# docs/14 documents and that cost a wrong diagnosis once already. comm is
+# truncated to 15 characters, hence the short pattern, and zombies are excluded
+# because they report nonsense.
+pid=$(ps -eo pid=,stat=,comm= |
+      awk '$3 ~ /^waydroid-sensor/ && $2 !~ /Z/ { print $1; exit }')
+
+if [ -z "$pid" ]; then
+    printf '%s no live daemon\n' "$now" >> "$LOG"
+    rm -f "$STATE"
+    exit 0
+fi
+
+set -- $(ps -eo etimes=,times=,rss=,vsz= -p "$pid")
+et=$1 cpu=$2 rss=$3 vsz=$4
+
+# Threads and descriptors straight from /proc. Reading another process's fd
+# directory needs root; when it fails, say so rather than reporting a plausible
+# zero -- a leak check that silently reads 0 is worse than no leak check. Note
+# the `|| echo` has to be outside the pipe: `ls ... | wc -l || echo` would run
+# wc on empty input and report 0 quite happily.
+threads=$(awk '/^Threads:/ { print $2 }' "/proc/$pid/status" 2>/dev/null) || threads=''
+[ -n "$threads" ] || threads='?'
+
+if fdlist=$(ls "/proc/$pid/fd" 2>/dev/null); then
+    fds=$(printf '%s\n' "$fdlist" | wc -l)
+else
+    fds='?'
+fi
+
+# Which build this is, so a log spanning an upgrade stays interpretable, and so
+# a hand-built binary shadowing the package from /usr/local/bin is visible here
+# rather than being mistaken for the packaged one.
+#
+# Reading another process's exe link needs root. Without it this says '?' and
+# NOT 'unpackaged' -- the two mean entirely different things, and reporting a
+# failed lookup as "not packaged" would be a lie about the host's state.
+if exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null); then
+    ver=$(rpm -qf "$exe" --qf '%{VERSION}-%{RELEASE}' 2>/dev/null) || ver='unpackaged'
+else
+    exe='?'
+    ver='?'
+fi
+
+life=$(awk -v c="$cpu" -v e="$et" 'BEGIN { printf "%.3f", (e > 0) ? 100 * c / e : 0 }')
+
+# The interval figure, against the last sample of the same pid.
+iv='-'
+if [ -r "$STATE" ]; then
+    set -- $(cat "$STATE")
+    if [ "$1" = "$pid" ]; then
+        # Spelled out rather than as a ternary format string: `printf (d>0) ?
+        # "%.3f" : "-", x/d` parses ambiguously in awk and still evaluates the
+        # division, so a zero-length interval would be a divide-by-zero.
+        iv=$(awk -v c="$cpu" -v pc="$2" -v e="$et" -v pe="$3" 'BEGIN {
+                 d = e - pe
+                 if (d > 0) printf "%.3f", 100 * (c - pc) / d
+                 else printf "-"
+             }')
+    fi
+fi
+printf '%s %s %s\n' "$pid" "$cpu" "$et" > "$STATE"
+
+printf '%s pid=%s ver=%s exe=%s up=%ss cpu=%ss life=%s%% interval=%s%% rss=%sKB vsz=%sKB threads=%s fds=%s\n' \
+    "$now" "$pid" "$ver" "$exe" "$et" "$cpu" "$life" "$iv" "$rss" "$vsz" "$threads" "$fds" >> "$LOG"
+
+# Keep it bounded. One line per ten minutes is ~6 MB a year, which is not a
+# problem, but an unbounded log in /var on an 8 GB machine is still a bad habit.
+lines=$(wc -l < "$LOG")
+if [ "$lines" -gt "$MAXLINES" ]; then
+    mv -f "$LOG" "$LOG.1"
+    printf '%s rotated at %s lines\n' "$now" "$lines" > "$LOG"
+fi

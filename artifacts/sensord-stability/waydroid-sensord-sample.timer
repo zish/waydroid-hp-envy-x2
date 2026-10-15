@@ -1,0 +1,17 @@
+[Unit]
+Description=Sample waydroid-sensord's resource use every ten minutes
+
+[Timer]
+# Ten minutes is what the original hand-run sampler used and it is already
+# finer than the question needs: the point is drift over days, not minutes.
+# OnBootSec is deliberately late -- container_manager.py spawns the daemon at
+# session start, which is after a greeter login, so sampling at boot would only
+# ever record "no live daemon".
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Persistent=false
+Unit=waydroid-sensord-sample.service
+
+[Install]
+WantedBy=timers.target

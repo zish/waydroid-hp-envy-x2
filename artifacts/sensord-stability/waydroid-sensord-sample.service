@@ -1,0 +1,23 @@
+[Unit]
+Description=Sample waydroid-sensord's CPU, RSS and descriptor count
+Documentation=file:///usr/share/doc/waydroid-bigtab01/67-sensor-poll-cost.md
+# No ConditionPathExists on the daemon's binary: whether it is installed at
+# /usr/bin (the package) or /usr/local/bin (a hand-built one shadowing it) is
+# exactly the kind of thing this log is useful for recording, and the sampler
+# writes "no live daemon" and exits 0 when there is nothing to sample.
+
+[Service]
+Type=oneshot
+ExecStart=@BINDIR@/waydroid-sensord-sample
+# Needs to read another process's /proc, so ProtectProc= cannot be used --
+# ProtectProc=invisible hides exactly the entries this reads, and the failure
+# would be a plausible-looking "no live daemon" rather than an error. The rest
+# of the usual hardening is fine: it reads /proc and appends to one log.
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/log /var/lib
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=32M

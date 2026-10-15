@@ -357,6 +357,39 @@ polls (79) — that is the repeat suppression dropping values the hub never refr
 there are more samples (71) than polls (57), because one tick can produce an event for each of two
 subscribed sensors.
 
+## Measuring stability across reboots
+
+The three claims that only time can test are that CPU stays near 0.9% of a core, that holding the
+IIO descriptors open does not leak them, and that RSS does not creep. The descriptors are the one
+worth watching: `DisableSensorEvents` deliberately does not close them, so they are only dropped
+on the main thread on a failed read or a reprobe, and that is correct but it is also exactly the
+shape of a leak.
+
+Nothing was collecting any of it. The sampler was a `while :; do ...; sleep 600; done` started by
+hand with `setsid nohup`, so after every reboot it silently gathered nothing until someone
+remembered to restart it — and this machine gets rebooted often. Nine lines had accumulated in a
+day.
+
+[`artifacts/sensord-stability/`](../artifacts/sensord-stability/) replaces it with a one-shot
+sampler and a systemd timer, which survives a reboot because that is what timers do. It also
+records more than the original did:
+
+| field | why |
+|---|---|
+| `interval=` | CPU since the previous sample. `life=` is the average since process start, which is dominated by early history and cannot show a drift |
+| `fds=` | the leak check. Baseline **25** |
+| `ver=` / `exe=` | a hand-built binary in `/usr/local/bin` silently shadows the packaged one, and a log spanning an upgrade is otherwise uninterpretable |
+| `threads=`, `vsz=` | cheap, and a thread leak would be as quiet as a descriptor leak |
+
+A `?` in any field means the lookup failed, usually for want of root. It does not mean zero, and
+`ver=?` deliberately does not read `ver=unpackaged` — the first version of the sampler conflated
+them, which would have been a lie about the host's state.
+
+What the figures say so far, which is not yet much: over 50 minutes on 1.0.3, RSS flat at
+**4252 KB**, descriptors flat at **25**, threads at **5**, and the interval CPU at **0.83–0.90% of
+a core** against a lifetime average converging on the same. No growth in anything. That is still
+minutes, not days — but it now accumulates without anyone remembering to start it.
+
 ## Who actually keeps this awake
 
 **Corrected 2026-10-14.** An earlier draft said a bundled Facebook ads SDK held the accelerometer
@@ -505,9 +538,9 @@ rpm -qf: waydroid-ext-sensord-1.0.2-1.x86_64
 
 ## Not done, and what is unproven
 
-- **Long-running stability is still unmeasured.** `~/sensord-stability.sh` on the host samples CPU
-  and RSS every 10 minutes, but it was started with `setsid nohup` and does **not** survive a
-  reboot, so it has to be relaunched to collect anything.
+- **Long-running stability is instrumented but not yet concluded.** The sampler now survives a
+  reboot (above), and the first hour shows no growth in RSS, descriptors or threads. The question
+  it exists to answer needs days of it.
 - **`magn_3d`'s push rate**, as above: 10.3 Hz once, 0.17 Hz on every re-run. Unexplained, and
   deliberately not chased through a kernel function that oopses.
 - **`in_*_sampling_frequency` writes are untested.** They go through the same conversion that
