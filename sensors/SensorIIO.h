@@ -81,9 +81,32 @@ struct IioSensor {
     bool available;
     int64_t last_resolve_ns;        /* rate-limits re-resolution on failure   */
 
+    /* One open fd per entry in `attrs`, held across polls.  Opening a sysfs
+     * attribute is a kernfs path walk and an allocation that buys nothing when
+     * the next poll wants the same file: measured on bigtab01, dropping the
+     * open/close pair takes an attribute read from 0.097 ms to 0.058 ms of
+     * CPU.  Empty until the first read; dropped whenever the path is
+     * re-resolved, because a reprobe invalidates every fd. */
+    std::vector<int> fds;
+
+    /* The interval at which the hub PUSHES reports, from
+     * in_<type>_sampling_frequency.  Zero if the attribute is missing.
+     *
+     * Recorded for the log and for a future buffered-mode reader, and
+     * deliberately not used to pace a polled read: a _raw read is an explicit
+     * GET_REPORT answered with a fresh sample, so polling faster than this
+     * returns new data rather than the previous bytes.  See ReadHubRate. */
+    int64_t hub_interval_ns;
+
     /* Runtime state. */
     bool enabled;
     int64_t warmup_until_ns;
+    int64_t req_interval_ns;        /* what Android asked for via batch()    */
+    int64_t interval_ns;            /* effective poll period; see
+                                     * RecomputeInterval                     */
+    int64_t next_due_ns;            /* when this sensor is next polled       */
+    int64_t last_event_ns;          /* when an event was last queued         */
+    bool repeated;                  /* last read returned the previous value */
     double v[4];                    /* scaled values; quaternion uses all 4  */
     int n;                          /* how many of v[] are valid             */
     uint64_t ts;                    /* CLOCK_BOOTTIME ns of the last read    */
@@ -114,8 +137,25 @@ struct SensorIIO {
      * produced a usable sample.  Driven by a glib timeout in Sensors.cpp. */
     void PollOnce();
 
-    /* Milliseconds between polls, from the config file. */
+    /* The fastest poll period we will ever use, from the config file.  Every
+     * term in RecomputeInterval can only slow a sensor down from here. */
     int PollIntervalMs() const { return mPollIntervalMs; }
+
+    /* Period the shared glib timer should run at: the shortest interval any
+     * enabled sensor wants.  Meaningless unless AnyEnabled(). */
+    int TickIntervalMs() const;
+
+    /* Is anything enabled?  Lets the caller stop its timer when not: an idle
+     * daemon has nothing to read and should cost nothing. */
+    bool AnyEnabled() const;
+
+    /* Record the sampling period Android requested through
+     * ISensors::batch().  Honoured as a lower bound on the poll period. */
+    void SetSamplingPeriod(int id, int64_t period_ns);
+
+    /* What getSensorsList() should advertise as this sensor's minDelay: the
+     * fastest rate we can actually serve, in microseconds. */
+    int32_t MinDelayUs(int id) const;
 
     /* How far to trust the magnetometer right now, as an Android accuracy
      * value (0 UNRELIABLE, 1 LOW, 2 MEDIUM, 3 HIGH).  See the definition for
@@ -130,6 +170,10 @@ private:
     bool ReadSensor(IioSensor &s);
     bool ReadSensorAt(IioSensor &s);
     bool ResolveNode(IioSensor &s);
+    bool OpenFds(IioSensor &s);
+    void CloseFds(IioSensor &s);
+    void ReadHubRate(IioSensor &s);
+    void RecomputeInterval(IioSensor &s);
     void ApplyAxisRotation(double &x, double &y) const;
     void LoadConfig();
 

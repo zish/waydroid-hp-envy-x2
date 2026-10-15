@@ -1,3 +1,54 @@
+* Wed Oct 14 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.3-1
+- Stop using in_<type>_sampling_frequency to pace polled reads. 1.0.2 treated it
+  as the rate beyond which a read would return the previous sample, and that is
+  wrong: a _raw read issues an explicit HID GET_REPORT and the hub answers with
+  a freshly converted sample. Polling accel_3d at 40 Hz with the machine
+  demonstrably still -- median step 2-3 LSB, total range under 20 LSB against a
+  4-count LSB -- returns fresh data 97.9%% of the time, and at 20 Hz 100%% of the
+  time, against an attribute that reads 10 Hz.
+- So 1.0.2 did not reclaim free work on the accelerometer, it under-sampled it,
+  and feeding the same figure into minDelay told Android 10 Hz was the ceiling
+  when the framework had been asking for 66.67 ms (SENSOR_DELAY_UI) and the
+  hardware serves it comfortably. minDelay is back to the poll_hz ceiling.
+- The attribute does govern the unsolicited-report path, which is what buffered
+  mode on magn_3d showed: 10.3 Hz delivered against 10 Hz advertised. It is
+  still read and logged for that reason, and for a future push-mode reader, but
+  it no longer influences any poll period.
+- Everything else from 1.0.2 stands and is unaffected: honouring batch(),
+  stopping the timer when nothing is subscribed, sharing the dev_rotation read
+  between ORIENTATION and ROTATION_VECTOR, held fds with pread, and repeat
+  suppression behind a 1 s heartbeat. Those were measured independently.
+
+* Wed Oct 14 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.2-1
+- Poll each sensor at its own rate instead of all of them at a flat 20 Hz.
+  in_<type>_sampling_frequency says the hub publishes accel_3d and magn_3d at
+  10 Hz, so half of every accelerometer poll was three HID round trips fetching
+  bytes the hardware had not refreshed. Measured 1.9%% of a core down to 0.7%%
+  with the same sensors subscribed. docs/67-sensor-poll-cost.md.
+- Honour ISensors::batch(). The requested sampling period was being read off the
+  parcel into a throwaway and discarded, so a client asking SENSOR_DELAY_NORMAL
+  was served four times faster than it wanted. maxReportLatencyNs stays ignored
+  on purpose: the sensor list advertises fifoMaxEventCount = 0.
+- Advertise minDelay per sensor rather than from poll_hz alone. Claiming 20 Hz
+  on a node that publishes at 10 only made Android ask for round trips that
+  returned the same bytes; it now selects 100 ms where it used to pick 66.67.
+- Stop the poll timer when nothing is subscribed. It was added in the Sensors
+  constructor and never removed, so an idle daemon still woke 20 times a second.
+- Read dev_rotation once per tick and share it. ORIENTATION and ROTATION_VECTOR
+  are the same quaternion from the same attribute of the same node, so with both
+  enabled it cost a second 1.15 ms i2c round trip for a report already in hand.
+- Suppress repeat samples, with a 1 s heartbeat floor so a sensor advertised as
+  continuous cannot fall silent on a motionless machine. This also makes the
+  existing `ts != last_TimeStamp` guard work: every read used to be stamped with
+  the current time, so the two values differed by construction.
+- Hold one fd per attribute and pread instead of fopen/fclose on every poll:
+  0.097 ms to 0.058 ms of CPU per attribute read, measured. The fds are dropped
+  only from the main thread -- closing them from an hwbinder thread races with a
+  pread in progress, and the bad outcome is a recycled fd number reading another
+  file rather than EBADF.
+- No change to the axis conventions, scale factors, warm-up windows or the
+  ILight half.
+
 * Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
 - Log each brightness change at INFO rather than DEBUG, so the one measurement
   in bin/brightness-test.sh that does not depend on Android's display policy

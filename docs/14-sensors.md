@@ -217,6 +217,16 @@ Reading three sysfs attributes over the hub's i2c link costs **3–7 ms**, and a
 That is why the daemon polls at 20 Hz by default and advertises `minDelay` to match: promising a
 faster rate would be a lie.
 
+> **Revised on 2026-10-14 — see [docs/67](67-sensor-poll-cost.md).** A flat 20 Hz was more than
+> most clients asked for: `batch()` was discarding Android's requested sampling period, so a
+> framework listener wanting 66.67 ms and an app wanting 200 ms were both served at 50 ms. The poll
+> period is now per sensor, the slower of the `poll_hz` ceiling and what `batch()` asked for.
+>
+> The 20 Hz default itself stands. `in_<type>_sampling_frequency` reads 10 Hz for `accel_3d`, and
+> docs/67 briefly treated that as a limit on polled reads — it is not. A `_raw` read is an explicit
+> `GET_REPORT` answered with a fresh sample: at 20 Hz, 0% of reads repeat, and at 40 Hz only 2.1%,
+> with the machine measurably still. The attribute governs the unsolicited-report path instead.
+
 ## What Android sees
 
 ```

@@ -13,11 +13,13 @@
 #include "hybrisbindertypes.h"   /* ACCURACY_* */
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <gutil_log.h>
 
@@ -81,6 +83,27 @@ namespace waydroid {
  * The quaternion's cold read is already a valid unit quaternion, so it needs
  * only a short settle.
  */
+/*
+ * Bounds on the per-sensor poll period chosen by RecomputeInterval.
+ *
+ * MAX_INTERVAL_NS is the maxDelay the sensor list advertises, so Android
+ * cannot legitimately ask for slower -- and it has to stay well inside the HID
+ * function device's runtime-PM autosuspend window (measured: 3000 ms in
+ * .../HID-SENSOR-200073.3.auto/power/autosuspend_delay_ms), or the sensor
+ * powers down between polls and every read becomes a cold read again.
+ *
+ * HEARTBEAT_NS bounds how long a motionless sensor may go without producing an
+ * event.  Repeat samples are otherwise dropped, and a sensor advertised as
+ * SENSOR_FLAG_CONTINUOUS_MODE should not fall silent just because the machine
+ * is sitting still -- a client blocked in poll() would wait forever.
+ */
+#define MAX_INTERVAL_NS (1000LL * 1000000LL)
+#define HEARTBEAT_NS    (1000LL * 1000000LL)
+
+/* Slack on a poll deadline, so a glib timeout that fires a hair early does not
+ * push a sensor out to the tick after next. */
+#define DUE_SLACK_NS (2LL * 1000000LL)
+
 #define WARMUP_ACCEL_MS 200
 #define WARMUP_MAGN_MS 200
 #define WARMUP_GYRO_MS 5000
@@ -121,6 +144,35 @@ static int read_iio_attr(const std::string &path, const std::string &attr,
         return -1;
     }
     fclose(f);
+
+    int n = 0;
+    char *p = buf;
+    while (n < max) {
+        char *end;
+        double v = strtod(p, &end);
+        if (end == p)
+            break;
+        out[n++] = v;
+        p = end;
+    }
+    return n ? n : -1;
+}
+
+/*
+ * Read one already-open IIO attribute.  pread rather than read, because sysfs
+ * regenerates the value at offset 0 on every read and this fd is reused for
+ * the life of the node -- no lseek, no reopen.
+ *
+ * Returns the number of whitespace-separated values parsed, or -1.
+ */
+static int read_iio_fd(int fd, double *out, int max)
+{
+    char buf[256];
+    ssize_t len = pread(fd, buf, sizeof(buf) - 1, 0);
+
+    if (len <= 0)
+        return -1;
+    buf[len] = '\0';
 
     int n = 0;
     char *p = buf;
@@ -303,6 +355,195 @@ void SensorIIO::ApplyAxisRotation(double &x, double &y) const
     y = ny;
 }
 
+/*
+ * Open one fd per attribute and hold them.
+ *
+ * Opening a sysfs attribute is a kernfs path walk plus an allocation, and it
+ * buys nothing when the next poll wants the same file.  Measured on bigtab01,
+ * per attribute: 0.097 ms of CPU for open+read+close against 0.058 ms for a
+ * pread on a held fd.  The i2c round trip (1.15 ms of wall time) is unchanged
+ * -- this removes host CPU, not hub latency.
+ *
+ * Attribute files are stable for the life of the node.  Only a driver reprobe
+ * invalidates them, and that already goes through ResolveNode, which drops
+ * them.
+ */
+bool SensorIIO::OpenFds(IioSensor &s)
+{
+    CloseFds(s);
+
+    for (const std::string &a : s.attrs) {
+        int fd = open((s.path + "/" + a).c_str(), O_RDONLY | O_CLOEXEC);
+
+        if (fd < 0) {
+            CloseFds(s);
+            return false;
+        }
+        s.fds.push_back(fd);
+    }
+    return true;
+}
+
+void SensorIIO::CloseFds(IioSensor &s)
+{
+    for (int fd : s.fds)
+        close(fd);
+    s.fds.clear();
+}
+
+/*
+ * Read in_<type>_sampling_frequency: the rate at which the hub PUSHES reports.
+ *
+ * Recorded for the log and for a future buffered-mode reader.  It must NOT be
+ * used to slow a polled read down, and an earlier version of this file did
+ * exactly that -- it is a measured mistake, not a theoretical one.
+ *
+ * The attribute reads 10 Hz for accel_3d, but polling in_accel_*_raw at 40 Hz
+ * with the machine demonstrably still (median step 2-3 LSB, total range under
+ * 20 LSB) returns a *fresh* sample 97.9% of the time, and at 20 Hz 100% of the
+ * time.  A _raw read issues an explicit HID GET_REPORT and the hub answers with
+ * a freshly converted sample; it is not serving a 10 Hz pipeline.  The 10 Hz
+ * figure governs the unsolicited-report path instead, which is exactly what
+ * buffered mode on magn_3d delivered: 10.3 Hz, matching its attribute.
+ *
+ * Treating it as a poll floor therefore did not save free work, it under-
+ * sampled the sensor -- and worse, feeding it into the advertised minDelay told
+ * Android 10 Hz was the ceiling when the framework had been asking for 66.67 ms
+ * (SENSOR_DELAY_UI) and the hardware can serve it.
+ *
+ * The attribute name has to be derived from this sensor's own data attribute
+ * rather than globbed for, because magn_3d carries two of them: it exposes a
+ * heading field as well, so in_magn_sampling_frequency and
+ * in_rot_sampling_frequency sit side by side and only the first is ours.
+ */
+void SensorIIO::ReadHubRate(IioSensor &s)
+{
+    s.hub_interval_ns = 0;
+
+    if (s.attrs.empty())
+        return;
+
+    /* "in_accel_x_raw" -> "in_accel";  "in_rot_quaternion_raw" -> "in_rot" */
+    const std::string &a = s.attrs[0];
+    size_t u = a.find('_');
+    if (u != std::string::npos)
+        u = a.find('_', u + 1);
+    if (u == std::string::npos)
+        return;
+
+    double hz = 0;
+    if (read_iio_attr(s.path, a.substr(0, u) + "_sampling_frequency", &hz,
+                      1) < 1)
+        return;
+
+    if (hz <= 0.0 || hz > 1000.0) {
+        GWARN("%s: implausible sampling_frequency %g Hz, ignoring",
+              SensorIdToName(s.id), hz);
+        return;
+    }
+
+    s.hub_interval_ns = (int64_t)(1e9 / hz);
+    GINFO("%-16s hub pushes at %g Hz (%ld ms); polled reads are on demand and "
+          "not bound by it", SensorIdToName(s.id), hz,
+          (long)(s.hub_interval_ns / 1000000));
+}
+
+/*
+ * Decide how often to poll one sensor.
+ *
+ * Two lower bounds on the period, slowest wins:
+ *
+ *   - the configured ceiling (poll_hz), which is what minDelay promises and is
+ *     bounded by what a read actually costs: 1.15 ms per attribute, so 3.5 ms
+ *     for a three-axis sample, which 20 Hz accommodates comfortably;
+ *   - whatever Android asked for through batch().  A client is entitled to the
+ *     rate it requested rather than to be bettered -- SENSOR_DELAY_NORMAL is
+ *     200 ms and SENSOR_DELAY_UI 66.67 ms, both against the old flat 50 ms.
+ *
+ * The hub's push interval is deliberately NOT a term here.  See ReadHubRate:
+ * polled reads are answered on demand and return fresh samples well past the
+ * advertised rate, so clamping to it under-samples the sensor instead of
+ * saving free work.
+ *
+ * Both remaining terms can only slow a sensor down from the configured ceiling,
+ * so this cannot make the daemon do more work than the old fixed rate did.
+ */
+void SensorIIO::RecomputeInterval(IioSensor &s)
+{
+    int64_t ns = (int64_t)mPollIntervalMs * 1000000LL;
+
+    if (s.req_interval_ns > ns)
+        ns = s.req_interval_ns;
+    if (ns > MAX_INTERVAL_NS)
+        ns = MAX_INTERVAL_NS;
+
+    s.interval_ns = ns;
+}
+
+bool SensorIIO::AnyEnabled() const
+{
+    for (int i = 0; i < MAX_NUM_SENSORS; i++)
+        if (mSensors[i].enabled)
+            return true;
+    return false;
+}
+
+int SensorIIO::TickIntervalMs() const
+{
+    int64_t ns = 0;
+
+    for (int i = 0; i < MAX_NUM_SENSORS; i++) {
+        if (!mSensors[i].enabled)
+            continue;
+        if (ns == 0 || mSensors[i].interval_ns < ns)
+            ns = mSensors[i].interval_ns;
+    }
+    if (ns == 0)
+        ns = (int64_t)mPollIntervalMs * 1000000LL;
+
+    int ms = (int)(ns / 1000000);
+    return ms > 0 ? ms : 1;
+}
+
+/*
+ * Android states the rate it wants through ISensors::batch().  The value used
+ * to be read off the parcel and discarded (service.cpp read it into a throwaway
+ * and returned OK), so a client asking for SENSOR_DELAY_NORMAL still got
+ * polled at 50 ms -- four HID round trips for every sample it asked for.
+ *
+ * maxReportLatencyNs is still ignored, and honestly so: the sensor list
+ * advertises fifoMaxEventCount = 0, so this HAL has promised not to batch.
+ */
+void SensorIIO::SetSamplingPeriod(int id, int64_t period_ns)
+{
+    if (!ID_CHECK(id))
+        return;
+
+    IioSensor &s = mSensors[id];
+
+    /* A client may pass 0 to mean "whatever you have". */
+    s.req_interval_ns = period_ns > 0 ? period_ns : 0;
+    RecomputeInterval(s);
+    GINFO("batch %s: asked %ld ms, polling %ld ms", SensorIdToName(id),
+          (long)(period_ns / 1000000), (long)(s.interval_ns / 1000000));
+}
+
+/*
+ * The fastest rate we will serve, which is the configured ceiling and nothing
+ * else.  It is per sensor only so that a future push-mode reader can answer
+ * differently for a sensor it drives from the buffer; today every sensor gives
+ * the same answer.
+ *
+ * Deriving this from in_<type>_sampling_frequency was wrong and is the reason
+ * Android stopped asking for the 66.67 ms it actually wanted -- it believed the
+ * 10 Hz it was told.  ReadHubRate explains the measurement.
+ */
+int32_t SensorIIO::MinDelayUs(int id) const
+{
+    (void)id;
+    return (int32_t)mPollIntervalMs * 1000;
+}
+
 /* How long to wait before re-scanning /sys for a sensor whose read failed. */
 #define RESOLVE_RETRY_NS (2LL * 1000000000LL)
 
@@ -363,6 +604,11 @@ bool SensorIIO::ResolveNode(IioSensor &s)
 
         s.path = path;
         found = true;
+        /* Any held fds point into the node we just stopped believing in, and
+         * the new one may publish at a different rate. */
+        CloseFds(s);
+        ReadHubRate(s);
+        RecomputeInterval(s);
         GINFO("%-16s -> %s (%s)", SensorIdToName(s.id), e->d_name, name);
     }
     closedir(d);
@@ -395,11 +641,24 @@ int SensorIIO::EnableSensorEvents(int id)
 
     IioSensor &s = mSensors[id];
     if (!s.enabled) {
-        s.enabled = true;
+        int64_t now = now_boottime_ns();
+
         s.valid = false;
-        s.warmup_until_ns = now_boottime_ns() +
-                            (int64_t)s.warmup_ms * 1000000LL;
-        GINFO("enable %s (warm-up %d ms)", SensorIdToName(id), s.warmup_ms);
+        s.repeated = false;
+        s.warmup_until_ns = now + (int64_t)s.warmup_ms * 1000000LL;
+        /* Due on the next tick, then on this sensor's own cadence. */
+        s.next_due_ns = now;
+        s.last_event_ns = 0;
+        RecomputeInterval(s);
+
+        /* Last, and deliberately so.  This runs on an hwbinder thread while
+         * PollOnce runs on the main one, and `enabled` is what PollOnce gates
+         * on -- so every field it will read has to be in place before the gate
+         * opens, or the first poll could use the previous activation's
+         * deadline. */
+        s.enabled = true;
+        GINFO("enable %s (warm-up %d ms, poll %ld ms)", SensorIdToName(id),
+              s.warmup_ms, (long)(s.interval_ns / 1000000));
     }
     return 0;
 }
@@ -412,6 +671,15 @@ int SensorIIO::DisableSensorEvents(int id)
     if (mSensors[id].enabled) {
         mSensors[id].enabled = false;
         mSensors[id].valid = false;
+        /* The held fds are deliberately NOT closed here.  This runs on an
+         * hwbinder thread and PollOnce may be inside a pread on those very
+         * fds, so closing them from here races -- and the dangerous outcome is
+         * not EBADF but a recycled fd number, where the read would quietly
+         * succeed against some other file.  They cost three descriptors and
+         * nothing else, and every path that genuinely has to drop them
+         * (ReadSensor on a failed read, ResolveNode on a new path) runs on the
+         * main thread.  A reprobe while this sensor is off is therefore caught
+         * on re-enable, by the first read failing. */
         GINFO("disable %s", SensorIdToName(id));
     }
     return 0;
@@ -423,27 +691,52 @@ int SensorIIO::DisableSensorEvents(int id)
  */
 bool SensorIIO::ReadSensorAt(IioSensor &s)
 {
-    double raw[4];
+    double raw[4], scaled[4];
     int n = 0;
+
+    if (s.fds.empty() && !OpenFds(s))
+        return false;
 
     if (s.attrs.size() == 1) {
         /* Quaternion: one attribute holding four values. */
-        n = read_iio_attr(s.path, s.attrs[0], raw, 4);
+        n = read_iio_fd(s.fds[0], raw, 4);
         if (n < 4)
             return false;
     } else {
         for (size_t i = 0; i < s.attrs.size() && n < 4; i++) {
             double v[4];
-            if (read_iio_attr(s.path, s.attrs[i], v, 1) < 1)
+            if (read_iio_fd(s.fds[i], v, 1) < 1)
                 return false;
             raw[n++] = v[0];
         }
     }
 
+    /*
+     * Spot a report the hub has not refreshed.
+     *
+     * accel_3d and magn_3d publish at 10 Hz and apply their own hysteresis
+     * (in_accel_hysteresis = 0.02, in_magn_hysteresis = 50), so at any
+     * sensible poll rate a good share of reads return the previous sample byte
+     * for byte.  The timestamp is what tells Sensors.cpp whether a sample is
+     * news, so only move it when the values moved -- which is also what makes
+     * that file's `ts != last_TimeStamp` guard work.  It never could before,
+     * because this function stamped every read with the current time, so the
+     * guard compared two values that were different by construction.
+     */
+    bool changed = (n != s.n) || !s.valid;
+
+    for (int i = 0; i < n; i++) {
+        scaled[i] = raw[i] * s.scale;
+        if (scaled[i] != s.v[i])
+            changed = true;
+    }
+
     for (int i = 0; i < n; i++)
-        s.v[i] = raw[i] * s.scale;
+        s.v[i] = scaled[i];
     s.n = n;
-    s.ts = (uint64_t)now_boottime_ns();
+    s.repeated = !changed;
+    if (changed)
+        s.ts = (uint64_t)now_boottime_ns();
     return true;
 }
 
@@ -472,6 +765,12 @@ bool SensorIIO::ReadSensor(IioSensor &s)
     if (ReadSensorAt(s))
         return true;
 
+    /* The fds may be the stale half of the problem -- a reprobe that hands
+     * back the same index leaves the path correct and every fd dead.  Dropping
+     * them lets the next attempt reopen by path without waiting out the
+     * re-resolve rate limit below. */
+    CloseFds(s);
+
     int64_t now = now_boottime_ns();
     if (now - s.last_resolve_ns < RESOLVE_RETRY_NS)
         return false;
@@ -486,20 +785,62 @@ bool SensorIIO::ReadSensor(IioSensor &s)
     return ReadSensorAt(s);
 }
 
+/*
+ * One pass over the enabled sensors.  Driven by a glib timeout in Sensors.cpp
+ * running at TickIntervalMs() -- the shortest period any enabled sensor wants
+ * -- so most ticks read only a subset.  Each sensor has its own deadline, set
+ * by RecomputeInterval from the hub's rate and Android's batch() request.
+ */
 void SensorIIO::PollOnce()
 {
     int64_t now = now_boottime_ns();
+    uint32_t read_this_tick = 0;
 
     for (int i = 0; i < MAX_NUM_SENSORS; i++) {
         IioSensor &s = mSensors[i];
 
         if (!s.enabled || !s.available)
             continue;
+        if (now + DUE_SLACK_NS < s.next_due_ns)
+            continue;
+
+        /* Advance from the deadline, not from now, so the cadence does not
+         * drift later with every late tick -- but resynchronise if we have
+         * fallen a whole period behind, so a stall does not turn into a burst
+         * of catch-up polls. */
+        s.next_due_ns += s.interval_ns;
+        if (s.next_due_ns <= now)
+            s.next_due_ns = now + s.interval_ns;
+
+        /*
+         * ORIENTATION and ROTATION_VECTOR are the same dev_rotation
+         * quaternion, read through the same attribute of the same node -- see
+         * the sensor table in the constructor.  Reading it a second time costs
+         * another 1.15 ms HID round trip for a report already in hand, so
+         * share it.  Matching on path, attributes and scale rather than on the
+         * two ids keeps this honest if the table ever changes.
+         */
+        bool got = false;
+        for (int j = 0; j < i && !got; j++) {
+            IioSensor &o = mSensors[j];
+
+            if (!(read_this_tick & (1U << j)) || o.path != s.path ||
+                o.attrs != s.attrs || o.scale != s.scale)
+                continue;
+
+            for (int k = 0; k < o.n; k++)
+                s.v[k] = o.v[k];
+            s.n = o.n;
+            s.ts = o.ts;
+            s.repeated = o.repeated;
+            got = true;
+        }
 
         /* Read even during warm-up: the read is what keeps the sensor
          * powered, which is what lets it settle. */
-        if (!ReadSensor(s))
+        if (!got && !ReadSensor(s))
             continue;
+        read_this_tick |= (1U << i);
 
         if (now < s.warmup_until_ns) {
             s.valid = false;
@@ -510,6 +851,24 @@ void SensorIIO::PollOnce()
             s.valid = true;
             GDEBUG("%s warmed up", SensorIdToName(i));
         }
+
+        /*
+         * A sample the hub never refreshed is not news, and forwarding it
+         * costs a binder round trip into Android to deliver a value it already
+         * holds.  Drop it -- but let one through every HEARTBEAT_NS, because
+         * this sensor is advertised SENSOR_FLAG_CONTINUOUS_MODE and must not
+         * fall silent just because the machine is sitting still.
+         *
+         * `valid` is set above this check on purpose: a repeat is still a
+         * successful read, so --selftest and the Get*Event accessors keep
+         * seeing a live sample.
+         */
+        if (s.repeated) {
+            if (now - s.last_event_ns < HEARTBEAT_NS)
+                continue;
+            s.ts = (uint64_t)now;
+        }
+        s.last_event_ns = now;
 
         if (mCb)
             mCb(mUserdata, i);
