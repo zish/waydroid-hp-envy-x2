@@ -385,10 +385,24 @@ A `?` in any field means the lookup failed, usually for want of root. It does no
 `ver=?` deliberately does not read `ver=unpackaged` — the first version of the sampler conflated
 them, which would have been a lie about the host's state.
 
-What the figures say so far, which is not yet much: over 50 minutes on 1.0.3, RSS flat at
-**4252 KB**, descriptors flat at **25**, threads at **5**, and the interval CPU at **0.83–0.90% of
-a core** against a lifetime average converging on the same. No growth in anything. That is still
-minutes, not days — but it now accumulates without anyone remembering to start it.
+It then collected unattended, which was the whole point. **39 samples over 6.9 hours** on 1.0.3,
+one process throughout (pid 1833):
+
+| | result |
+|---|---|
+| descriptors | **25 in all 39 samples.** No leak |
+| threads | **5 in all 39 samples.** No leak |
+| RSS | 4252 KB → 4228 KB. First ten mean 4252, last ten mean **4228** — it went *down* 24 KB |
+| interval CPU, n=38 | min 0.758%, p25 0.909%, **median 0.909%**, p75 0.952%, max 1.111%, mean 0.918% |
+
+So the headline figure holds: a median of **0.909% of a core** over seven hours, against the 0.92%
+measured when the work was done, with a worst observed ten-minute window of 1.111%. The lifetime
+average converged to 0.915%, which is the same number from the other direction.
+
+The descriptor column is the one that was worth waiting for. Those 25 include the held IIO
+descriptors that `DisableSensorEvents` deliberately never closes, and `WindowOrientationListener`
+and `FaceDownDetector` subscribe and unsubscribe across the session — so if that design leaked, it
+had seven hours and every rotation of the machine in which to show it. It did not move once.
 
 ## Who actually keeps this awake
 
@@ -538,9 +552,9 @@ rpm -qf: waydroid-ext-sensord-1.0.2-1.x86_64
 
 ## Not done, and what is unproven
 
-- **Long-running stability is instrumented but not yet concluded.** The sampler now survives a
-  reboot (above), and the first hour shows no growth in RSS, descriptors or threads. The question
-  it exists to answer needs days of it.
+- **Stability is measured over hours, not days.** Seven hours and 39 samples show no movement in
+  descriptors, threads or RSS, and a median 0.909% of a core (above). The sampler keeps running
+  across reboots now, so the days accumulate on their own; what is unproven is only the long tail.
 - **`magn_3d`'s push rate**, as above: 10.3 Hz once, 0.17 Hz on every re-run. Unexplained, and
   deliberately not chased through a kernel function that oopses.
 - **`in_*_sampling_frequency` writes are untested.** They go through the same conversion that
