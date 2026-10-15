@@ -184,38 +184,137 @@ one particular poll rate.
 Three consecutive runs now pass, and the magnetometer is compared at all — earlier runs skipped it
 with "no recent events", so this is more coverage than before, not less.
 
-## Push mode works, and hysteresis is the gate
+## Push mode works on every node that matters, and is still not worth adopting
 
 Every node has `scan_elements/`, `buffer/enable`, a chardev and its own pre-assigned trigger, so
-the kernel can push complete scans instead of the daemon pulling each axis. Probed on `magn_3d`
-because nothing was subscribed to it:
+the kernel can push complete scans instead of the daemon pulling each axis.
+`bin/iio-push-probe.py` measures that per node, restores everything it touches, and cross-checks
+each buffered sample against an `in_*_raw` read of the same node:
 
-| `in_magn_hysteresis` | result |
-|---|---|
-| 50 µT (the default) | **2 scans in 6 s** — 0.3 Hz, effectively dead |
-| 0 | **62 scans in 6.00 s = 10.3 Hz**, 60 wakeups, 0.096 ms CPU per sample |
+| node | pushes as shipped | needs a write? | cross-check |
+|---|---|---|---|
+| `accel_3d` | **44.66 Hz** | no | `_raw` agrees exactly; norm 10.096 m/s² |
+| `dev_rotation` | **30.99 Hz** | no | `_raw` agrees exactly; quaternion norm 1.000 |
+| `gyro_3d` | **20.16 Hz** | no | norm 0.154 rad/s, machine at rest |
+| `incli_3d` | 0.33 Hz | zero `in_incli_hysteresis` → **9.66 Hz** | `_raw` agrees exactly |
+| `magn_3d` | 0.00 Hz | contested — see below | `_raw` agrees exactly |
 
-The hub only sends an unsolicited report when the value moves past its change-sensitivity
-threshold, and 50 µT is about the whole Earth field. That is why push looked broken while pull
-worked.
+The three nodes Android actually reads — `accel_3d` for the accelerometer, `dev_rotation` for
+orientation and the rotation vector, `gyro_3d` for the gyroscope — all push **faster than the rate
+Android asks for**, with no sysfs write of any kind. Hysteresis gates only the two nodes nothing
+subscribes to, so the caveat in the previous revision of this section was the wrong way round:
+push mode is not blocked on hysteresis for anything that matters.
 
-The attraction is one report per sample instead of three `GET_REPORT` round trips, no timer,
-hardware pacing, and a real hardware timestamp — `accel_3d` has `in_timestamp_en`, and a probe
-confirmed it carries `CLOCK_REALTIME` nanoseconds, so `current_timestamp_clock` would need setting
-to `boottime` to match what Android wants. **And the hysteresis caveat barely applies**: `gyro_3d`
-and `dev_rotation` are already **0**, `accel_3d` is 0.02, and only `magn_3d` (50) and `incli_3d`
-(2) are gated.
+Two nodes do not push at their advertised rate. `accel_3d` says
+`in_accel_sampling_frequency = 10` and pushes at 44.66 Hz, with its own hardware timestamp
+independently reporting 44.78 Hz. `incli_3d`, `gyro_3d` and `dev_rotation` all match their
+advertised figure to within 2%.
 
-Honest accounting: in push mode the i2c work moves into the driver's context rather than vanishing,
-so process CPU improves more than system-wide CPU does. The genuine system-wide win is the 3-to-1
-reduction in i2c transactions per sample.
+**And it is still not worth adopting**, on these numbers:
 
-**Not implemented, and one probe is still unreliable.** A buffered read of `accel_3d` returned
-plausible scan rates but physically impossible accelerations (`-571350 m/s²`), because the reader
-discarded the remainder when a `read()` returned a partial scan and then stayed misaligned. The
-timestamps decoded correctly, so the layout arithmetic is right; the buffering is not. No rate
-figure from that probe should be trusted, and specifically it must not be read as evidence about
-`accel_3d`'s push rate.
+- The probe spends **0.150 ms of CPU per `accel_3d` scan**, and the hub pushes 44.66 of them a
+  second: 6.7 ms/s, or **0.67% of a core, for the accelerometer alone**. The whole polled daemon
+  costs 0.92% of a core today for its entire subscription set.
+- That 0.150 ms is Python's cost per scan, not C's, so a real implementation would be cheaper by
+  an unmeasured margin. But the most it can save is the 0.92% that is there in total, and the
+  work is a rewrite of the read path on a daily-driver machine.
+- The push rate is not ours to choose. 44.66 Hz is three times the 15 Hz Android asked for, and
+  the only lever is `in_accel_sampling_frequency` — which already says 10 and is plainly not
+  governing, and which is written through the same kernel function that oopses (below).
+
+So: proven, measured, and deliberately not adopted. `bin/iio-push-probe.py` is committed so the
+decision can be re-measured rather than re-argued.
+
+### The `-571350 m/s²` was a misparse, not a partial read
+
+The previous revision blamed a partial-read bug. That was wrong, and the channel type says so:
+
+    accel_3d      in_accel_x_type        = le:s16/32>>0
+    magn_3d       in_magn_x_type         = le:s32/32>>0
+    dev_rotation  in_rot_quaternion_type = le:s32/32X4>>0
+
+`s16/32` is **16 real bits in a 32-bit container**, and the old probe unpacked all 32. The
+impossible reading decodes cleanly once that is fixed: raw `0xFC870013`, whose low 16 bits are 19
+— a real 0.19 m/s² sample — with `0xFC87` sitting above it, which is not sign extension, because
+the value was negative. `magn_3d` is `s32/32`, which is exactly why its numbers looked right while
+`accel_3d`'s did not. That asymmetry was the evidence, and I had read it as a buffering bug.
+
+The IIO rule is: take `storage_bits` from the buffer, shift right by the shift, mask to
+`real_bits`, and only then sign-extend. `X4` is a repeat count — one channel, four values — and
+`int("32X4")` is why the old probe crashed outright on `dev_rotation`.
+
+Partial reads are real, but only on `dev_rotation`, and only as a symptom of the next item.
+
+### `dev_rotation` delivers 32-byte scans where the alignment rules predict 24
+
+It declares `in_timestamp` as a channel **and** has the IIO core append its own scan timestamp, so
+every scan carries the timestamp twice: quaternion at 0..15, timestamp at 16..23, the same
+timestamp again at 24..31. Confirmed from a hex dump, and by the gcd of the `read()` sizes being
+32 while the computed layout said 24.
+
+Slicing 32-byte scans as 24 is what produced "41.99 Hz" — exactly 4/3 of the real 31.2 Hz — and a
+quaternion norm of 170 instead of 1. This kernel (7.2.8-200.fc44) exposes no
+`buffer/bytes_per_datum`, so the probe now **measures** the scan size: every `read()` returns a
+whole number of scans, so the size divides their gcd, and the smallest divisor that still holds
+every channel pins it down.
+
+### Probe one node per run
+
+`dev_rotation` measured 30.99 Hz on its own and **0.00 Hz** when probed immediately after
+`accel_3d` in the same run — one scan during calibration, then nothing for six seconds. Tearing
+down one node's buffer appears to stop the hub reporting on another for a while. The mechanism was
+not established. A 2 s settle delay makes it less likely but is not a fix, so the probe warns on a
+multi-node run and only the first node's figure should be trusted.
+
+I first read that 0.00 Hz as the kernel oops below having wedged the node. Re-probing it alone
+returned 30.99 Hz and a quaternion norm of exactly 1.000, so that was wrong too.
+
+### `magn_3d`'s push rate is unresolved
+
+An earlier probe measured 10.3 Hz with `in_magn_hysteresis` zeroed. Re-run today, the same
+zeroing gave 0.17 Hz, and as shipped it gives 0.00–0.17 Hz whether or not the tilt-compensated
+heading channel is in the scan. The discrepancy is unexplained. It was not pursued, because
+settling it needs more writes through the function that oopses, and because `magn_3d` is only
+subscribed in 200 ms bursts by a bot-detection SDK. Push mode on the compass should be treated as
+unproven in both directions.
+
+## Writing a hysteresis attribute can oops the kernel
+
+Five times, working the above out:
+
+    Oops: divide error: 0000 [#1] SMP PTI
+    CPU: 0 UID: 0 PID: 19455 Comm: python3 Tainted: G I  7.2.8-200.fc44.x86_64
+    RIP: 0010:convert_to_vtf_format+0x78/0xa0 [hid_sensor_iio_common]
+    Call Trace:
+      hid_sensor_write_raw_hyst_value+0x4b/0xe0 [hid_sensor_iio_common]
+      iio_write_channel_info+0x148/0x200 [industrialio]
+      kernfs_fop_write_iter / vfs_write / ksys_write
+
+The faulting instruction is `41 f7 fe`, `idiv r14d`, with `R14 = 0`. `convert_to_vtf_format`
+divides by `pow_10()` of the channel's unit exponent, and `pow_10()` is a loop multiplying a
+32-bit `int` by ten — so for a large enough exponent it overflows to exactly 0 and the divide
+faults. It is reachable from a root sysfs write, it kills the writing task, and the machine
+otherwise survives: all five nodes still read correctly afterwards, the daemon never noticed, and
+`sensors-test.sh` still passes.
+
+On bigtab01 it is `dev_rotation`'s `in_rot_hysteresis` that does it, **including writing back the
+value it already had** — which is what my restore block did, four runs in a row, each one dying
+mid-restore and taking its own log with it. Two of those deaths I first wrote off as ssh dropping
+on the hotspot link. Writes to `in_magn_hysteresis`, `in_anglvel_hysteresis` and
+`in_incli_hysteresis` all completed normally, so it is per-channel, not hub-wide.
+
+`bin/iio-push-probe.py` now:
+
+- treats zeroing hysteresis as opt-in (`--zero-hysteresis`), so a default run writes no
+  sensitivity value at all;
+- restores only the attributes it actually changed, never one it merely read;
+- keeps `("dev_rotation", "in_rot_hysteresis")` on a refusal list that no flag overrides.
+
+`hid_sensor_write_samp_freq_value` goes through the same conversion with the *poll* interval's
+unit exponent rather than the sensitivity's, so `in_*_sampling_frequency` writes are suspect by
+the same argument. Untested on purpose: this is the owner's daily driver and five oopses were
+enough. That also removes the only lever that could have throttled push mode's rate, which is part
+of why it is not being adopted.
 
 ## Who actually keeps this awake
 
@@ -353,7 +452,11 @@ rpm -qf: waydroid-ext-sensord-1.0.2-1.x86_64
 | **`in_<type>_sampling_frequency` is the rate past which a polled read returns stale bytes** | **wrong, and it shipped in 1.0.2 before being measured. It is the push rate; polled reads are answered on demand and are fresh at 20 Hz and 97.9% fresh at 40 Hz** |
 | Android was asking for the rate it got | wrong — it asked for 66.67 ms and `batch()` discarded the request |
 | The duplicate-timestamp guard was suppressing repeats | wrong — the timestamp was taken at read time, so it never matched. Fixing it mattered less than expected: repeats are 0–2% of reads |
-| IIO buffered mode is unsupported on this hub | wrong — it works at the full 10 Hz; the change-sensitivity threshold was hiding it |
+| IIO buffered mode is unsupported on this hub | wrong — it works on all five nodes, and the three Android reads push faster than it asks, with no sysfs write at all |
+| The `accel_3d` buffered probe was broken by partial reads | wrong — it read `le:s16/32>>0` as a full 32 bits. `-571350 m/s²` was raw `0xFC870013`, a real 0.19 m/s² sample with non-sign-extension junk above it |
+| Hysteresis is the gate on push mode generally | wrong — it gates only `incli_3d` and `magn_3d`, the two nodes nothing subscribes to |
+| A kernel oops had wedged `dev_rotation`'s push path | wrong — probed on its own it still pushes 30.99 Hz with a quaternion norm of 1.000. Probing it second in a run is what returns nothing |
+| Two probe runs died because ssh dropped on the hotspot | wrong — both were killed by a kernel divide-by-zero in `convert_to_vtf_format`, taking their buffered output with them |
 | The sysfs reads are most of the daemon's CPU | wrong — they are roughly a third of it; glib dispatch and binder round trips are the rest |
 | Something the user runs keeps the accelerometer subscribed | wrong — it is Android itself: `FaceDownDetector` and `WindowOrientationListener`, both uid 1000 |
 | A third-party ad SDK was polling sensors in the background | wrong — a ~5 s burst at app start, then released; an integrity check. Reading one *Active sensors* snapshot instead of the `+`/`-` log is what made it look continuous |
@@ -361,16 +464,16 @@ rpm -qf: waydroid-ext-sensord-1.0.2-1.x86_64
 
 ## Not done, and what is unproven
 
-- **The idle-timer path is not observed live.** Implemented and exercised by `--selftest`, but no
-  zero-subscriber window occurs while a session is up, because two framework listeners hold the
-  accelerometer. Code-verified only.
-- **Buffered mode is not implemented**, and the `accel_3d` probe needs its partial-read bug fixed
-  before its numbers mean anything. `magn_3d` is the only sensor where push mode has been shown to
-  work at the advertised rate.
-- **`dev_rotation` is polled at 50 ms** against a hub that pushes at 31.2 Hz. That is now simply
-  the `poll_hz` ceiling rather than a deliberate clamp, and Android can ask for faster via
-  `batch()` up to that ceiling.
+- **The idle-timer path is not observed live.** No zero-subscriber window occurs while a session
+  is up, because two framework listeners hold the accelerometer. Code-verified only.
 - **Long-running stability is still unmeasured.** `~/sensord-stability.sh` on the host samples CPU
   and RSS every 10 minutes, but it was started with `setsid nohup` and does **not** survive a
-  reboot, so it has to be relaunched to collect anything. The one sample taken before the reboot
-  read RSS 4420 KB, matching docs/14's 4.4 MB — no growth, but over minutes, not days.
+  reboot, so it has to be relaunched to collect anything.
+- **`magn_3d`'s push rate**, as above: 10.3 Hz once, 0.17 Hz on every re-run. Unexplained, and
+  deliberately not chased through a kernel function that oopses.
+- **`in_*_sampling_frequency` writes are untested.** They go through the same conversion that
+  oopses on a hysteresis write, with the poll interval's unit exponent instead of the
+  sensitivity's. Suspect by argument, not by measurement, and not worth a sixth oops to settle.
+- **`dev_rotation` is polled at 50 ms** against a hub that pushes at 31.0 Hz. That is the
+  `poll_hz` ceiling rather than a deliberate clamp, and Android can ask for faster via `batch()`
+  up to that ceiling.

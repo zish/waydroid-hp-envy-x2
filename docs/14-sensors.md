@@ -177,7 +177,9 @@ magnetometer needed correcting: unit `0x1a` (G) × 10⁻³ → `in_accel_scale =
 
 The `hid-sensor-*` drivers power the sensor up for each `_raw` read and let runtime PM suspend it
 again, so **every read after an idle gap is a cold read**. For the gyroscope that matters enormously.
-Measured on a stationary machine with [`bin/iio-probe.py`](../bin/iio-probe.py):
+Measured on a stationary machine with [`bin/iio-probe.py`](../bin/iio-probe.py), which
+probes the polled path; [`bin/iio-push-probe.py`](../bin/iio-push-probe.py) does the same for
+IIO buffered (push) mode, and carries the warning about writing hysteresis attributes:
 
 | t after resume | \|ω\| | |
 |---|---|---|

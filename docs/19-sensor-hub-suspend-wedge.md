@@ -44,6 +44,12 @@ Nine suspend cycles happened that boot. Only the rapid pair broke it:
 | 20:22 (deep) | survived |
 | **21:23:05 + 21:23:09 (two s2idle, 4 s apart)** | **wedged** |
 
+Suspend is not the only way to get `-121`. Writing a change-sensitivity attribute can oops the
+kernel inside `convert_to_vtf_format`, killing the writing task mid-HID-transfer, and the hub logs
+`-121` straight afterwards — 13 of them across five oopses. See
+[docs/67](67-sensor-poll-cost.md#writing-a-hysteresis-attribute-can-oops-the-kernel). The sensors
+kept working throughout, so that pattern is not a wedge either.
+
 So `-121` on resume is common and usually self-healing. Do **not** reprobe reflexively on every
 wake; the recovery hook below checks for staleness first. Whether every rapid double-suspend
 wedges it is not established — it was observed once.
