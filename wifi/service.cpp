@@ -221,6 +221,104 @@ app_sm_presence_handler(GBinderServiceManager* sm, void* user_data)
     }
 }
 
+/*
+ * Wait for waydroid to have a session, without touching binder.
+ *
+ * gbinder_servicemanager_wait() polls handle 0 at 1 Hz, and every probe that
+ * lands while nothing owns handle 0 costs two kernel log lines -- "cannot find
+ * target node" and the failed PING behind it.  That is invisible on the boot
+ * this daemon was written for, where Android arrives seconds later.  It is not
+ * invisible on a tablet left sitting at the greeter: one 53-hour logged-out
+ * stretch on bigtab01 produced 190,501 of them from this one call, binder's
+ * own rate limiter began dropping messages, and across all boots the spam
+ * reached 29% of the journal.  docs/69-wifid-binder-ping-spam.md measures it.
+ *
+ * So gate the binder probe on something free.  The container manager owns
+ * id.waydro.Container on the system bus and answers GetSession with an empty
+ * a{ss} until a session exists, and that call costs no binder traffic at all.
+ *
+ * THIS MUST NOT DELAY REGISTRATION, and it does not.  The gate opens when
+ * `waydroid session start` calls Start() on that same interface, which happens
+ * before the container's init runs and many seconds before servicemanager
+ * appears -- so the 1 Hz poll below resolves into slack that already existed.
+ * Registering late is the one failure this daemon cannot have: Android caches
+ * a failure to reach wifinl80211, which is the 38-minute network deadlock in
+ * docs/16-waydroid-network.md.  That is also why the unit still refuses to be
+ * ordered after waydroid-container.service -- this gate replaces the cost of
+ * waiting, not the waiting itself.
+ *
+ * Called BEFORE gbinder_servicemanager_new2() rather than just before the
+ * wait, so that no servicemanager object exists to poll while we sit here.
+ * The cost is that "cannot open <device>" is now reported when a session
+ * arrives instead of at startup; the unit's Requires=dev-binderfs.mount is
+ * what actually keeps that case from happening.
+ */
+#define SESSION_GATE_GIVEUP_SEC (60)
+
+static gboolean
+app_session_present(GDBusConnection* bus, gboolean* answered)
+{
+    GError* err = nullptr;
+    GVariant* res = g_dbus_connection_call_sync(bus, "id.waydro.Container",
+        "/ContainerManager", "id.waydro.ContainerManager", "GetSession",
+        nullptr, G_VARIANT_TYPE("(a{ss})"), G_DBUS_CALL_FLAGS_NONE, 5000,
+        nullptr, &err);
+
+    if (!res) {
+        GDEBUG("GetSession: %s", err ? err->message : "?");
+        g_clear_error(&err);
+        return FALSE;
+    }
+
+    GVariant* dict = g_variant_get_child_value(res, 0);
+    gboolean present = g_variant_n_children(dict) > 0;
+
+    *answered = TRUE;
+    g_variant_unref(dict);
+    g_variant_unref(res);
+    return present;
+}
+
+static void
+app_wait_for_session(void)
+{
+    GError* err = nullptr;
+    GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, nullptr, &err);
+    gboolean answered = FALSE;
+
+    if (!bus) {
+        GWARN("no system bus (%s); probing binder unguarded",
+              err ? err->message : "?");
+        g_clear_error(&err);
+        return;
+    }
+
+    /*
+     * Giving up is deliberate, and only ever on the "never answered at all"
+     * path: a waydroid that does not offer GetSession must still get a working
+     * Wi-Fi daemon, and the unguarded probe is exactly the old behaviour to
+     * fall back to.  Once it HAS answered, a later error is the container
+     * manager going away, and servicemanager cannot appear without it -- so
+     * keep waiting rather than falling back to pinging an empty binder.
+     */
+    for (int i = 0; ; i++) {
+        if (app_session_present(bus, &answered)) {
+            break;
+        }
+        if (!answered && i >= SESSION_GATE_GIVEUP_SEC) {
+            GWARN("id.waydro.Container has not answered GetSession in %d s; "
+                  "probing binder unguarded", SESSION_GATE_GIVEUP_SEC);
+            break;
+        }
+        if (!i) {
+            GINFO("no waydroid session yet; waiting for one before probing "
+                  "binder");
+        }
+        sleep(1);
+    }
+    g_object_unref(bus);
+}
+
 static void
 app_run(App* app)
 {
@@ -421,6 +519,9 @@ main(int argc, char* argv[])
     }
 
     app_take_lock();
+
+    /* Before new2(), so nothing can poll binder while we wait.  See above. */
+    app_wait_for_session();
 
     memset(&app, 0, sizeof(app));
     app.ret = RET_ERR;
