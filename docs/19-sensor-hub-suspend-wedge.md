@@ -46,7 +46,8 @@ Nine suspend cycles happened that boot. Only the rapid pair broke it:
 
 Suspend is not the only way to get `-121`. Writing a change-sensitivity attribute can oops the
 kernel inside `convert_to_vtf_format`, killing the writing task mid-HID-transfer, and the hub logs
-`-121` straight afterwards — 13 of them across five oopses. See
+`-121` straight afterwards — 13 of them across five oopses. That is an upstream kernel bug, written
+up in [docs/68](68-hid-sensor-hysteresis-oops.md) and found in the course of
 [docs/67](67-sensor-poll-cost.md#writing-a-hysteresis-attribute-can-oops-the-kernel). The sensors
 kept working throughout, so that pattern is not a wedge either.
 

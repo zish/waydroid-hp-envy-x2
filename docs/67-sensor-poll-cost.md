@@ -293,12 +293,23 @@ Five times, working the above out:
       iio_write_channel_info+0x148/0x200 [industrialio]
       kernfs_fop_write_iter / vfs_write / ksys_write
 
-The faulting instruction is `41 f7 fe`, `idiv r14d`, with `R14 = 0`. `convert_to_vtf_format`
-divides by `pow_10()` of the channel's unit exponent, and `pow_10()` is a loop multiplying a
-32-bit `int` by ten — so for a large enough exponent it overflows to exactly 0 and the divide
-faults. It is reachable from a root sysfs write, it kills the writing task, and the machine
-otherwise survives: all five nodes still read correctly afterwards, the daemon never noticed, and
-`sensors-test.sh` still passes.
+The faulting instruction is `41 f7 fe`, `idiv r14d`, with `R14 = 0`. It is an upstream kernel bug,
+still present in mainline, and it is written up on its own in
+[docs/68](68-hid-sensor-hysteresis-oops.md) — including a userspace reproduction that needs no
+hardware, the proposed fix, and what would be needed to report it.
+
+In short: the divisor is `int_pow(10, 6 + exp)` where `exp` is the channel's HID unit exponent, and
+`int_pow` takes its exponent as `unsigned int`. A unit exponent of −7 or −8 — two of the sixteen
+values the HID spec allows — makes `6 + exp` negative, which wraps to ~4.3 billion and drives the
+`u64` accumulator to exactly zero. No malformed descriptor is involved.
+
+> An earlier revision of this section blamed `pow_10()` overflowing a 32-bit `int`. The function is
+> `int_pow()`, it accumulates in `u64`, and the zero comes from the exponent wrapping rather than
+> from the multiplication. See docs/68; the conclusion held, the explanation did not.
+
+It is reachable only from a root sysfs write, it kills the writing task, and the machine otherwise
+survives: all five nodes still read afterwards, the daemon never noticed, and `sensors-test.sh`
+still passed. A host with `panic_on_oops = 1` would panic instead.
 
 On bigtab01 it is `dev_rotation`'s `in_rot_hysteresis` that does it, **including writing back the
 value it already had** — which is what my restore block did, four runs in a row, each one dying

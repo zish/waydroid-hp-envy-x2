@@ -154,6 +154,30 @@ which needs the toggle, even though the scan data behind it is now real.
 Side-quests from the 2026-09-06 sessions, none of them on the AGENTS.md goal list. Each is
 scoped and cheap to resume; none is blocking.
 
+### An upstream kernel divide-by-zero, found 2026-10-15, to report when convenient
+
+Writing any value to an `in_*_hysteresis` attribute whose HID unit exponent is −7 or −8 takes a
+kernel divide error in `convert_to_vtf_format()` — two of the sixteen exponents the HID spec
+allows, no malformed descriptor needed. Still present in mainline at HEAD `2f2f7eeef8b0`
+(2026-10-15); the file's last substantive change is from 2021. On bigtab01 it is `dev_rotation`'s
+`in_rot_hysteresis`, and it was hit five times before the cause was understood.
+
+Root-only, kills the writing task, machine survives (`panic_on_oops = 0` here). Fully written up
+in **[68](68-hid-sensor-hysteresis-oops.md)** with a userspace reproduction that needs no hardware
+([`artifacts/hid-sensor-oops/repro.c`](../artifacts/hid-sensor-oops/repro.c)), the proposed fix,
+and the maintainer addresses.
+
+**Parked at the owner's request, 2026-10-15** — documented now, submitted later. Three things to do
+first, in order:
+
+1. **Search `lore.kernel.org` for a duplicate.** This was attempted and returned nothing parseable,
+   so "unreported" is *not* established. Unfixed is established; that is a different claim.
+2. Build the proposed fix against a kernel tree. It has never been compiled.
+3. Decide whether to send it at all, and under whose `Signed-off-by` — the DCO is a provenance
+   assertion only the author can make. The kernel takes patches by email only; `torvalds/linux` on
+   GitHub has issues disabled and its `/pulls` endpoint 404s, both verified, so `gh` is no help.
+   No SMTP identity is configured on the dev box.
+
 ### Bluetooth as a wake source — **deferred at the owner's request, 2026-09-06**
 
 The wish is to wake the laptop with the HP bluetooth keyboard. The hardware looks capable and
@@ -499,7 +523,9 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | `/var/lib/waydroid/waydroid-wifid.pid` | the wifi daemon's single-instance lock. Recreated on demand, safe to delete |
 | `/var/lib/waydroid/waydroid-wifi-sync.state` | which networks the sync has confirmed present in Android. **Deleting it is safe** — it only ever licenses a deletion, so losing it makes the next run more conservative, not less |
 | `vidiot (Waydroid)` NM profile | the daemon's projection of an Android-driven connection: pinned to `wlp0s20u1`, `never-default`, `route-metric 1000`, UUID derived from the SSID. Recreated on the next connect if deleted. **Not** the host's own `vidiot` profile |
-| **`/usr/local/bin/waydroid-sensord`** | **the sensors fix**, 663 KB, mode `0755`. `/usr/local` is a symlink to `/var/usrlocal`, so no layering and no reboot. **Delete to revert** — waydroid then restores `waydroid.stub_sensors_hal=1` by itself |
+| ~~`/usr/local/bin/waydroid-sensord`~~ | **GONE, and deliberately — it is now a packaged RPM at `/usr/bin/waydroid-sensord`** (`waydroid-ext-sensord`, **1.0.4-1** as of 2026-10-15). The by-hand copy was deleted as part of packaging it, and it must stay deleted: `container_manager.py` searches `PATH=/usr/local/bin:/usr/bin`, so anything left there silently shadows the package. Check provenance with `rpm -qf $(readlink -f /proc/<pid>/exe)`. See [67](67-sensor-poll-cost.md) |
+| **`/usr/local/bin/waydroid-sensord-sample`** + **`/etc/systemd/system/waydroid-sensord-sample.{service,timer}`** | **enabled** via a `timers.target.wants/` symlink; samples the daemon's CPU, RSS, thread and descriptor counts every 10 minutes into `/var/log/waydroid-sensord-stability.log`, with state in `/var/lib/waydroid-sensord-sample.state`. Added 2026-10-15 to answer whether the held IIO descriptors leak — they do not, over 10 hours. `sudo sh artifacts/sensord-stability/install.sh --uninstall` removes all of it and keeps the log. Source in [artifacts/sensord-stability/](../artifacts/sensord-stability/) |
+| `~jmelanso/sensord-stability.sh`, `~jmelanso/sensord-stability.log` | the hand-run `sleep 600` loop the timer above replaced. **Stopped**; nine lines of log left in place, not continued. Safe to delete |
 | `/var/lib/waydroid/waydroid-sensord.pid` | the daemon's single-instance lock. Recreated on demand, safe to delete |
 | `/etc/waydroid-sensors.conf` | **not installed.** Optional; documented sample in [artifacts/sensors/](../artifacts/sensors/) |
 | **`overlay/vendor/bin/hw/android.hardware.health@2.0-service.waydroid`** | **patched health HAL — this is the battery fix**, mode `0755`. Delete to revert |

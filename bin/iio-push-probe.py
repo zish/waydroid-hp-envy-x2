@@ -38,11 +38,15 @@ already had -- kills the writing task with a divide error:
       iio_write_channel_info+0x148/0x200 [industrialio]
       kernfs_fop_write_iter / vfs_write / ksys_write
 
-convert_to_vtf_format divides by pow_10() of the channel's unit exponent, and
-pow_10() is a 32-bit `int` loop multiplying by ten -- so for a large enough
-exponent it overflows to exactly 0 and the idiv faults.  Five oopses were
-taken working this out; the machine survived every one, but the process died
-mid-restore each time, which is its own hazard.  So:
+convert_to_vtf_format divides by int_pow(10, 6 + exp), where exp is the
+channel's HID unit exponent, and int_pow takes its exponent as `unsigned int`.
+A unit exponent of -7 or -8 -- two of the sixteen values the HID spec allows --
+makes 6 + exp negative, which wraps to ~4.3 billion and drives the u64
+accumulator to exactly 0.  No malformed descriptor is involved.  See
+docs/68-hid-sensor-hysteresis-oops.md, which includes a userspace reproduction.
+
+Five oopses were taken working this out; the machine survived every one, but
+the process died mid-restore each time, which is its own hazard.  So:
 
   * zeroing hysteresis is opt-in, behind --zero-hysteresis, not the default;
   * the restore only writes attributes this probe actually changed;
