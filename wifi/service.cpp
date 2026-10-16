@@ -237,10 +237,16 @@ app_sm_presence_handler(GBinderServiceManager* sm, void* user_data)
  * id.waydro.Container on the system bus and answers GetSession with an empty
  * a{ss} until a session exists, and that call costs no binder traffic at all.
  *
- * THIS MUST NOT DELAY REGISTRATION, and it does not.  The gate opens when
- * `waydroid session start` calls Start() on that same interface, which happens
- * before the container's init runs and many seconds before servicemanager
- * appears -- so the 1 Hz poll below resolves into slack that already existed.
+ * THIS MUST NOT DELAY REGISTRATION, and measurement says it does not.  Note
+ * where the gate actually opens: container_manager.do_start() assigns
+ * args.session AFTER helpers.lxc.start(), not before it, so GetSession goes
+ * non-empty once the container has been started rather than ahead of it.
+ * Timed on a real session start (docs/69): the gate opens about 1.4 s before
+ * servicemanager appears, and Android's Wi-Fi framework does not make its
+ * first call for a further 6.7 s.  Worst case -- gate seen a second late, plus
+ * gbinder's own 1 Hz wait -- puts registration ~1.5 s behind where it is now,
+ * against that 6.7 s cushion.
+ *
  * Registering late is the one failure this daemon cannot have: Android caches
  * a failure to reach wifinl80211, which is the 38-minute network deadlock in
  * docs/16-waydroid-network.md.  That is also why the unit still refuses to be

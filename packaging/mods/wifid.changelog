@@ -1,3 +1,14 @@
+* Fri Oct 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.1-2
+- No code change: the daemon's object code is identical to 1.1.1-1. This
+  rebuild corrects a comment in wifi/service.cpp that claimed the gate opens
+  "before the container's init runs". It does not -- container_manager.do_start
+  assigns args.session AFTER helpers.lxc.start() -- and the real margins were
+  measured rather than argued once that was noticed. Reissued rather than
+  rebuilt in place because 1.1.1-1 had already been installed, and two
+  different artifacts must not share one NVR.
+- Ships docs/69-wifid-binder-ping-spam.md, which is where the measurements and
+  the two open questions now live.
+
 * Fri Oct 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.1-1
 - Stop pinging an empty binder while no session exists. The daemon entered
   gbinder_servicemanager_wait(sm, -1) at startup, which polls handle 0 at 1 Hz,
@@ -16,9 +27,11 @@
   daemon never opens the binder device at all.
 - Registration is NOT delayed, which is the one thing this could not afford to
   get wrong -- Android caches a failure to reach wifinl80211 (the 38-minute
-  deadlock in docs/16). The gate opens when `waydroid session start` calls
-  Start() on that same interface, before the container's init runs and many
-  seconds before servicemanager appears.
+  deadlock in docs/16). Measured rather than argued: do_start assigns
+  args.session after helpers.lxc.start(), so the gate opens once the container
+  has been started, which timed at ~1.4 s before servicemanager appears and
+  6.7 s before Android's Wi-Fi framework makes its first call. A restart
+  against a live session registers both names 4 ms after opening the device.
 - Falls back to the old unguarded probe if GetSession never answers within 60 s,
   so a waydroid that does not offer the method still gets a working daemon.
 
