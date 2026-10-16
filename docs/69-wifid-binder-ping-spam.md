@@ -1,6 +1,14 @@
 # The binder ping spam is waydroid-wifid waiting for a login
 
-Observed and fixed 2026-10-16. `waydroid-ext-wifid` 1.1.1.
+Observed 2026-10-16. `waydroid-ext-wifid` 1.1.1 fixes **75.5%** of it, measured — the boot-until-
+first-login case. The remaining 24.5% is the same poll restarting after a *logout*, it lives
+inside libgbinder rather than in our code, and closing it needs a design decision rather than a
+patch. Both halves are measured below; start at
+[1.1.1 fixes three quarters of this](#111-fixes-three-quarters-of-this-and-the-rest-is-the-logout-path)
+for what is left.
+
+> The 1.1.1-2 package carries an earlier copy of this file, which lists the logout path as
+> unverified. It was, at build time. It is not any more.
 
 [03-binder-ping-spam.md](03-binder-ping-spam.md) decodes the same two kernel lines and is still
 correct about what they mean. It pins them on a different cause — two stuck waydroid python
@@ -197,14 +205,63 @@ exit status: 73` on this host and the package is installed anyway — `rpm -q` a
 binary on disk matches. That is the documented `InterruptedLiveCommit` case, and the cause here is
 the documented one: `/var` is owned by `jmelanso`, not `root`. A reboot clears the flag.
 
+## 1.1.1 fixes three quarters of this, and the rest is the logout path
+
+**Measured, not assumed.** Logging out of a live session and watching the kernel log with the
+gated 1.1.1 daemon running gave **60 pings in 60 s** — the spam comes straight back. So the gate
+covers the boot-before-first-login case and nothing else.
+
+The cause is in libgbinder, and it is not reachable from our presence handler.
+`gbinder_servicemanager_died()` is wired to the *remote object's* death callback and
+unconditionally calls `gbinder_servicemanager_presence_check_start()`:
+
+```c
+#define PRESENSE_WAIT_MS_MIN  (100)
+#define PRESENSE_WAIT_MS_MAX  (1000)
+#define PRESENSE_WAIT_MS_STEP (100)
+```
+
+`gbinder_servicemanager_presense_check_timer()` calls `gbinder_remote_object_reanimate()` — which
+is the PING — backing off 100 ms at a time to a 1000 ms ceiling and then returning
+`G_SOURCE_CONTINUE` forever. 1 Hz, exactly as measured. Because it hangs off the death callback
+rather than off the watch table, `gbinder_servicemanager_remove_handler()` does **not** stop it.
+Only destroying the `GBinderServiceManager` does, in its finalizer.
+
+Splitting every ping in the journal by whether it landed before or after the daemon's first
+`waydroid-wifid ready.`:
+
+| Path | Pings | Share |
+|---|---|---|
+| Before first registration — the `gbinder_servicemanager_wait()` gate fixes this | 200,461 | 75.5% |
+| After first registration — the post-death poll, still open | 65,147 | 24.5% |
+
+### The recommended shape for the rest
+
+Do **not** simply gate `app_sm_presence_handler` the way startup was gated; it cannot stop
+libgbinder's timer. Distinguish the two reasons servicemanager can die, which the current design
+does not:
+
+- **A session still exists** (`GetSession` non-empty) — the container is bouncing and Android is
+  coming back. Keep exactly today's behaviour: let libgbinder poll and re-register the instant it
+  reappears. The spam is bounded by the restart, a few seconds.
+- **No session** (`GetSession` empty) — the user logged out and Android is not coming back on its
+  own. This is the 24.5%, and it is the case the "outlive the container" design never considered.
+
+For the second branch the cheap mechanism is to let the process exit and have systemd's existing
+`Restart=always` / `RestartSec=5` bring it back behind the startup gate — it reuses the path
+already verified here, and it routes through `ExecStartPost=waydroid-wifi-nudge`, which in-process
+re-registration never runs. There is nothing to be late for in that branch, because there is no
+Android. Tearing the services down in-process instead would preserve the letter of the design but
+has to get `Wificond`/`Supplicant` destruction exactly right, and
+[16-waydroid-network.md](16-waydroid-network.md) is a direct warning about what a stale binder
+registration costs.
+
+Either way this changes a documented property of `waydroid-wifid.service` — that a container
+restart can never take the daemon with it — so it is a decision, not a cleanup.
+
 ## Still open
 
-- **The presence-handler path is unverified.** Every ping measured here came from the
-  pre-registration `gbinder_servicemanager_wait()`. Whether libgbinder also polls at 1 Hz after a
-  servicemanager *death* — the session-stopped case docs/03 was about — has not been established.
-  If it does, the same gate belongs in `app_sm_presence_handler`, and the symptom would be spam
-  that starts only after a session has run and stopped.
-- **One hole in the gate.** If `do_start` raises between `helpers.lxc.start()` and
+- **One hole in the startup gate.** If `do_start` raises between `helpers.lxc.start()` and
   `args.session = session`, the container is running but `GetSession` stays empty, and the daemon
   waits forever without falling back (it *has* been answered, so the 60 s escape does not apply).
   The only statement between the two is `services.hardware_manager.start(args)`. Waydroid's own
