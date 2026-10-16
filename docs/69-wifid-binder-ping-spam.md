@@ -1,9 +1,10 @@
 # The binder ping spam is waydroid-wifid waiting for a login
 
-Observed 2026-10-16. `waydroid-ext-wifid` 1.1.1 fixes **75.5%** of it, measured — the boot-until-
-first-login case. The remaining 24.5% is the same poll restarting after a *logout*, it lives
-inside libgbinder rather than in our code, and closing it needs a design decision rather than a
-patch. Both halves are measured below; start at
+Observed 2026-10-16. `waydroid-ext-wifid` 1.1.1 fixes **75.4%** of it, measured — the boot-until-
+first-login case. What is left is the same poll restarting after a *logout*: 19.5% from this
+daemon, where the timer lives inside libgbinder rather than in our code and closing it needs a
+design decision rather than a patch, and 5.1% from `waydroid-sensord`, which has the same bug on
+`/dev/hwbinder`. All three are measured below; start at
 [1.1.1 fixes three quarters of this](#111-fixes-three-quarters-of-this-and-the-rest-is-the-logout-path)
 for what is left.
 
@@ -228,12 +229,33 @@ rather than off the watch table, `gbinder_servicemanager_remove_handler()` does 
 Only destroying the `GBinderServiceManager` does, in its finalizer.
 
 Splitting every ping in the journal by whether it landed before or after the daemon's first
-`waydroid-wifid ready.`:
+`waydroid-wifid ready.`, and then splitting the remainder by which PID emitted it:
 
-| Path | Pings | Share |
-|---|---|---|
-| Before first registration — the `gbinder_servicemanager_wait()` gate fixes this | 200,461 | 75.5% |
-| After first registration — the post-death poll, still open | 65,147 | 24.5% |
+| Source | Pings | Share | State |
+|---|---|---|---|
+| `waydroid-wifid` startup wait | 200,461 | 75.4% | **fixed in 1.1.1** |
+| `waydroid-wifid` post-death poll | 51,742 | 19.5% | open — needs the decision below |
+| Other processes, chiefly `waydroid-sensord` | 13,645 | 5.1% | open — see below |
+
+### waydroid-sensord has the same bug
+
+Caught by restarting the gated daemon at the greeter: wifid went quiet and the 1 Hz spam
+*continued*, from
+
+```
+4348  root  waydroid-sensord /dev/hwbinder
+```
+
+`sensors/service.cpp` calls the identical `gbinder_servicemanager_wait(app.sm, -1)`, against
+`/dev/hwbinder` and `hwservicemanager` instead of `/dev/binder`. `do_start` launches it at session
+start and it outlives the session, so it polls a context manager that is gone for exactly as long
+as the tablet sits logged out.
+
+It is a smaller share only because it cannot spam the boot-until-first-login window — it does not
+exist until a session has started. Per logged-out hour it costs the same as wifid did. The startup
+gate does not transfer unchanged: sensord is not started by systemd and has no unit to restart
+into, and `GetSession` is the wrong question for a process that `do_start` itself spawns. Worth
+its own look rather than a copied patch.
 
 ### The recommended shape for the rest
 
