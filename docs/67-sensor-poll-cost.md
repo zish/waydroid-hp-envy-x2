@@ -402,7 +402,16 @@ average converged to 0.915%, which is the same number from the other direction.
 The descriptor column is the one that was worth waiting for. Those 25 include the held IIO
 descriptors that `DisableSensorEvents` deliberately never closes, and `WindowOrientationListener`
 and `FaceDownDetector` subscribe and unsubscribe across the session — so if that design leaked, it
-had seven hours and every rotation of the machine in which to show it. It did not move once.
+had seven hours and every rotation of the machine in which to show it. It did not move once, and
+the same run later reached ten hours unchanged.
+
+The number itself is not the invariant, though, and reading it as one would be a mistake. It is 15
+descriptors held regardless — pipes, eventfds, the pid lock, `/dev/null`, fd 0 — plus three per
+three-axis sensor subscribed at least once, plus one for `dev_rotation`, whose single quaternion
+attribute is shared between ORIENTATION and ROTATION_VECTOR. A freshly booted daemon therefore
+reads **22**, with the accelerometer, gyroscope and quaternion open and the magnetometer's three
+not yet; it becomes 25 as soon as something subscribes to the compass. What would indicate a leak
+is the count continuing to climb after every sensor has been subscribed once.
 
 ## Who actually keeps this awake
 

@@ -22,7 +22,15 @@ descriptors — and the dangerous outcome of closing them there is not `EBADF` b
 descriptor number quietly reading some other file. They are only dropped on the main thread, on a
 failed read or a reprobe. That is correct, and it is also exactly the shape of a leak: three
 descriptors per sensor across thousands of activate/deactivate cycles would show here long before
-it mattered. The baseline is **25**.
+it mattered.
+
+**`fds=` is not a fixed number, and the leak criterion is that it stops climbing** — not that it
+equals any particular value. It is 15 descriptors the process holds regardless (pipes, eventfds,
+the pid lock file, `/dev/null`, fd 0) plus three per three-axis sensor that has been subscribed at
+least once, plus one for `dev_rotation`, whose single quaternion attribute is shared by ORIENTATION
+and ROTATION_VECTOR. So a freshly started daemon reads **22** with the accelerometer, gyroscope and
+quaternion open, and **25** once something has subscribed to the magnetometer as well. Both were
+observed either side of the 1.0.4 upgrade, and 25 held for ten hours before it.
 
 `interval=` is the CPU percentage since the previous sample, which is the figure that can show a
 drift. `life=` is the average since the process started, which is dominated by its early history
