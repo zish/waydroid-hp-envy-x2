@@ -1,3 +1,27 @@
+* Fri Oct 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.1-1
+- Stop pinging an empty binder while no session exists. The daemon entered
+  gbinder_servicemanager_wait(sm, -1) at startup, which polls handle 0 at 1 Hz,
+  and every probe that lands while nothing owns handle 0 costs two kernel log
+  lines. On a tablet that boots to a greeter and waits, that is unbounded: one
+  53-hour logged-out stretch on bigtab01 produced 190,501 of them from this one
+  call -- 99.94% of that boot's binder lines -- and across all boots the spam
+  reached 29.3% of the journal, roughly 300 MB of 1 GB (docs/69).
+- Not only noise. binder's own rate limiter began dropping messages, 19
+  "callbacks suppressed" in a single boot, which discards unrelated binder
+  diagnostics on a host where binder evidence has been load-bearing (docs/16,
+  docs/40).
+- The probe is now gated on id.waydro.Container's GetSession, which answers an
+  empty a{ss} until a session exists and costs no binder traffic. Measured: 30 s
+  with no session adds 0 kernel lines where it previously added 60, and the
+  daemon never opens the binder device at all.
+- Registration is NOT delayed, which is the one thing this could not afford to
+  get wrong -- Android caches a failure to reach wifinl80211 (the 38-minute
+  deadlock in docs/16). The gate opens when `waydroid session start` calls
+  Start() on that same interface, before the container's init runs and many
+  seconds before servicemanager appears.
+- Falls back to the old unguarded probe if GetSession never answers within 60 s,
+  so a waydroid that does not offer the method still gets a working daemon.
+
 * Thu Oct 01 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
 - Read the radio directly over nl80211 for the four things NetworkManager
   cannot answer, via a new Nl80211.cpp that talks raw AF_NETLINK and adds no

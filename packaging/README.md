@@ -218,7 +218,7 @@ plain — and asserts the harness reaches the right verdict on each.
 |---|---|---|---|---|
 | `camera-gbm` 1.0.1 | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
 | `camera` (group) | yes | yes | **yes** | same, plus `no-%check-section` — a metapackage has nothing to check |
-| `wifid` 1.1.0 | yes | **yes** | **yes**, `--prebuilt` only | same, plus `no-%check-section`, `no-manual-page-for-binary` and `unstripped-binary-or-object` — the last is the `--prebuilt` arm declining to strip, so the shipped binary stays byte-identical to the one verified on the host |
+| `wifid` 1.1.1 | yes | **yes** | **yes**, `--prebuilt` only | same, plus `no-manual-page-for-binary` and `unstripped-binary-or-object` — the last is the `--prebuilt` arm declining to strip, so the shipped binary stays byte-identical to the one verified on the host. `no-%check-section` stopped firing when the mod declared its own `%check` on 2026-10-09 |
 | `pidguard` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
 | `restartd` | yes | yes | **yes** | same |
 | `btd` | yes | yes | **yes** | same |
