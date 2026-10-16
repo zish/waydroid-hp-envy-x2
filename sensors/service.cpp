@@ -25,6 +25,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <gio/gio.h>
 #include <sys/resource.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -57,6 +58,18 @@ static const char *const LOCK_PATHS[] = {
 #define DEFAULT_IFACE   "android.hardware.sensors@1.0::ISensors"
 #define DEFAULT_NAME    "default"
 
+/*
+ * How long to keep asking, after the service manager dies, whether the session
+ * died with it.  container_manager.stop() clears its session as the LAST thing
+ * it does, well after lxc has already taken the container down, so for several
+ * seconds the honest answer is still "a session is running" -- 6 s on bigtab01
+ * on 2026-10-16, from the service manager's death at 16:31:58 to the session
+ * being cleared at 16:32:04.  The give-up is ten times that; past it, assume
+ * this is a framework restart under a live session and wait as before.
+ */
+#define SESSION_WATCH_INTERVAL_MS (2000)
+#define SESSION_WATCH_GIVEUP_MS   (60000)
+
 typedef struct app {
     GMainLoop* loop;
     GBinderServiceManager* sm;
@@ -67,6 +80,10 @@ typedef struct app {
      * connection; see build.sh for why it shares this process. */
     GBinderLocalObject* lightObj;
     waydroid::Backlight* backlight;
+    /* Non-zero while we are waiting to learn whether the session outlived the
+     * service manager; see app_session_watch(). */
+    guint sessionWatch;
+    guint sessionWatchMs;
 } App;
 
 typedef struct response {
@@ -526,6 +543,90 @@ lights_add_service_done(
     }
 }
 
+/*
+ * Is a Waydroid session running?  Asked over the system bus, because the one
+ * other way to ask -- poking binder -- is the thing this is here to stop
+ * doing.  GetSession returns an empty a{ss} when there is no session and costs
+ * no binder traffic either way.
+ *
+ * Fails toward TRUE on every error.  The two mistakes are not symmetric: a
+ * daemon that wrongly stays up just writes log noise, which is exactly what it
+ * does today, while one that wrongly exits takes the sensors and the backlight
+ * with it until the next session start.
+ */
+static
+gboolean
+app_session_present(void)
+{
+    GError* err = NULL;
+    GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
+    GVariant* res;
+    gboolean present = TRUE;
+
+    if (!bus) {
+        GDEBUG("no system bus (%s); assuming a session is still running",
+            err ? err->message : "?");
+        g_clear_error(&err);
+        return TRUE;
+    }
+
+    res = g_dbus_connection_call_sync(bus, "id.waydro.Container",
+        "/ContainerManager", "id.waydro.ContainerManager", "GetSession",
+        NULL, G_VARIANT_TYPE("(a{ss})"), G_DBUS_CALL_FLAGS_NONE, 2000,
+        NULL, &err);
+
+    if (res) {
+        GVariant* dict = g_variant_get_child_value(res, 0);
+
+        present = g_variant_n_children(dict) > 0;
+        g_variant_unref(dict);
+        g_variant_unref(res);
+    } else {
+        GDEBUG("GetSession: %s; assuming a session is still running",
+            err ? err->message : "?");
+        g_clear_error(&err);
+    }
+
+    g_object_unref(bus);
+    return present;
+}
+
+/*
+ * Runs only while the service manager is dead, and only to answer one
+ * question: has the session gone too?  Once it has, exiting is both cheaper
+ * and more correct than waiting -- see the presence handler below.
+ */
+static
+gboolean
+app_session_watch(
+    void* user_data)
+{
+    App* app = (App*) user_data;
+
+    app->sessionWatchMs += SESSION_WATCH_INTERVAL_MS;
+
+    if (!app_session_present()) {
+        GINFO("The session this daemon was started for is gone; exiting "
+              "rather than polling binder for a container that is not coming "
+              "back.  container_manager.py starts a fresh daemon with the "
+              "next session.");
+        app->sessionWatch = 0;
+        if (app->loop)
+            g_main_loop_quit(app->loop);
+        return G_SOURCE_REMOVE;
+    }
+
+    if (app->sessionWatchMs >= SESSION_WATCH_GIVEUP_MS) {
+        GINFO("Service manager has been gone %d s with a session still "
+              "running; staying up to re-register, as before",
+              SESSION_WATCH_GIVEUP_MS / 1000);
+        app->sessionWatch = 0;
+        return G_SOURCE_REMOVE;
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
 static
 void
 app_sm_presence_handler(
@@ -536,6 +637,10 @@ app_sm_presence_handler(
 
     if (gbinder_servicemanager_is_present(app->sm)) {
         GINFO("Service manager has reappeared");
+        if (app->sessionWatch) {
+            g_source_remove(app->sessionWatch);
+            app->sessionWatch = 0;
+        }
         gbinder_servicemanager_add_service(app->sm, DEFAULT_NAME, app->obj,
             app_add_service_done, app);
         if (app->lightObj) {
@@ -546,19 +651,46 @@ app_sm_presence_handler(
         GINFO("Service manager has died");
         app->service->killLoops();
         /*
-         * Android is gone; this daemon deliberately is not.  It stays up so it
-         * can re-register when a new container appears, which means stopping a
-         * Waydroid session never signals us and the RestoreInitial() on the
-         * exit path in main() is simply never reached.
+         * Android is gone, so the backlight has to be restored right here --
+         * before anything decides whether this process lives or dies, and not
+         * on the exit path in main().
          *
-         * On 2026-09-09 that left the panel at 0 with the SDDM greeter behind
-         * it: a black screen on a machine whose only other input is ssh from
-         * somewhere else.  Nothing on the host but this process is holding the
-         * value Android dimmed away from, so the restore has to happen here.
-         * See docs/37-brightness.md.
+         * On 2026-09-09 skipping it left the panel at 0 with the SDDM greeter
+         * behind it: a black screen on a machine whose only other input is ssh
+         * from somewhere else.  Nothing on the host but this process is holding
+         * the value Android dimmed away from.  See docs/37-brightness.md.
          */
         if (app->backlight)
             app->backlight->RestoreInitial("Android went away");
+
+        /*
+         * Whether to stay up depends on WHY the service manager went away, and
+         * at this instant that is not yet knowable.
+         *
+         * A framework restart under a live session is worth waiting out; the
+         * branch above re-registers both names when it returns.  A session that
+         * has ended is not, because libgbinder answers a dead service manager
+         * by polling handle 0 for ever -- gbinder_servicemanager_died() arms a
+         * reanimate timer whose callback returns G_SOURCE_CONTINUE
+         * unconditionally -- and every probe of a binder nobody owns costs two
+         * kernel log lines.  One leaked daemon wrote 20,031 of them in under
+         * three hours on bigtab01, 82% of that boot's binder output.
+         *
+         * container_manager.stop() means to kill us at this point and silently
+         * cannot: its `pidof waydroid-sensord` runs in waydroid_t, SELinux
+         * denies that domain read on /proc, so pidof enumerates nothing, prints
+         * nothing, and `if pid:` skips the kill.  The same confinement trap as
+         * the lock file above, failing the same one way round.  docs/70 has the
+         * measurements and the audit records.
+         *
+         * So ask instead of assuming -- repeatedly, because the answer takes a
+         * few seconds to settle.
+         */
+        if (!app->sessionWatch) {
+            app->sessionWatchMs = 0;
+            app->sessionWatch = g_timeout_add(SESSION_WATCH_INTERVAL_MS,
+                app_session_watch, app);
+        }
     }
 }
 
@@ -587,6 +719,10 @@ app_run(
 
     if (sigtrm) g_source_remove(sigtrm);
     if (sigint) g_source_remove(sigint);
+    if (app->sessionWatch) {
+        g_source_remove(app->sessionWatch);
+        app->sessionWatch = 0;
+    }
     gbinder_servicemanager_remove_handler(app->sm, presence_id);
     g_main_loop_unref(app->loop);
     app->loop = NULL;
