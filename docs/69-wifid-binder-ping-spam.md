@@ -252,10 +252,48 @@ start and it outlives the session, so it polls a context manager that is gone fo
 as the tablet sits logged out.
 
 It is a smaller share only because it cannot spam the boot-until-first-login window — it does not
-exist until a session has started. Per logged-out hour it costs the same as wifid did. The startup
-gate does not transfer unchanged: sensord is not started by systemd and has no unit to restart
-into, and `GetSession` is the wrong question for a process that `do_start` itself spawns. Worth
-its own look rather than a copied patch.
+exist until a session has started. Per logged-out hour it costs the same as wifid did.
+
+**But this is not the same bug, and it needs no gate.** Unlike wifid, sensord is not a boot
+service that has to persist across sessions — waydroid owns its whole lifecycle. `do_start`
+spawns it, and `container_manager.stop()` already tries to kill it:
+
+```python
+# Sensors
+if which("waydroid-sensord"):
+    command = ["pidof", "waydroid-sensord"]
+    pid = tools.helpers.run.user(args, command, check=False, output_return=True).strip()
+    if pid:
+        command = ["kill", "-9", pid]
+        tools.helpers.run.user(args, command, check=False)
+```
+
+So the intended design is already "dead when there is no session", and there is nothing for
+sensord to wait quietly *for*. **The spam is that this kill is not taking effect.** Observed
+2026-10-16: PID 4348 was spawned at the 16:11:19 session start, `stop()` logged
+`Stopping container` at 16:32:04, and it was still polling `/dev/hwbinder` seven minutes later.
+
+Everything else in `stop()` demonstrably ran, so it is not an exception bailing out early:
+
+| Step | Evidence it ran |
+|---|---|
+| `waydroid-net.sh stop` | `waydroid0` bridge gone |
+| the sensors kill | **no effect — process alive** |
+| `umount_rootfs` | `/var/lib/waydroid/rootfs` unmounted |
+| `del args.session` | `GetSession` returns `a{ss} 0` |
+
+`del args.session` is the **last** statement of the `try` block and the only one in the tree, so
+reaching it means the sensors block was executed. Ruled out: `which` finds
+`/usr/bin/waydroid-sensord`; `pidof waydroid-sensord` returns `4348` despite `comm` being
+truncated to `waydroid-sensor` at the 15-character limit (pidof falls back to cmdline);
+`/usr/bin/kill` exists; `run.user` runs as root here, since it is what spawned the root-owned
+process in the first place; and the process is in state `Sl`, not stuck uninterruptible in a
+binder ioctl. Why a `kill -9` from root did not land is **not yet explained** and wants waydroid's
+debug logging plus a reproduction.
+
+Note the swallowed error: `except Exception as e: logging.debug(...)` means any failure inside
+`stop()` is invisible at default log level, which is why this presents as spam rather than as an
+error.
 
 ### The recommended shape for the rest
 
