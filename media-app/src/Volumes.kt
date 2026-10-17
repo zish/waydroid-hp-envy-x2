@@ -104,13 +104,39 @@ object Volumes {
         return nm
     }
 
-    /** Stable per label, so a re-mount replaces its notification instead of stacking. */
+    /**
+     * Stable per label, so a re-mount replaces its notification instead of
+     * stacking.
+     *
+     * Only a hash of exactly 0 is moved, to 1. This was once `hashCode() or 1`,
+     * which forced bit 0 on and so merged every pair of labels whose hashes
+     * differ only there -- and waydroid-mediad's target_for() names duplicates
+     * "<name>_2", "<name>_3", ..., whose last characters differ by one, so
+     * USB_Drive_2/_3 and SD_Card_3/_4 shared one notification. String hashes
+     * can still collide in general, which is why ejectAction() does not rely on
+     * this id to keep two volumes' Eject buttons apart.
+     */
     // internal rather than private only so media-app/test can reach it.
-    internal fun notificationId(label: String): Int = label.hashCode() or 1
+    internal fun notificationId(label: String): Int = label.hashCode().let { if (it == 0) 1 else it }
+
+    /**
+     * Gives each volume's eject intent its own identity. PendingIntent matches
+     * by Intent.filterEquals(), which ignores extras, so two volumes whose
+     * intents differ only in the "label" extra would share one PendingIntent
+     * and FLAG_UPDATE_CURRENT would rewrite the first one's label to the
+     * second's -- Eject on one notification would unmount the other volume.
+     * A per-label data URI makes them unequal whatever the request code is.
+     * EjectReceiver is reached by component, so the URI routes nothing.
+     */
+    // internal rather than private only so media-app/test can reach it.
+    internal fun ejectUriParts(label: String): Pair<String, String> = "volume" to label
 
     /** The Eject button, which asks the host daemon to unmount this volume. */
     private fun ejectAction(ctx: Context, label: String): Notification.Action {
-        val intent = Intent(ctx, EjectReceiver::class.java).putExtra("label", label)
+        val (scheme, ssp) = ejectUriParts(label)
+        val intent = Intent(ctx, EjectReceiver::class.java)
+            .setData(Uri.fromParts(scheme, ssp, null))
+            .putExtra("label", label)
         val pending = PendingIntent.getBroadcast(
             ctx, notificationId(label), intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE

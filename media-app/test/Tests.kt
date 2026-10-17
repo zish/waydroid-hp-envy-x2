@@ -101,8 +101,27 @@ fun main() = suite("media-app") {
             assertEquals(Volumes.notificationId(label), Volumes.notificationId(label))
             assertNotEquals(0, Volumes.notificationId(label), label)
         }
-        // "".hashCode() is 0; the `or 1` is what keeps even that off zero.
+        // "".hashCode() is 0, the one hash that is moved.
         assertEquals(1, Volumes.notificationId(""))
+    }
+
+    test("consecutive duplicates of one name get separate notifications") {
+        // target_for() names the 2nd, 3rd, ... copy <name>_2, <name>_3, ...
+        // The old `hashCode() or 1` merged _2/_3 and _4/_5 (and for SD_Card,
+        // _3/_4), because those hashes differ only in bit 0.
+        assertNotEquals(Volumes.notificationId("USB_Drive_2"), Volumes.notificationId("USB_Drive_3"))
+        assertNotEquals(Volumes.notificationId("SD_Card_3"), Volumes.notificationId("SD_Card_4"))
+        for (base in listOf("USB_Drive", "SD_Card", "NO_NAME", "Disc")) {
+            val labels = listOf(base) + (2..40).map { "${base}_$it" }
+            val ids = labels.map(Volumes::notificationId)
+            assertEquals(labels.size, ids.toSet().size, "colliding ids among $base, ${base}_2..${base}_40")
+        }
+    }
+
+    test("each volume's eject intent is distinct beyond its extras") {
+        // filterEquals() ignores extras, so the label has to be in the data.
+        assertNotEquals(Volumes.ejectUriParts("USB_Drive_2"), Volumes.ejectUriParts("USB_Drive_3"))
+        assertEquals("USB_Drive_2", Volumes.ejectUriParts("USB_Drive_2").second)
     }
 
     test("a volume and its first duplicate get separate notifications") {
