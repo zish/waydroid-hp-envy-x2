@@ -36,14 +36,56 @@ private class PatternCallback(private val fileSize: Long) : ProxyFileDescriptorC
     override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
         reads++
         if (size > maxRead) maxRead = size
-        val available = (fileSize - offset).coerceIn(0L, size.toLong()).toInt()
-        Pattern.fill(data, 0, offset, available)
-        return available
+        return servePattern(fileSize, offset, size, data)
     }
 
     override fun onRelease() {
         released = true
     }
+}
+
+/**
+ * What `onRead` does with a request, without the `ProxyFileDescriptorCallback` around
+ * it: clamp [size] to the bytes left before [fileSize] -- zero at or past EOF, never
+ * negative -- fill that many bytes of [data] from [Pattern] as if read at [offset], and
+ * return the count. A short count is how a FUSE read reports EOF; an error here would
+ * turn the probe's "a read spanning EOF is short" check into a failure of the probe.
+ */
+// internal rather than private only so appfuse-probe/test can reach it.
+internal fun servePattern(fileSize: Long, offset: Long, size: Int, data: ByteArray): Int {
+    val available = (fileSize - offset).coerceIn(0L, size.toLong()).toInt()
+    Pattern.fill(data, 0, offset, available)
+    return available
+}
+
+/**
+ * One pseudorandom read: a length in 1..[maxLength] and an offset at which a read of
+ * that length ends at or before [fileSize]. The draws are taken in this order --
+ * `nextInt` then `nextDouble` -- so a fixed seed names the same reads on every run.
+ */
+// internal rather than private only so appfuse-probe/test can reach it.
+internal fun spot(random: Random, maxLength: Int, fileSize: Long): Pair<Long, Int> {
+    val length = 1 + random.nextInt(maxLength)
+    val offset = (random.nextDouble() * (fileSize - length)).toLong()
+    return offset to length
+}
+
+/**
+ * The report lines for a throwable and everything under it, at most eight deep -- the
+ * message alone is rarely enough, and a cause cycle must not loop forever.
+ */
+// internal rather than private only so appfuse-probe/test can reach it.
+internal fun failureLines(what: String, t: Throwable): List<String> {
+    val lines = mutableListOf("  $what FAILED")
+    var e: Throwable? = t
+    var depth = 0
+    while (e != null && depth < 8) {
+        val prefix = if (depth == 0) "    throw " else "    cause " + "  ".repeat(depth)
+        lines += "$prefix${e.javaClass.name}: ${e.message}"
+        e = e.cause
+        depth++
+    }
+    return lines
 }
 
 /**
@@ -83,15 +125,7 @@ class Probe(private val context: Context) {
 
     /** Prints a throwable and everything under it -- the message alone is rarely enough. */
     private fun fail(what: String, t: Throwable) {
-        emit("  $what FAILED")
-        var e: Throwable? = t
-        var depth = 0
-        while (e != null && depth < 8) {
-            val prefix = if (depth == 0) "    throw " else "    cause " + "  ".repeat(depth)
-            emit("$prefix${e.javaClass.name}: ${e.message}")
-            e = e.cause
-            depth++
-        }
+        failureLines(what, t).forEach(::emit)
     }
 
     fun run(): String {
@@ -235,8 +269,7 @@ class Probe(private val context: Context) {
             val random = Random(SEED)
             val buf = ByteArray(MAX_SPOT)
             repeat(200) {
-                val length = 1 + random.nextInt(MAX_SPOT)
-                val offset = (random.nextDouble() * (FILE_SIZE - length)).toLong()
+                val (offset, length) = spot(random, MAX_SPOT, FILE_SIZE)
                 val got = Os.pread(fd, buf, 0, length, offset)
                 if (got != length) return@check "pread($offset, $length) returned $got"
                 val bad = Pattern.firstMismatch(buf, got, offset)
@@ -311,8 +344,7 @@ class Probe(private val context: Context) {
                 val random = Random(SEED + 1)
                 val buf = ByteArray(4096)
                 repeat(50) {
-                    val length = 1 + random.nextInt(buf.size)
-                    val offset = (random.nextDouble() * (FILE_SIZE - length)).toLong()
+                    val (offset, length) = spot(random, buf.size, FILE_SIZE)
                     val got = Os.pread(fd.fileDescriptor, buf, 0, length, offset)
                     if (got != length) return "cold pread($offset, $length) returned $got"
                     val bad = Pattern.firstMismatch(buf, got, offset)
@@ -375,11 +407,14 @@ class Probe(private val context: Context) {
         const val TAG = "APPFUSE"
 
         /** 1 MiB: enough to make AppFuse chop the read up, small enough to run in a second. */
-        private const val FILE_SIZE = 1L shl 20
+        // internal rather than private only so appfuse-probe/test can reach it.
+        internal const val FILE_SIZE = 1L shl 20
 
         /** Fixed, so two runs compare directly and a failing offset can be re-tried. */
-        private const val SEED = 20260925L
+        // internal rather than private only so appfuse-probe/test can reach it.
+        internal const val SEED = 20260925L
 
-        private const val MAX_SPOT = 8192
+        // internal rather than private only so appfuse-probe/test can reach it.
+        internal const val MAX_SPOT = 8192
     }
 }
