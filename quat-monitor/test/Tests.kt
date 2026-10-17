@@ -201,6 +201,16 @@ fun main() = suite("quat-monitor") {
         assertEquals("1.0", Sample.fmt(1f, 1e6f))
     }
 
+    test("an age column keeps rising past 59.65 hours of silence") {
+        // Int.MAX_VALUE / 10 ms is 59.65 h. 60 h and 100 h of age must come out
+        // as themselves, not both as 214748364.7.
+        val h60 = 60 * 3_600_000f
+        val h100 = 100 * 3_600_000f
+        assertEquals(h60.toDouble(), Sample.fmt(h60, 10f).toDouble())
+        assertEquals(h100.toDouble(), Sample.fmt(h100, 10f).toDouble())
+        assertEquals("1234.5", Sample.fmt(1234.5f, 10f))
+    }
+
     test("fmt writes NaN as an empty field, so missing stays distinct from zero") {
         assertEquals("", Sample.fmt(Float.NaN, 1e6f))
         assertEquals("0.0", Sample.fmt(0f, 1e6f))
@@ -416,12 +426,39 @@ fun main() = suite("quat-monitor") {
             assertFalse(old.exists(), "expired hour kept")
             assertTrue(recent.exists(), "hour inside retention pruned")
             assertTrue(events.exists(), "anomaly log pruned")
-            // Pruning only ever matches .gz. A plain hour exists when the
-            // writer was stopped mid-hour (run() closes without compressing,
-            // and the next start has no openHour to compress), so such a file
-            // is outside retention entirely. Pinned as current behaviour.
-            assertTrue(oldPlain.exists())
+            // A plain hour left by a mid-hour stop is swept into a .gz that
+            // keeps its age, so it expires with everything else.
+            assertFalse(oldPlain.exists(), "expired plain hour kept")
+            assertFalse(File(dir, "quat-20260901-01.csv.gz").exists(), "expired plain hour kept as .gz")
         } finally { dir.deleteRecursively() }
+    }
+
+    test("a later start compresses the hour a mid-hour stop left plain") {
+        val dir = tempDir()
+        try {
+            val nine = 1_792_227_600_000L
+            val ten = 1_792_231_200_000L
+            val w1 = LogWriter(dir)
+            w1.start(); w1.offer(distinct(wall = nine)); w1.stop()
+            assertTrue(File(dir, "quat-20261017-09.csv").exists())
+
+            val w2 = LogWriter(dir)
+            w2.start(); w2.offer(distinct(wall = ten)); w2.stop()
+            assertFalse(File(dir, "quat-20261017-09.csv").exists(), "stopped hour left plain")
+            assertEquals(Sample.HEADER + csv(distinct(wall = nine)),
+                         gunzip(File(dir, "quat-20261017-09.csv.gz")))
+            // The hour being written is not swept out from under the writer.
+            assertEquals(Sample.HEADER + csv(distinct(wall = ten)),
+                         File(dir, "quat-20261017-10.csv").readText())
+            assertFalse(File(dir, "quat-20261017-10.csv.gz").exists())
+        } finally { dir.deleteRecursively() }
+    }
+
+    test("only quat-<yyyyMMdd-HH>.csv counts as a stray hour") {
+        assertEquals("20261017-09", LogWriter.strayHour("quat-20261017-09.csv"))
+        for (other in listOf("quat-20261017-09.csv.gz", "events.csv", "meta.txt",
+                             "capture-9.txt", "quat-2026101-09.csv", "xquat-20261017-09.csv"))
+            assertNull(LogWriter.strayHour(other), other)
     }
 
     test("offer drops and counts rather than blocking when the queue is full") {

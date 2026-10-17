@@ -90,6 +90,7 @@ class LogWriter(private val dir: File) {
                 val hour = hourKey(s.wallMs)
                 if (hour != openHour) {
                     writer?.let { closeAndCompress(it, openHour) }
+                    if (openHour.isEmpty()) compressStrays(hour)
                     writer = openFor(hour)
                     openHour = hour
                     currentFile = "quat-$hour.csv"
@@ -124,8 +125,8 @@ class LogWriter(private val dir: File) {
 
     /* Gzip the finished hour and drop the plain file. Roughly 8x on this data,
      * because consecutive quaternions share most of their digits. */
-    private fun closeAndCompress(w: Writer, hour: String) {
-        try { w.flush(); w.close() } catch (e: Exception) { return }
+    private fun closeAndCompress(w: Writer?, hour: String) {
+        try { w?.flush(); w?.close() } catch (e: Exception) { return }
         if (hour.isEmpty()) return
         val src = File(dir, "quat-$hour.csv")
         if (!src.exists()) return
@@ -134,16 +135,37 @@ class LogWriter(private val dir: File) {
             GZIPOutputStream(BufferedOutputStream(FileOutputStream(dst), 64 * 1024)).use { out ->
                 src.inputStream().use { it.copyTo(out, 64 * 1024) }
             }
+            // Retention is by mtime, so the archive keeps the hour's own age
+            // rather than starting a fresh 14 days from whenever it was swept.
+            dst.setLastModified(src.lastModified())
             src.delete()
         } catch (e: Exception) {
             Log.e(TAG, "compress failed for $hour", e)
         }
     }
 
+    /*
+     * Compress every plain hour a previous run left behind, except the one
+     * about to be appended to. stop() closes the open hour without compressing
+     * it, deliberately -- a restart in the same hour appends to it -- so a
+     * service stopped mid-hour and started in a later one used to leave that
+     * hour plain for good, and pruning never saw it. Only the first hour a run
+     * opens needs this; every later one is closed by this run's own rollover.
+     */
+    private fun compressStrays(current: String) {
+        dir.listFiles()?.forEach { f ->
+            val hour = strayHour(f.name) ?: return@forEach
+            if (hour != current) closeAndCompress(null, hour)
+        }
+    }
+
     private fun pruneOldFiles() {
         val cutoff = System.currentTimeMillis() - RETAIN_DAYS * 86_400_000L
         dir.listFiles()?.forEach { f ->
-            if (f.name.startsWith("quat-") && f.name.endsWith(".gz") &&
+            // Plain hours too: compressStrays() should leave none, but one it
+            // could not compress must still age out rather than leak.
+            if (f.name.startsWith("quat-") &&
+                (f.name.endsWith(".csv.gz") || f.name.endsWith(".csv")) &&
                 f.lastModified() < cutoff) f.delete()
         }
     }
@@ -156,6 +178,12 @@ class LogWriter(private val dir: File) {
         const val QUEUE_CAP = 2000
         const val FLUSH_MS = 1000L
         const val RETAIN_DAYS = 14L
+
+        private val STRAY = Regex("""quat-(\d{8}-\d{2})\.csv""")
+
+        /** The hour a plain "quat-<hour>.csv" holds, or null for anything else. */
+        // internal rather than private only so quat-monitor/test can reach it.
+        internal fun strayHour(name: String): String? = STRAY.matchEntire(name)?.groupValues?.get(1)
 
         fun hourKey(wallMs: Long): String =
             java.text.SimpleDateFormat("yyyyMMdd-HH", Locale.US)
