@@ -22,7 +22,7 @@
 #            with the app's whole src/ against android.jar and run on the JVM;
 #            see tests/kotlin/Harness.kt. Needs a JDK 17/21, kotlinc, an
 #            android-33 android.jar and the jars tests/kotlin/fetch-deps.sh
-#            puts in build/test-deps.
+#            puts in build/test-deps. KOTLIN_APPS="a b" limits it to those.
 #   lint     shellcheck -S error over every shell script, ruff's pyflakes rules
 #            (F) over every Python one. Both were clean when this was added
 #            (2026-10-17: 0 errors in 92 shell scripts, 1 F541 in 28 Python
@@ -119,6 +119,11 @@ find_jdk() {
 
 run_kotlin() {
 	apps=$(cd "$repo" && ls -d ./*/test/Tests.kt 2>/dev/null | cut -d/ -f2 || true)
+	# KOTLIN_APPS="pw-app media-app" narrows the run, and the COMPILE, to the
+	# named apps -- so one app's half-written test cannot break another's.
+	if [ -n "${KOTLIN_APPS:-}" ]; then
+		apps=$(for a in $apps; do case " $KOTLIN_APPS " in *" $a "*) echo "$a" ;; esac; done)
+	fi
 	[ -n "$apps" ] || { skip kotlin "no <app>/test/Tests.kt found"; return 0; }
 
 	jdk=$(find_jdk) || { skip kotlin "no JDK 17 or 21 (set JAVA_HOME)"; return 0; }
