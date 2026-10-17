@@ -260,7 +260,8 @@ class PwClient(private val profile: Profile, private val listener: Listener) {
      * hand-entered profile -- the daemon always publishes a fingerprint
      * alongside the token when TLS is on.
      */
-    private class Pinned(private val pin: String?) : X509TrustManager {
+    // internal rather than private only so pw-app/test can reach it.
+    internal class Pinned(private val pin: String?) : X509TrustManager {
 
         override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
             throw CertificateException("this side is the client")
