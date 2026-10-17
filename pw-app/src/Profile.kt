@@ -86,6 +86,17 @@ class Profile(
             editor.apply()
         }
 
+        /** A profile from the dialog's fields, as typed. */
+        fun entered(host: String, port: String, token: String, tls: Boolean, pin: String) =
+            Profile(
+                host.trim(),
+                port.trim().toIntOrNull() ?: DEFAULT_PORT,
+                token.trim(),
+                tls,
+                pin.trim().ifEmpty { null },
+                "entered by hand"
+            )
+
         // internal rather than private only so pw-app/test can reach it.
         internal fun parse(json: JSONObject, source: String): Profile {
             val pin = json.optString("pin", "")

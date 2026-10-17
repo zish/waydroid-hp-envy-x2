@@ -594,4 +594,54 @@ fun main() = suite("pw-app") {
         assertEquals("default", Graph.text(assertNotNull(g.metadata("default")), "name"))
         assertNull(Graph().setting("clock.quantum"))
     }
+
+    test("a setting present with a JSON null value is absent, not \"null\"") {
+        val g = Graph()
+        g.replace(arr(obj("id" to 33, "kind" to "metadata", "name" to "settings",
+            "entries" to JSONObject().put("clock.quantum", JSONObject.NULL)
+                .put("clock.rate", 48000))))
+        assertNull(g.setting("clock.quantum"))
+        assertEquals("48000", g.setting("clock.rate"))
+    }
+
+    // ---- the "Set…" dialog's round trip -----------------------------------
+
+    test("a pre-filled control value parses back in a decimal-comma locale") {
+        // German writes 0,5; Arabic writes its own digits. The dialog fills
+        // the field with editText() and Set reads it with parseEntry(): a
+        // user who changes nothing must get the value back.
+        for (locale in listOf(Locale.GERMANY, Locale.FRANCE, Locale.forLanguageTag("ar-EG"), Locale.US)) {
+            Locale.setDefault(locale)
+            try {
+                for (v in listOf(0.5, -12.25, 1024.0, 0.0001, -0.0)) {
+                    assertEquals(v, assertNotNull(Controls.parseEntry(Controls.editText(v)), "$locale $v"), EPS)
+                }
+            } finally { Locale.setDefault(Locale.US) }
+        }
+    }
+
+    test("a typed decimal comma is accepted, and garbage is still refused") {
+        assertEquals(0.5, assertNotNull(Controls.parseEntry(" 0,5 ")), EPS)
+        assertEquals(-3.0, assertNotNull(Controls.parseEntry("-3")), EPS)
+        for (bad in listOf("", "abc", "1,2,3", "1.2.3")) assertNull(Controls.parseEntry(bad), bad)
+    }
+
+    // ---- the profile dialog ------------------------------------------------
+
+    test("a hand-entered profile keeps TLS and its pin") {
+        val p = Profile.entered(" 10.0.0.5 ", "7713", " tok ", true, " $CERT_SHA256 ")
+        assertEquals("10.0.0.5", p.host)
+        assertEquals(7713, p.port)
+        assertEquals("tok", p.token)
+        assertTrue(p.tls)
+        assertEquals(CERT_SHA256, p.pin)
+        assertEquals("entered by hand", p.source)
+    }
+
+    test("a hand-entered profile defaults a bad port and a blank pin") {
+        val p = Profile.entered("h", "seventy", "t", false, "  ")
+        assertEquals(Profile.DEFAULT_PORT, p.port)
+        assertFalse(p.tls)
+        assertNull(p.pin)
+    }
 }

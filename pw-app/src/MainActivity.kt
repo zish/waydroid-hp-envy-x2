@@ -941,7 +941,7 @@ class MainActivity : Activity(), PwClient.Listener {
 
     private fun showControlEntry(nodeId: Int, control: Controls.Control, readout: TextView) {
         val field = EditText(this).apply {
-            setText(plain(control.value))
+            setText(Controls.editText(control.value))
             inputType = InputType.TYPE_CLASS_NUMBER or
                 InputType.TYPE_NUMBER_FLAG_DECIMAL or
                 InputType.TYPE_NUMBER_FLAG_SIGNED
@@ -953,7 +953,7 @@ class MainActivity : Activity(), PwClient.Listener {
                 addView(field)
             })
             .setPositiveButton("Set") { _, _ ->
-                val value = field.text.toString().trim().toDoubleOrNull()
+                val value = Controls.parseEntry(field.text.toString())
                 if (value == null) {
                     toast("not a number")
                 } else {
@@ -1081,17 +1081,29 @@ class MainActivity : Activity(), PwClient.Listener {
             setText(current?.token ?: "")
             inputType = InputType.TYPE_CLASS_TEXT
         }
+        // TLS and the pin are carried through, as bt-app's dialog does. Saving
+        // used to hardcode plaintext, so editing a TLS profile's token by hand
+        // silently turned the connection to the daemon into cleartext.
+        val tls = CheckBox(this).apply {
+            text = "Use TLS"
+            setTextColor(FOREGROUND)
+            isChecked = current?.tls ?: false
+        }
+        val pin = EditText(this).apply {
+            hint = "certificate fingerprint (TLS only)"
+            setText(current?.pin ?: "")
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
         layout.addView(host); layout.addView(port); layout.addView(token)
+        layout.addView(tls); layout.addView(pin)
 
         AlertDialog.Builder(this)
             .setTitle("Host daemon")
             .setView(layout)
             .setPositiveButton("Save") { _, _ ->
-                Profile.saveManual(this, Profile(
-                    host.text.toString().trim(),
-                    port.text.toString().trim().toIntOrNull() ?: Profile.DEFAULT_PORT,
-                    token.text.toString().trim(),
-                    false, null, "entered by hand"
+                Profile.saveManual(this, Profile.entered(
+                    host.text.toString(), port.text.toString(), token.text.toString(),
+                    tls.isChecked, pin.text.toString()
                 ))
                 restartConnection()
             }
