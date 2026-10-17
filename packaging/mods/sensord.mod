@@ -39,7 +39,7 @@
 # box matching a host it cannot install packages on, and wrong inside rpmbuild,
 # which must be offline and must bind to this buildroot's libraries.
 
-VERSION=1.0.4
+VERSION=1.0.5
 RELEASE=1
 KIND=host
 
@@ -101,6 +101,7 @@ glib2%{?_isa}"
 # those defaults a second home that can drift from the code. Copy it to
 # /etc/waydroid-sensors.conf only when something actually needs changing.
 DOCS="docs/14-sensors.md
+docs/70-sensord-pidof-selinux.md
 docs/18-sensor-axes.md
 docs/19-sensor-hub-suspend-wedge.md
 docs/37-brightness.md

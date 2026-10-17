@@ -3,8 +3,9 @@
 Observed 2026-10-16. `waydroid-ext-wifid` 1.1.1 fixes **75.4%** of it, measured — the boot-until-
 first-login case. What is left is the same poll restarting after a *logout*: 19.5% from this
 daemon, where the timer lives inside libgbinder rather than in our code and closing it needs a
-design decision rather than a patch, and 5.1% from `waydroid-sensord`, which has the same bug on
-`/dev/hwbinder`. All three are measured below; start at
+design decision rather than a patch, and 5.1% from `waydroid-sensord`, which produces the same
+two lines on `/dev/hwbinder` for an entirely different reason — fixed in sensord 1.0.5, see
+[docs/70](70-sensord-pidof-selinux.md). All three are measured below; start at
 [1.1.1 fixes three quarters of this](#111-fixes-three-quarters-of-this-and-the-rest-is-the-logout-path)
 for what is left.
 
@@ -235,9 +236,9 @@ Splitting every ping in the journal by whether it landed before or after the dae
 |---|---|---|---|
 | `waydroid-wifid` startup wait | 200,461 | 75.4% | **fixed in 1.1.1** |
 | `waydroid-wifid` post-death poll | 51,742 | 19.5% | open — needs the decision below |
-| Other processes, chiefly `waydroid-sensord` | 13,645 | 5.1% | open — see below |
+| Other processes, chiefly `waydroid-sensord` | 13,645 | 5.1% | **fixed in sensord 1.0.5** — [docs/70](70-sensord-pidof-selinux.md) |
 
-### waydroid-sensord has the same bug
+### waydroid-sensord: the same two lines, a different bug
 
 Caught by restarting the gated daemon at the greeter: wifid went quiet and the 1 Hz spam
 *continued*, from
@@ -247,53 +248,23 @@ Caught by restarting the gated daemon at the greeter: wifid went quiet and the 1
 ```
 
 `sensors/service.cpp` calls the identical `gbinder_servicemanager_wait(app.sm, -1)`, against
-`/dev/hwbinder` and `hwservicemanager` instead of `/dev/binder`. `do_start` launches it at session
-start and it outlives the session, so it polls a context manager that is gone for exactly as long
-as the tablet sits logged out.
+`/dev/hwbinder` and `hwservicemanager` instead of `/dev/binder`, so the kernel lines are
+indistinguishable apart from the pid. The cause is not: wifid was a boot service polling for a
+session that had never started, while sensord is a daemon that *had* a session, lost it, and was
+supposed to be killed. It needs no gate — waydroid owns its whole lifecycle and
+`container_manager.stop()` already tries to `kill -9` it.
 
-It is a smaller share only because it cannot spam the boot-until-first-login window — it does not
-exist until a session has started. Per logged-out hour it costs the same as wifid did.
+**That kill never runs.** Its `pidof waydroid-sensord` is executed confined as `waydroid_t`, which
+SELinux denies `read` on `/proc` itself, so pidof enumerates zero processes, prints nothing and
+exits 1 — and `check=False` plus `if pid:` turn that into a no-op. Four session stops in
+`waydroid.log`, four empty pidof results, and `% kill` appears nowhere in the file. The audit
+record, the five hypotheses this disproves, and the fix (the daemon asks `GetSession` for itself
+and exits) are all in [docs/70](70-sensord-pidof-selinux.md).
 
-**But this is not the same bug, and it needs no gate.** Unlike wifid, sensord is not a boot
-service that has to persist across sessions — waydroid owns its whole lifecycle. `do_start`
-spawns it, and `container_manager.stop()` already tries to kill it:
-
-```python
-# Sensors
-if which("waydroid-sensord"):
-    command = ["pidof", "waydroid-sensord"]
-    pid = tools.helpers.run.user(args, command, check=False, output_return=True).strip()
-    if pid:
-        command = ["kill", "-9", pid]
-        tools.helpers.run.user(args, command, check=False)
-```
-
-So the intended design is already "dead when there is no session", and there is nothing for
-sensord to wait quietly *for*. **The spam is that this kill is not taking effect.** Observed
-2026-10-16: PID 4348 was spawned at the 16:11:19 session start, `stop()` logged
-`Stopping container` at 16:32:04, and it was still polling `/dev/hwbinder` seven minutes later.
-
-Everything else in `stop()` demonstrably ran, so it is not an exception bailing out early:
-
-| Step | Evidence it ran |
-|---|---|
-| `waydroid-net.sh stop` | `waydroid0` bridge gone |
-| the sensors kill | **no effect — process alive** |
-| `umount_rootfs` | `/var/lib/waydroid/rootfs` unmounted |
-| `del args.session` | `GetSession` returns `a{ss} 0` |
-
-`del args.session` is the **last** statement of the `try` block and the only one in the tree, so
-reaching it means the sensors block was executed. Ruled out: `which` finds
-`/usr/bin/waydroid-sensord`; `pidof waydroid-sensord` returns `4348` despite `comm` being
-truncated to `waydroid-sensor` at the 15-character limit (pidof falls back to cmdline);
-`/usr/bin/kill` exists; `run.user` runs as root here, since it is what spawned the root-owned
-process in the first place; and the process is in state `Sl`, not stuck uninterruptible in a
-binder ioctl. Why a `kill -9` from root did not land is **not yet explained** and wants waydroid's
-debug logging plus a reproduction.
-
-Note the swallowed error: `except Exception as e: logging.debug(...)` means any failure inside
-`stop()` is invisible at default log level, which is why this presents as spam rather than as an
-error.
+The 5.1% above is this source's share of *all* history, held down by the boot-until-first-login
+window that only wifid could fill. Per logged-out hour it always cost the same as wifid did, and on
+the boot after wifid 1.1.1 was installed one leaked sensord accounted for 81.9% of every binder
+line.
 
 ### The recommended shape for the rest
 

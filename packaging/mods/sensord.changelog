@@ -1,3 +1,33 @@
+* Fri Oct 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.5-1
+- Exit when the session that started this daemon is gone, instead of polling an
+  empty binder for ever. container_manager.stop() already means to kill us at
+  exactly that point and silently cannot: its `pidof waydroid-sensord` runs
+  confined as waydroid_t, SELinux denies that domain read on /proc itself
+  (tclass=dir, name="/", ino=1), so pidof enumerates nothing, matches nothing
+  and exits 1 -- and check=False plus `if pid:` turn a hard failure into a
+  no-op. Four session stops in waydroid.log, four empty pidof results, and
+  `% kill` appears nowhere in the file (docs/70).
+- Not cosmetic. libgbinder answers a dead service manager by polling handle 0
+  for ever, and every probe of a binder nobody owns costs two kernel log lines.
+  One leaked daemon wrote 20,031 of them in under three hours -- 81.9% of that
+  boot's binder output -- and the gap has no upper bound, because it closes only
+  when somebody logs in again. A tablet left at the greeter pings all night.
+- The question is asked over id.waydro.Container's GetSession, which costs no
+  binder traffic, and asked REPEATEDLY rather than once: stop() clears its
+  session as the last statement of its try, measured 6 s after the service
+  manager died, so a single check at death time would always see a live session
+  and stay up for ever. Polls every 2 s, gives up after 60 s, and past that
+  behaves exactly as before -- so a framework restart under a live session still
+  re-registers both names.
+- Fails toward staying up on any bus error, because the two mistakes are not
+  symmetric: a daemon that wrongly stays up only writes log noise, which is
+  today's behaviour, while one that wrongly exits takes the sensors and the
+  backlight with it until the next login.
+- The backlight restore moves ahead of that decision rather than sitting beside
+  it, so docs/37's black screen -- panel at 0 behind the greeter -- cannot
+  become a function of how long this process happens to live.
+- No new runtime dependency: libgio was already a DT_NEEDED.
+
 * Thu Oct 15 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.4-1
 - Add --idle-probe, which subscribes and unsubscribes sensors directly through
   activate() and batch(), runs the real main loop between steps, and reports
