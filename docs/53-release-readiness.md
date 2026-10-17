@@ -310,6 +310,23 @@ host, a container or privilege:
 - **lint** — `shellcheck -S error` (92 scripts) and `ruff --select F` (28 Python files). Both were
   clean at adoption apart from one F541, fixed; **shellcheck's 33 warnings are not gated yet.**
 
+**Every Kotlin app has tests as of 2026-10-17**, 194 in all: appfuse-probe 23, bt-app 20,
+drm-probe 18, media-app 10, pw-app 37, quat-monitor 35, sensor-app 27, touch-probe 24. Every
+production change made for them is a verbatim extraction or a `private` → `internal`, each
+reviewed against the original, every APK still builds, and every suite was mutation-checked.
+Goldens come from the daemons' own source and the docs, not from the code under test.
+
+**Writing them found real bugs, none fixed yet** — each is in its app's commit message:
+
+| App | Finding |
+|---|---|
+| media-app | `notificationId = hashCode() or 1` collides for labels differing only in bit 0, which is how `waydroid-mediad` names duplicates — `USB_Drive_2`/`_3`, `SD_Card_3`/`_4`. Merged notifications, and Eject can carry the wrong label |
+| quat-monitor | A service stopped mid-hour leaves that hour's CSV uncompressed, and pruning matches only `.gz` — each such stop leaks an 8–18 MB file outside retention. Age columns saturate after ~59.65 h |
+| pw-app | `Graph.setting()` can show the string "null" (the docs/56 bug class); locale-formatted control values fail their own re-parse in a decimal-comma locale; the profile dialog silently drops TLS |
+| touch-probe | A tap on RESET leaks its MOVE/UP into the counter, so the peak reads 1 before anyone touches the glass |
+| sensor-app | Heading reference flips at exactly 90° of roll; a NaN azimuth reads "N"; locale decimal separators |
+| appfuse-probe | Not a bug: its 8-fd check reads identical files at one offset, so it cannot detect crossed mounts |
+
 A suite whose toolchain is missing is skipped locally but **fails under `CI=true`**, so the runner
 cannot quietly stop testing something. Neither shellcheck nor ruff is installed on the dev box, so
 locally `lint` skips.
