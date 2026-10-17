@@ -316,6 +316,9 @@ host, a container or privilege:
   files it lists are docs/54's inventory, the non-compliant ones marked as grandfathered. Adopting
   it found `bin/__pycache__/magn-calibrate.cpython-313.pyc` still tracked, which docs/54 had said to
   delete; it is gone.
+  **links**: every relative link in the 95 Markdown files names a tracked file, and every
+  `#anchor` into a Markdown file names a heading there, by GitHub's slug rules — 1,057 links, 29 of
+  them anchored, all resolving at adoption. External URLs are not fetched.
 
 **Every Kotlin app has tests as of 2026-10-17**, 217 in all: appfuse-probe 26, bt-app 20,
 drm-probe 18, media-app 12, pw-app 42, quat-monitor 38, sensor-app 33, touch-probe 28. Every

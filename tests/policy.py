@@ -15,12 +15,20 @@ the dev box, in lefthook's pre-push and on a GitHub runner -- tests/run.sh's
              different bytes. The hash makes a rebuilt binary a deliberate,
              reviewed edit to the allowlist, on a signed commit.
 
+  links      Every relative link in a tracked Markdown file names a path that
+             exists, and an #anchor into a Markdown file names one of its
+             headings. The docs cross-reference each other by number and by
+             section ("docs/42's *Why a private type*"), and a rename
+             otherwise breaks them silently. Links outside the repository are
+             not followed: that needs network, and their rot is not ours.
+
 Usage:
   tests/policy.py [check ...]     # default: every check
 """
 
 import hashlib
 import os
+import re
 import subprocess
 import sys
 
@@ -87,8 +95,91 @@ def check_binaries(paths):
     return len(seen), problems
 
 
+# [text](target "title"), and the reference form "[label]: target".
+INLINE = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
+REFDEF = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s|$)")
+FENCE = re.compile(r"^\s*(```|~~~)")
+CODESPAN = re.compile(r"(`+).*?\1")
+EXTERNAL = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")   # http:, mailto:, ...
+
+
+def markdown_lines(path, spans=False):
+    """(line number, text) outside fenced code, with code spans blanked
+    unless [spans] -- a heading's anchor keeps a code span's text."""
+    fence = None
+    with open(os.path.join(REPO, path), encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            m = FENCE.match(line)
+            if m:
+                if fence is None:
+                    fence = m.group(1)
+                elif m.group(1) == fence:
+                    fence = None
+                continue
+            if fence is None:
+                yield n, line if spans else CODESPAN.sub("", line)
+
+
+def slug(heading):
+    """GitHub's heading anchor: lowercase, drop punctuation, spaces to '-'."""
+    text = re.sub(r"<[^>]+>", "", heading.strip().lower())
+    text = re.sub(r"[^\w\- ]", "", text)
+    return text.replace(" ", "-")
+
+
+_anchors = {}
+
+
+def anchors(path):
+    """Every anchor GitHub renders for a Markdown file, duplicates numbered."""
+    if path not in _anchors:
+        seen = {}
+        found = set()
+        for _, line in markdown_lines(path, spans=True):
+            m = re.match(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$", line)
+            if not m:
+                continue
+            base = slug(m.group(1))
+            k = seen.get(base, 0)
+            seen[base] = k + 1
+            found.add(base if k == 0 else f"{base}-{k}")
+        _anchors[path] = found
+    return _anchors[path]
+
+
+def check_links(paths):
+    tracked_set = set(paths)
+    docs = [p for p in paths if p.endswith(".md")]
+    problems = []
+    for doc in docs:
+        here = os.path.dirname(doc)
+        for n, line in markdown_lines(doc):
+            for target in INLINE.findall(line) + REFDEF.findall(line):
+                if EXTERNAL.match(target):
+                    continue
+                target, _, anchor = target.partition("#")
+                if target:
+                    if target.startswith("/"):
+                        problems.append(f"{doc}:{n}: absolute link {target}")
+                        continue
+                    dest = os.path.normpath(os.path.join(here, target))
+                    full = os.path.join(REPO, dest)
+                    # A link to an untracked file works only on the machine
+                    # that has it, so it counts as broken.
+                    if not (os.path.exists(full) and
+                            (dest in tracked_set or os.path.isdir(full))):
+                        problems.append(f"{doc}:{n}: no such file {target}")
+                        continue
+                else:
+                    dest = doc
+                if anchor and dest.endswith(".md") and anchor not in anchors(dest):
+                    problems.append(f"{doc}:{n}: no heading #{anchor} in {dest}")
+    return len(docs), problems
+
+
 CHECKS = {
     "binaries": (check_binaries, "binary files"),
+    "links": (check_links, "Markdown files"),
 }
 
 

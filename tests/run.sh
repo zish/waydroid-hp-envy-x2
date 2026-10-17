@@ -29,7 +29,8 @@
 #            files, fixed), so the gate costs nothing today. Shellcheck's 33
 #            warnings are NOT gated yet -- raise -S once they are worked off.
 #   policy   tests/policy.py, the repository rules no compiler checks: every
-#            tracked binary is in tests/binary-allowlist with its sha256.
+#            tracked binary is in tests/binary-allowlist with its sha256, and
+#            every relative Markdown link and #anchor resolves.
 #
 # A suite whose toolchain is missing is SKIPPED with a message -- except under
 # CI=true (set by GitHub Actions) or REQUIRE_ALL=1, where a skip is a failure.
