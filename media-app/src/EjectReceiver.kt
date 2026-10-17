@@ -26,7 +26,7 @@ class EjectReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         val label = intent.getStringExtra("label").orEmpty()
-        if (label.isEmpty() || label.contains('/') || label == "." || label == "..") {
+        if (!isSafeMarkerName(label)) {
             Log.w(TAG, "refusing eject request for bad label: '$label'")
             return
         }
@@ -43,5 +43,14 @@ class EjectReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "RemovableMedia"
+
+        /**
+         * Whether a label can be used as the marker's file name without
+         * escaping the eject directory: one path component, and not "." or
+         * "..". The label arrives in an Intent extra, so it is not trusted.
+         */
+        // internal rather than private only so media-app/test can reach it.
+        internal fun isSafeMarkerName(label: String): Boolean =
+            !(label.isEmpty() || label.contains('/') || label == "." || label == "..")
     }
 }

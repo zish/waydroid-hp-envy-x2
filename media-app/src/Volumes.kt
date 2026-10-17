@@ -63,8 +63,7 @@ object Volumes {
      * "primary:Removable/FOO".
      */
     fun openIntent(label: String): Intent {
-        val docId = "primary:$SUBDIR/$label"
-        val uri: Uri = DocumentsContract.buildDocumentUri(AUTHORITY, docId)
+        val uri: Uri = DocumentsContract.buildDocumentUri(AUTHORITY, documentId(label))
         return Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
             addFlags(
@@ -74,6 +73,13 @@ object Volumes {
             )
         }
     }
+
+    /**
+     * ExternalStorageProvider's document id for a volume: "<root>:<relative
+     * path>", so /sdcard/Removable/FOO is "primary:Removable/FOO".
+     */
+    // internal rather than private only so media-app/test can reach it.
+    internal fun documentId(label: String): String = "primary:$SUBDIR/$label"
 
     /** The tap target, falling back to our own status screen if nothing handles it. */
     private fun tapIntent(ctx: Context, label: String): Intent {
@@ -99,7 +105,8 @@ object Volumes {
     }
 
     /** Stable per label, so a re-mount replaces its notification instead of stacking. */
-    private fun notificationId(label: String): Int = label.hashCode() or 1
+    // internal rather than private only so media-app/test can reach it.
+    internal fun notificationId(label: String): Int = label.hashCode() or 1
 
     /** The Eject button, which asks the host daemon to unmount this volume. */
     private fun ejectAction(ctx: Context, label: String): Notification.Action {
@@ -136,8 +143,13 @@ object Volumes {
         nm.notify(notificationId(label), builder.build())
     }
 
+    /** The notification's body text: where the volume is, and what it is if known. */
+    // internal rather than private only so media-app/test can reach it.
+    internal fun detail(path: String, fstype: String): String =
+        if (fstype.isEmpty()) path else "$path  ($fstype)"
+
     fun show(ctx: Context, label: String, path: String, fstype: String) {
-        val detail = if (fstype.isEmpty()) path else "$path  ($fstype)"
+        val detail = detail(path, fstype)
         post(ctx, label, detail, ejecting = false)
         remember(ctx, label, detail)
     }
