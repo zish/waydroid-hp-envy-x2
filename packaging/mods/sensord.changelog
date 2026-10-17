@@ -26,7 +26,10 @@
 - The backlight restore moves ahead of that decision rather than sitting beside
   it, so docs/37's black screen -- panel at 0 behind the greeter -- cannot
   become a function of how long this process happens to live.
-- No new runtime dependency: libgio was already a DT_NEEDED.
+- Adds two DT_NEEDED entries, libgio-2.0.so.0 and libgobject-2.0.so.0. The daemon was already
+  linked against both; --as-needed had been dropping them because no symbol from either was used.
+  Both ship in glib2, which this package already Requires and which bigtab01 already has, so
+  nothing new is pulled in -- compared against the installed 1.0.4 binary rather than assumed.
 
 * Thu Oct 15 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.4-1
 - Add --idle-probe, which subscribes and unsubscribes sensors directly through

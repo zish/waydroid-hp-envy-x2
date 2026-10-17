@@ -142,16 +142,23 @@ Three details carry the design:
   the SDDM greeter, on a machine whose only other input is ssh — must not become dependent on how
   long this process lives.
 
-`GetSession` costs no binder traffic, and the daemon already linked `libgio`, so this adds no
-runtime dependency: the `DT_NEEDED` set is unchanged.
+`GetSession` costs no binder traffic. It does add two `DT_NEEDED` entries, `libgio-2.0.so.0` and
+`libgobject-2.0.so.0`: the daemon was already *linked* against both, but `--as-needed` had been
+dropping them because nothing in it used a symbol from either. Both ship in `glib2`, which this
+package already `Requires` and which the host already has, so nothing new is pulled in — checked
+against the installed 1.0.4 binary rather than assumed, after an earlier draft of this file claimed
+the set was unchanged and was wrong. `objdump` is not installed on bigtab01, which is part of why
+that was easy to believe; the comparison has to be made off-host.
 
 ## Why not just fix the policy
 
 Allowing `waydroid_t` to read `/proc` would make upstream's kill work, and the denial is a genuine
 bug worth reporting either way. It was not the fix chosen here:
 
-- It buys exactly one kill. That `pidof` is the **only** `/proc` enumeration anywhere in
-  `/usr/lib/waydroid/tools` — nothing else in waydroid needs the permission.
+- It buys exactly one kill. That `pidof` is the only thing in `/usr/lib/waydroid/tools` that
+  *enumerates* `/proc`. The tools do read `/proc` elsewhere — `cpuinfo`, `filesystems`, `mounts`,
+  `device-tree` — but all at known paths, which need `search` on the directory and not `read`, and
+  which is why every one of those keeps working under this denial while the kill does not.
 - It risks trading binder spam for audit spam. `pidof` reads every process's `/proc` entries, so a
   grant on the directory invites a second round of denials against every other domain on the host.
 - The mechanism it restores is independently fragile. The match can only come from `cmdline`,
@@ -163,9 +170,10 @@ Deciding inside our own daemon needs no policy change and holds whether or not t
 ## Residue: a zombie per session stop, and why that is acceptable
 
 The exiting daemon becomes a zombie rather than disappearing, because `do_start` discards the
-`Popen` that `run.user(..., output="background")` returns and so never reaps the child. Confirmed
-by hand: a SIGTERM to pid 4348 stopped the binder output dead (delta 0 over the following 8 s) and
-left the process in state `Z` with its backlight restored to 937/937.
+`Popen` that `run.user(..., output="background")` returns and so never reaps the child. Seen on
+both paths: a SIGTERM to the old pid 4348 stopped its binder output dead (delta 0 over the
+following 8 s) and left it in state `Z` with the backlight restored to 937/937, and the fixed
+daemon's own exit at 20:18:20 ended the same way.
 
 A zombie holds a pid table entry and nothing else — no binder traffic, no CPU, no `flock` — and it
 is reaped when `waydroid-container.service` restarts. One pid slot per session stop, against two
@@ -178,7 +186,48 @@ enumeration, no SELinux permission, and leaves no zombie.
 
 ## Verification
 
-Pending: a session start/stop cycle on bigtab01 with the fixed binary in place.
+Measured on bigtab01, 2026-10-16, with the fixed binary installed to `/usr/local/bin` so that
+`container_manager.py`'s `which()` picks it up and spawns it. That detail is the test: the daemon
+has to actually be `waydroid_t` for "may it call `GetSession`?" to mean anything, and running it by
+hand would have given it `unconfined_t` — the same trap as everything else on this page.
+
+**Session start, 20:12:19.** Spawned from `/var/usrlocal/bin/waydroid-sensord`, label
+`system_u:system_r:waydroid_t:s0`, its IIO devices bound, backlight read at 937/937,
+`Waydroid Sensors HAL service ready.` and `Added "android.hardware.light@2.0::ILight/default"`.
+Startup is untouched by the fix and behaved accordingly.
+
+**Session stop, 20:18.** From the daemon's own log and `waydroid.log` side by side:
+
+| Time | Event |
+|---|---|
+| 20:18:14 | `Service manager has died` |
+| 20:18:14 | `Restoring backlight to 937 (Android went away)` |
+| 20:18:19 | `stop()` logs `Stopping container` |
+| 20:18:19 | `% pidof waydroid-sensord` — **still empty; the denial is untouched** |
+| 20:18:20 | `The session this daemon was started for is gone; exiting ...` |
+
+Six seconds from death to exit, and the exit happened *because the daemon asked* — the `pidof` line
+one second earlier is as empty as it was at every previous stop. Nothing killed it. Those 6 s are
+exactly the window the repeated check exists for: a single check at 20:18:14 would have seen a live
+session and stayed up for ever.
+
+| Measure | Before (pid 4348) | After (pid 58753) |
+|---|---|---|
+| Binder lines written | **20,521** | **5** |
+| End state | `Sl`, still polling 2.9 h later | `Z` within a second of deciding |
+| Backlight | 937/937 | 937/937 |
+| AVC denial on the `GetSession` call | — | none |
+
+Five lines, all of them inside the 6 s window, against an unbounded two per second.
+
+No denial was logged for the D-Bus call, which settles the one thing no policy query could answer
+here: `waydroid_t` may talk to `id.waydro.Container`. Had it been denied, the predicate's
+fail-toward-"a session is running" would have left the daemon up — no regression, but no fix
+either. That is precisely why this had to be run instead of reasoned about.
+
+What is left on this host is `waydroid-wifid`'s own post-logout poll: pid 52592 wrote 2,600 lines
+between the 20:18 logout and 20:41 and was still going. That is docs/69's open 19.5%, untouched by
+any of this.
 
 ## Still open
 
