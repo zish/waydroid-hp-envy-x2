@@ -350,6 +350,17 @@ on `gbinder.h`, which is exactly what the Fedora container's `dnf builddep` supp
 job itself has not run yet** — there is no container runtime here — so its first run on GitHub is
 the verification.
 
+**Every shipped systemd unit is verified, from 2026-10-17**:
+[packaging/verify-units.sh](../packaging/verify-units.sh), the last step of the `rpm` job, extracts
+the newest build of each package with `rpm2cpio` and runs `systemd-analyze verify` on the units as
+packaged — the source units carry `@BINDIR@`, so verifying `artifacts/` reports every one broken.
+`dev-binderfs.mount` and `waydroid-container.service` are stubbed for the `waydroid` package, the
+second so `binder-nice`'s drop-in gets parsed at all. 18 of 18 pass against this box's builds, and
+five planted faults — an unknown key, a surviving `@BINDIR@`, a missing `Requires=` unit, a bad
+value in the drop-in, a missing binary — each fail exactly the unit they are in.
+`systemd-analyze security` was tried and left out: every daemon here is a root service that mounts
+or labels by design, so all score 9.4 UNSAFE, which is noise.
+
 **The signed-commit gate runs in CI as well, from 2026-10-17** — the `signatures` job, against
 only the keys in [.github/commit-signers.asc](../.github/commit-signers.asc) (on a pull request,
 the base branch's copy, so a PR cannot vouch for itself by adding a key). It had been local only

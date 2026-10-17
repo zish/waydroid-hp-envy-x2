@@ -15,7 +15,8 @@
 #          docs/53 says "the two compiled daemons cannot be built off this dev
 #          box at all" and why build-mod.sh has --prebuilt. Here they need no
 #          --prebuilt. --privileged is for test-install.sh's `unshare -r`,
-#          which Docker's default seccomp profile refuses.
+#          which Docker's default seccomp profile refuses. Then every unit
+#          the packages ship goes through `systemd-analyze verify`.
 #
 #   signatures
 #          bin/check-signed-commits.sh over every commit reachable from the
@@ -108,7 +109,7 @@ jobs:
         # and the tree has no .git for gen-spec.sh and friends.
         run: |
           dnf -y -q install git rpm-build rpmlint dnf-plugins-core \
-            systemd-rpm-macros util-linux findutils tar gzip
+            systemd-rpm-macros util-linux findutils tar gzip systemd cpio
       - uses: actions/checkout@v4
       - name: Source packages
         run: |
@@ -122,6 +123,10 @@ jobs:
         run: packaging/build-mod.sh --lint --all
       - name: Install / edit / uninstall test
         run: packaging/test-install.sh --all
+      - name: systemd-analyze verify every shipped unit
+        # Against the units as packaged, placeholders substituted; see the
+        # script header for what is stubbed and why.
+        run: packaging/verify-units.sh
       - uses: actions/upload-artifact@v4
         with:
           name: rpms
