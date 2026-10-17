@@ -322,12 +322,12 @@ anywhere yet.**
 
 | App | Finding | Fix |
 |---|---|---|
-| media-app | `notificationId = hashCode() or 1` collides for labels differing only in bit 0, which is how `waydroid-mediad` names duplicates — `USB_Drive_2`/`_3`, `SD_Card_3`/`_4`. Merged notifications, and since `filterEquals()` ignores extras, Eject could carry the other volume's label | Only a hash of 0 is moved; each eject intent carries a per-label `volume:` URI (`625f482`) |
-| quat-monitor | A service stopped mid-hour leaves that hour's CSV uncompressed, and pruning matches only `.gz` — each such stop leaks an 8–18 MB file outside retention. Age columns saturate after ~59.65 h | First hour of a run sweeps plain hours into `.gz` keeping their mtime, pruning matches both; `fmt` rounds through Long/Double (`eeeb752`) |
-| pw-app | `Graph.setting()` can show the string "null" (the docs/56 bug class); locale-formatted control values fail their own re-parse in a decimal-comma locale; the profile dialog silently drops TLS | Through `Graph.text`; the dialog fills in `Locale.ROOT` and accepts a comma; TLS checkbox and pin field as in bt-app (`a5a1a5f`) |
-| touch-probe | A tap on RESET leaks its MOVE/UP into the counter, so the peak reads 1 before anyone touches the glass | `ButtonGestures` drops a whole gesture begun on a HUD button (`de7ff0e`) |
-| sensor-app | Heading reference flips at exactly 90° of roll; a NaN azimuth reads "N"; locale decimal separators | Reference choice has hysteresis (`REF_HYSTERESIS` 0.1); NaN reads "?"; cards in `Locale.ROOT` (`91c8903`) |
-| appfuse-probe | Not a bug: its 8-fd check reads identical files at one offset, so it cannot detect crossed mounts | Each fd serves and is checked against its own salt of `Pattern`; salt 0 is unchanged (`7e0b141`) |
+| media-app | `notificationId = hashCode() or 1` collides for labels differing only in bit 0, which is how `waydroid-mediad` names duplicates — `USB_Drive_2`/`_3`, `SD_Card_3`/`_4`. Merged notifications, and since `filterEquals()` ignores extras, Eject could carry the other volume's label | Only a hash of 0 is moved; each eject intent carries a per-label `volume:` URI (`aba755e`) |
+| quat-monitor | A service stopped mid-hour leaves that hour's CSV uncompressed, and pruning matches only `.gz` — each such stop leaks an 8–18 MB file outside retention. Age columns saturate after ~59.65 h | First hour of a run sweeps plain hours into `.gz` keeping their mtime, pruning matches both; `fmt` rounds through Long/Double (`035da7a`) |
+| pw-app | `Graph.setting()` can show the string "null" (the docs/56 bug class); locale-formatted control values fail their own re-parse in a decimal-comma locale; the profile dialog silently drops TLS | Through `Graph.text`; the dialog fills in `Locale.ROOT` and accepts a comma; TLS checkbox and pin field as in bt-app (`0f96187`) |
+| touch-probe | A tap on RESET leaks its MOVE/UP into the counter, so the peak reads 1 before anyone touches the glass | `ButtonGestures` drops a whole gesture begun on a HUD button (`92542b5`) |
+| sensor-app | Heading reference flips at exactly 90° of roll; a NaN azimuth reads "N"; locale decimal separators | Reference choice has hysteresis (`REF_HYSTERESIS` 0.1); NaN reads "?"; cards in `Locale.ROOT` (`234bda2`) |
+| appfuse-probe | Not a bug: its 8-fd check reads identical files at one offset, so it cannot detect crossed mounts | Each fd serves and is checked against its own salt of `Pattern`; salt 0 is unchanged (`ecd3d9f`) |
 
 A suite whose toolchain is missing is skipped locally but **fails under `CI=true`**, so the runner
 cannot quietly stop testing something. Neither shellcheck nor ruff is installed on the dev box, so
