@@ -278,7 +278,7 @@ fi
 # security fix reaches this daemon only by rebuilding the package, not by
 # upgrading libstdc++.
 
-SRCS=(NativeScanResult.cpp Nl80211.cpp NmBackend.cpp Supplicant.cpp Wificond.cpp service.cpp)
+SRCS=(BeaconIes.cpp NativeScanResult.cpp Nl80211.cpp NmBackend.cpp Supplicant.cpp Wificond.cpp service.cpp)
 OBJS=()
 
 echo "== compiling"

@@ -63,9 +63,14 @@ run_cpp() {
 	out=$(mktemp -d)
 	for src in "$here"/cpp/test_*.cpp; do
 		bin=$out/$(basename "$src" .cpp)
-		# shellcheck disable=SC2046  # pkg-config output is a word list
+		# A test names the translation units it links in its header comment,
+		# " * sources: wifi/BeaconIes.cpp", repo-relative. Header-only code
+		# under test needs no line.
+		extra=$(sed -n 's#^ *\*\{0,1\} *sources: *##p' "$src" |
+			tr ' ' '\n' | sed "/^$/d; s#^#$repo/#")
+		# shellcheck disable=SC2046,SC2086  # pkg-config output and $extra are word lists
 		if "$cxx" -std=gnu++17 -Wall -Wextra -Werror -I"$repo/wifi" \
-			$(pkg-config --cflags glib-2.0) "$src" \
+			$(pkg-config --cflags glib-2.0) "$src" $extra \
 			$(pkg-config --libs glib-2.0) -o "$bin" && "$bin"; then
 			:
 		else

@@ -287,6 +287,12 @@ host, a container or privilege:
   [wifi/NmMapping.h](../wifi/NmMapping.h), with no behaviour change. It checks docs/59's claim
   whole — all 61 representable dBm values survive the round trip through NM's own forward function
   — and was **mutation-checked**: putting back the old `q/2 - 100` fails 66 of its 91 checks.
+  `tests/cpp/test_beacon_ies.cpp` does the same for the synthesised 802.11 elements, split out of
+  `NativeScanResult.cpp` into [wifi/BeaconIes.cpp](../wifi/BeaconIes.cpp) so they compile without
+  gbinder. Its goldens are the bytes Stage 3 recorded in
+  `artifacts/wifi/stage3/ie-synthesis-check.txt`, decoded through the AOSP-parser mirror and
+  confirmed on device — not today's output pasted back. Marking transition mode MFP-*required*
+  fails it.
 - **selftest** — the three `artifacts/*/selftest.sh` `%check` scripts.
 - **lint** — `shellcheck -S error` (92 scripts) and `ruff --select F` (28 Python files). Both were
   clean at adoption apart from one F541, fixed; **shellcheck's 33 warnings are not gated yet.**

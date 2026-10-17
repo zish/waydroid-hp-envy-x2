@@ -151,7 +151,7 @@ g++ %{optflags} -std=gnu++17 -pthread \
     -ffunction-sections -fdata-sections \
     -Iwifi \
     $(pkg-config --cflags libgbinder libglibutil glib-2.0 gobject-2.0 gio-2.0 gio-unix-2.0) \
-    wifi/NativeScanResult.cpp wifi/NmBackend.cpp wifi/Supplicant.cpp \
+    wifi/BeaconIes.cpp wifi/NativeScanResult.cpp wifi/NmBackend.cpp wifi/Supplicant.cpp \
     wifi/Wificond.cpp wifi/service.cpp \
     -o waydroid-wifid \
     -Wl,--gc-sections -static-libstdc++ -static-libgcc \
