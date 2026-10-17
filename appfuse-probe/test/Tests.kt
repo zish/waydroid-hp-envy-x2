@@ -54,6 +54,38 @@ private const val ONREAD_MAX = 128 * 1024 // docs/55's measured largest onRead
 
 fun main() = suite("appfuse-probe") {
 
+    // ---- Pattern salts: the simultaneous-fds check -----------------------
+
+    test("salt 0 is the original pattern") {
+        for ((offset, byte) in GOLDEN) assertEquals(byte.toByte(), Pattern.at(offset, 0), "at($offset, 0)")
+    }
+
+    test("the eight fds' patterns differ at every offset") {
+        // Salt s adds 53*s mod 256 to every byte (by hand: 0, 53, 106, 159,
+        // 212, 9, 62, 115 -- eight distinct residues), so for any two of the
+        // eight fds no byte agrees, and a read served by the wrong mount fails
+        // on its first byte wherever it is taken.
+        assertEquals(8, (0 until 8).map { (it * 53) % 256 }.toSet().size)
+        for (offset in listOf(0L, 1024L, 4095L, 4096L, 123_457L, (1L shl 20) - 1)) {
+            val bytes = (0 until 8).map { Pattern.at(offset, it) }
+            assertEquals(8, bytes.toSet().size, "offset $offset: $bytes")
+            for (s in 0 until 8) {
+                assertEquals(((expected(offset).toInt() + 53 * s) % 256).toByte(), bytes[s], "at($offset, $s)")
+            }
+        }
+    }
+
+    test("a crossed read fails its own fd's check on the first byte") {
+        // What concurrency() does per fd: pread 64 bytes at 1024, compare
+        // against that fd's salt. Here fd 3's bytes are checked as fd 5's.
+        val buf = ByteArray(64)
+        assertEquals(64, servePattern(FILE_SIZE, 1024L, buf.size, buf, salt = 3))
+        assertEquals(-1, Pattern.firstMismatch(buf, buf.size, 1024L, salt = 3))
+        for (other in (0 until 8) - 3) {
+            assertEquals(0, Pattern.firstMismatch(buf, buf.size, 1024L, salt = other), "salt $other")
+        }
+    }
+
     // ---- Pattern ---------------------------------------------------------
 
     test("Pattern.at matches hand-worked goldens") {

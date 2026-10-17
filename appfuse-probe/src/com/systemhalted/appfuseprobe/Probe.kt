@@ -25,7 +25,10 @@ import java.util.Random
  * on another. Recording it here means the same probe that proves the mount works also
  * says what this container's transfer granularity is.
  */
-private class PatternCallback(private val fileSize: Long) : ProxyFileDescriptorCallback() {
+private class PatternCallback(
+    private val fileSize: Long,
+    private val salt: Int = 0,
+) : ProxyFileDescriptorCallback() {
 
     @Volatile var reads = 0
     @Volatile var maxRead = 0
@@ -36,7 +39,7 @@ private class PatternCallback(private val fileSize: Long) : ProxyFileDescriptorC
     override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
         reads++
         if (size > maxRead) maxRead = size
-        return servePattern(fileSize, offset, size, data)
+        return servePattern(fileSize, offset, size, data, salt)
     }
 
     override fun onRelease() {
@@ -52,9 +55,9 @@ private class PatternCallback(private val fileSize: Long) : ProxyFileDescriptorC
  * turn the probe's "a read spanning EOF is short" check into a failure of the probe.
  */
 // internal rather than private only so appfuse-probe/test can reach it.
-internal fun servePattern(fileSize: Long, offset: Long, size: Int, data: ByteArray): Int {
+internal fun servePattern(fileSize: Long, offset: Long, size: Int, data: ByteArray, salt: Int = 0): Int {
     val available = (fileSize - offset).coerceIn(0L, size.toLong()).toInt()
-    Pattern.fill(data, 0, offset, available)
+    Pattern.fill(data, 0, offset, available, salt)
     return available
 }
 
@@ -367,38 +370,42 @@ class Probe(private val context: Context) {
      * 512 on real hardware. The question here is narrower: each proxy fd is a separate
      * AppFuse *mount* keyed by mount id, so if the fix works for one and not for the
      * second the mount path is only half right.
+     *
+     * Each fd serves its own salt of [Pattern] and is checked against that salt, so a
+     * read answered by the wrong mount fails instead of passing on identical bytes.
      */
     private fun concurrency() {
         rule("simultaneous fds")
         val storage = context.getSystemService(StorageManager::class.java) ?: return
         val thread = HandlerThread("appfuse-probe-multi").apply { start() }
         val handler = Handler(thread.looper)
-        val open = mutableListOf<ParcelFileDescriptor>()
+        // Each fd with the salt it serves, which is not its list index if one failed.
+        val opened = mutableListOf<Pair<Int, ParcelFileDescriptor>>()
         try {
             repeat(8) { i ->
                 try {
-                    open += storage.openProxyFileDescriptor(
-                        ParcelFileDescriptor.MODE_READ_ONLY, PatternCallback(FILE_SIZE), handler,
+                    opened += i to storage.openProxyFileDescriptor(
+                        ParcelFileDescriptor.MODE_READ_ONLY, PatternCallback(FILE_SIZE, salt = i), handler,
                     )
                 } catch (t: Throwable) {
                     emit("  fd #$i failed: ${t.javaClass.simpleName}: ${t.message}")
                     return@repeat
                 }
             }
-            emit("  opened ${open.size} of 8 concurrently")
+            emit("  opened ${opened.size} of 8 concurrently")
             var verified = 0
             val buf = ByteArray(64)
-            for (p in open) {
+            for ((salt, p) in opened) {
                 val offset = 1024L
                 if (Os.pread(p.fileDescriptor, buf, 0, buf.size, offset) == buf.size &&
-                    Pattern.firstMismatch(buf, buf.size, offset) < 0
+                    Pattern.firstMismatch(buf, buf.size, offset, salt) < 0
                 ) verified++
             }
-            emit("  ${if (verified == open.size) "PASS" else "FAIL"}  $verified of ${open.size} served correct bytes")
+            emit("  ${if (verified == opened.size) "PASS" else "FAIL"}  $verified of ${opened.size} served their own bytes")
         } catch (t: Throwable) {
             fail("simultaneous fds", t)
         } finally {
-            open.forEach { runCatching { it.close() } }
+            opened.forEach { runCatching { it.second.close() } }
             thread.quitSafely()
         }
     }
