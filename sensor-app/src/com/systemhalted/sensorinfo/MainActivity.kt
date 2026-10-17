@@ -80,6 +80,8 @@ class MainActivity : Activity(), SensorEventListener {
     private var attitudeLabel = "no rotation source"
     private val rotMatrix = FloatArray(9)
     private val angles = FloatArray(3)
+    /** The heading reference in use, kept between readings: useTopEdge(). */
+    private var headingTopEdge: Boolean? = null
     private val rv3 = FloatArray(3)
     private val rv4 = FloatArray(4)
     private var tick = 0
@@ -284,12 +286,14 @@ class MainActivity : Activity(), SensorEventListener {
         // Pitch and roll come straight from getOrientation, but the heading does
         // not: its azimuth is undefined once the machine stands up. See
         // headingOf() in AttitudeView.kt.
-        val az = headingOf(rotMatrix)
+        val topEdge = useTopEdge(rotMatrix, headingTopEdge)
+        headingTopEdge = topEdge
+        val az = headingOf(rotMatrix, topEdge)
         attitude.setAttitude(
             rotMatrix, az,
             Math.toDegrees(angles[1].toDouble()),
             Math.toDegrees(angles[2].toDouble()),
-            "$attitudeLabel · heading via ${headingRefOf(rotMatrix)}"
+            "$attitudeLabel · heading via ${refName(topEdge)}"
         )
         val shown = attitude.demoHeading() ?: az
         compass.setHeading(shown, true, compassPoint(shown))

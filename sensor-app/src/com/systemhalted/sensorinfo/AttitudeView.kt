@@ -165,11 +165,37 @@ internal fun withAlpha(color: Int, alpha: Int) = (color and 0x00FFFFFF) or (alph
  * Row-major R maps device vectors to world (East, North, Up), so device +Y
  * lands at (R[1], R[4], R[7]) and device +Z at (R[2], R[5], R[8]).
  */
-internal fun useTopEdge(m: FloatArray): Boolean =
-    hypot(m[1].toDouble(), m[4].toDouble()) >= hypot(m[2].toDouble(), m[5].toDouble())
+internal fun useTopEdge(m: FloatArray): Boolean = useTopEdge(m, null)
 
-internal fun headingOf(m: FloatArray): Double {
-    val az = if (useTopEdge(m)) {
+/*
+ * The same choice with memory, which is what the live view and the demo use.
+ *
+ * The two references agree as a laptop tilts back, but not as a machine rolls
+ * onto its side edge: there the top edge and the screen back are BOTH
+ * horizontal, at right angles to each other, and that pose is reachable from
+ * flat (where the top edge was the reference) and from upright (where the
+ * screen back was). Any fixed tie-break makes one of those paths jump 90
+ * degrees at exactly 90 of roll -- demo pose 3 read 270 straight after pose 2
+ * read 0. So the reference in use is kept until the other one's horizontal
+ * projection is longer by REF_HYSTERESIS, and [wasTopEdge] null (no history)
+ * falls back to the plain comparison.
+ */
+internal const val REF_HYSTERESIS = 0.1
+
+internal fun useTopEdge(m: FloatArray, wasTopEdge: Boolean?): Boolean {
+    val top = hypot(m[1].toDouble(), m[4].toDouble())
+    val back = hypot(m[2].toDouble(), m[5].toDouble())
+    return when (wasTopEdge) {
+        null -> top >= back
+        true -> top + REF_HYSTERESIS >= back
+        false -> top > back + REF_HYSTERESIS
+    }
+}
+
+internal fun headingOf(m: FloatArray): Double = headingOf(m, useTopEdge(m))
+
+internal fun headingOf(m: FloatArray, topEdge: Boolean): Double {
+    val az = if (topEdge) {
         Math.toDegrees(atan2(m[1].toDouble(), m[4].toDouble()))
     } else {
         Math.toDegrees(atan2(-m[2].toDouble(), -m[5].toDouble()))
@@ -177,8 +203,9 @@ internal fun headingOf(m: FloatArray): Double {
     return if (az < 0) az + 360.0 else az
 }
 
-internal fun headingRefOf(m: FloatArray): String =
-    if (useTopEdge(m)) "top edge" else "screen back"
+internal fun headingRefOf(m: FloatArray): String = refName(useTopEdge(m))
+
+internal fun refName(topEdge: Boolean): String = if (topEdge) "top edge" else "screen back"
 
 /*
  * The view's projection and culling arithmetic, lifted out of AttitudeView as
@@ -241,6 +268,7 @@ class AttitudeView(context: Context) : View(context) {
     private var curRoll = 0.0
     private var curLive = false
     private var curLabel = ""
+    private var demoTopEdge = true
 
     init {
         setOnClickListener { selectDemo(if (demo >= DEMO_R.size - 1) -1 else demo + 1) }
@@ -250,7 +278,10 @@ class AttitudeView(context: Context) : View(context) {
         demo = i
         if (i >= 0) {
             SensorManager.getOrientation(DEMO_R[i], tmpAngles)
-            demoAz = headingOf(DEMO_R[i])
+            // The cycle carries the reference from pose to pose, as moving
+            // the machine would; entering it from live starts afresh.
+            demoTopEdge = useTopEdge(DEMO_R[i], if (i == 0) null else demoTopEdge)
+            demoAz = headingOf(DEMO_R[i], demoTopEdge)
             demoPitch = Math.toDegrees(tmpAngles[1].toDouble())
             demoRoll = Math.toDegrees(tmpAngles[2].toDouble())
         }

@@ -61,6 +61,37 @@ private fun rotationMatrixFromQuaternion(x: Double, y: Double, z: Double, w: Dou
  * edge's is for every tilt < 90. That is the identity the heading's
  * continuity claim rests on, derived here rather than read off the code.
  */
+/** Row-major R from where device X, Y and Z land in (East, North, Up). */
+private fun fromColumns(x: DoubleArray, y: DoubleArray, z: DoubleArray) = FloatArray(9) { i ->
+    val row = i / 3
+    when (i % 3) { 0 -> x[row]; 1 -> y[row]; else -> z[row] }.toFloat()
+}
+
+/*
+ * Demo pose 2 -- upright, X = East, Y = Up, Z = South -- rolled about the
+ * screen normal by roll degrees, left edge going down: X = cos East + sin Up,
+ * Y = cos Up + sin West, Z = South. At 90 that is demo pose 3 (X = Up,
+ * Y = West, Z = South). East x Up = South, so it is right-handed throughout.
+ */
+private fun rolledUpright(rollDeg: Double): FloatArray {
+    val r = rollDeg * PI / 180.0
+    return fromColumns(doubleArrayOf(cos(r), 0.0, sin(r)),
+                       doubleArrayOf(-sin(r), 0.0, cos(r)),
+                       doubleArrayOf(0.0, -1.0, 0.0))
+}
+
+/*
+ * Flat on its back, top edge north -- X = East, Y = North, Z = Up -- rolled
+ * about the top edge, left edge going down: X = cos East + sin Up, Y = North,
+ * Z = cos Up + sin West. At 90: X = Up, Y = North, Z = West (Up x North = West).
+ */
+private fun rolledFlat(rollDeg: Double): FloatArray {
+    val r = rollDeg * PI / 180.0
+    return fromColumns(doubleArrayOf(cos(r), 0.0, sin(r)),
+                       doubleArrayOf(0.0, 1.0, 0.0),
+                       doubleArrayOf(-sin(r), 0.0, cos(r)))
+}
+
 private fun laptop(yawDeg: Double, tiltDeg: Double): FloatArray {
     val a = yawDeg * PI / 180.0
     val t = tiltDeg * PI / 180.0
@@ -220,6 +251,41 @@ fun main() = suite("sensor-app") {
         assertNear(270.0, headingOf(laptop(270.0, 0.0)), 1e-4, "west")
     }
 
+    test("rolling an upright machine onto its edge and past keeps its heading") {
+        // Upright, screen south (demo pose 2), rolled about the screen normal
+        // until the left edge is down (pose 3) and on to upside down. The
+        // back faces north throughout, so the heading is 0 throughout; the
+        // stateless choice flipped to the top edge's 270 at exactly 90.
+        var ref: Boolean? = null
+        for (step in 0..36) {
+            val m = rolledUpright(step * 5.0)
+            val top = useTopEdge(m, ref).also { ref = it }
+            val h = headingOf(m, top)
+            assertTrue(bearingDiff(0.0, h) < 1e-3, "roll ${step * 5} read $h via ${refName(top)}")
+        }
+    }
+
+    test("rolling a flat machine onto its edge keeps its heading") {
+        // The same edge pose reached from flat: there the top edge was the
+        // reference, it still points north, and it must stay the reference.
+        var ref: Boolean? = null
+        for (step in 0..18) {
+            val m = rolledFlat(step * 5.0)
+            val top = useTopEdge(m, ref).also { ref = it }
+            val h = headingOf(m, top)
+            assertTrue(bearingDiff(0.0, h) < 1e-3, "roll ${step * 5} read $h via ${refName(top)}")
+        }
+    }
+
+    test("hysteresis still lets a laptop tilt hand over to the screen back") {
+        var ref: Boolean? = null
+        var tilt = 0.0
+        while (tilt <= 90.0) { ref = useTopEdge(laptop(70.0, tilt), ref); tilt += 2.5 }
+        assertEquals(false, ref)
+        while (tilt >= 0.0) { ref = useTopEdge(laptop(70.0, tilt), ref); tilt -= 2.5 }
+        assertEquals(true, ref)
+    }
+
     // ---- the demo poses --------------------------------------------------
 
     test("every demo pose is a proper rotation") {
@@ -246,6 +312,18 @@ fun main() = suite("sensor-app") {
         assertNear(90.0, headingOf(DEMO_R[4]), 1e-6, "pose 4")
         assertEquals("screen back", headingRefOf(DEMO_R[2]))
         assertEquals("screen back", headingRefOf(DEMO_R[4]))
+    }
+
+    test("demo pose 3, reached by tapping through from pose 2, reads north") {
+        // The cycle as AttitudeView.selectDemo walks it. Pose 3's name says
+        // the screen faces south, so its back faces north: 0, not 270.
+        var ref: Boolean? = null
+        val headings = DEMO_R.mapIndexed { i, m ->
+            val top = useTopEdge(m, if (i == 0) null else ref).also { ref = it }
+            headingOf(m, top)
+        }
+        assertNear(0.0, bearingDiff(0.0, headings[3]), 1e-6, "pose 3")
+        assertNear(90.0, headings[4], 1e-6, "pose 4")
     }
 
     // ---- projection and culling -----------------------------------------
@@ -369,6 +447,11 @@ fun main() = suite("sensor-app") {
         assertEquals("NNW", compassPoint(-22.5))
     }
 
+    test("an undefined heading has no compass point") {
+        assertEquals("?", compassPoint(Double.NaN))
+        assertEquals("?", compassPoint(Double.POSITIVE_INFINITY))
+    }
+
     // ---- formatValues ----------------------------------------------------
 
     test("no reading yet says so") {
@@ -381,6 +464,19 @@ fun main() = suite("sensor-app") {
         assertEquals(
             "x   +0.0000   y   +0.0000   z   +9.8100  m/s²\n|a| = 9.8100 m/s²",
             formatValues(Sensor.TYPE_ACCELEROMETER, floatArrayOf(0f, 0f, 9.81f)))
+    }
+
+    test("readings are written the same way in every locale") {
+        // Compared verbatim against in_*_raw and docs/18 on the host side.
+        for (locale in listOf(Locale.GERMANY, Locale.FRANCE, Locale.forLanguageTag("ar-EG"))) {
+            Locale.setDefault(locale)
+            try {
+                assertEquals(
+                    "x   +0.0000   y   +0.0000   z   +9.8100  m/s²\n|a| = 9.8100 m/s²",
+                    formatValues(Sensor.TYPE_ACCELEROMETER, floatArrayOf(0f, 0f, 9.81f)), "$locale")
+                assertEquals("12.3 lx", formatValues(Sensor.TYPE_LIGHT, floatArrayOf(12.34f)), "$locale")
+            } finally { Locale.setDefault(Locale.US) }
+        }
     }
 
     test("the magnitude line is the Euclidean norm of the first three values") {
