@@ -293,6 +293,11 @@ host, a container or privilege:
   `artifacts/wifi/stage3/ie-synthesis-check.txt`, decoded through the AOSP-parser mirror and
   confirmed on device — not today's output pasted back. Marking transition mode MFP-*required*
   fails it.
+  `tests/cpp/test_sensor_iio.cpp` runs `SensorIIO` end to end against a fake IIO sysfs tree:
+  docs/18's three recorded poses must come out as +Z, +Y and +X, and docs/14's hub quaternion as
+  azimuth 102.93° and pitch −62.24°. Putting docs/18's sign bug back fails 7 of its 59 checks. It
+  is a unity build behind a compile-time `IIO_ROOT` guard — the shipped daemon cannot be
+  redirected — with `tests/cpp/shim/` standing in for the gbinder and gutil headers.
 - **selftest** — the three `artifacts/*/selftest.sh` `%check` scripts.
 - **lint** — `shellcheck -S error` (92 scripts) and `ruff --select F` (28 Python files). Both were
   clean at adoption apart from one F541, fixed; **shellcheck's 33 warnings are not gated yet.**

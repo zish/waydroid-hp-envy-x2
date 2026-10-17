@@ -25,7 +25,11 @@
 
 namespace waydroid {
 
+/* Overridable only at compile time, so the shipped binary cannot be pointed
+ * elsewhere: tests/cpp/test_sensor_iio.cpp defines it to a fake sysfs tree. */
+#ifndef IIO_ROOT
 #define IIO_ROOT "/sys/bus/iio/devices"
+#endif
 #define CONFIG_PATH "/etc/waydroid-sensors.conf"
 
 /*

@@ -66,10 +66,16 @@ run_cpp() {
 		# A test names the translation units it links in its header comment,
 		# " * sources: wifi/BeaconIes.cpp", repo-relative. Header-only code
 		# under test needs no line.
+		# " * includes: tests/cpp/shim sensors" adds -I directories the
+		# same way, searched before the default wifi/.
 		extra=$(sed -n 's#^ *\*\{0,1\} *sources: *##p' "$src" |
 			tr ' ' '\n' | sed "/^$/d; s#^#$repo/#")
-		# shellcheck disable=SC2046,SC2086  # pkg-config output and $extra are word lists
-		if "$cxx" -std=gnu++17 -Wall -Wextra -Werror -I"$repo/wifi" \
+		incs=$(sed -n 's#^ *\*\{0,1\} *includes: *##p' "$src" |
+			tr ' ' '\n' | sed "/^$/d; s#^#-I$repo/#")
+		# Same warning set as the daemons' own builds, plus -Werror.
+		# shellcheck disable=SC2046,SC2086  # pkg-config output, $incs and $extra are word lists
+		if "$cxx" -std=gnu++17 -Wall -Wextra -Wno-unused-parameter -Werror \
+			$incs -I"$repo/wifi" \
 			$(pkg-config --cflags glib-2.0) "$src" $extra \
 			$(pkg-config --libs glib-2.0) -o "$bin" && "$bin"; then
 			:
