@@ -28,6 +28,8 @@
 #            (2026-10-17: 0 errors in 92 shell scripts, 1 F541 in 28 Python
 #            files, fixed), so the gate costs nothing today. Shellcheck's 33
 #            warnings are NOT gated yet -- raise -S once they are worked off.
+#   policy   tests/policy.py, the repository rules no compiler checks: every
+#            tracked binary is in tests/binary-allowlist with its sha256.
 #
 # A suite whose toolchain is missing is SKIPPED with a message -- except under
 # CI=true (set by GitHub Actions) or REQUIRE_ALL=1, where a skip is a failure.
@@ -195,7 +197,12 @@ run_lint() {
 	cd - >/dev/null
 }
 
-suites=${*:-python cpp selftest kotlin lint}
+run_policy() {
+	command -v python3 >/dev/null 2>&1 || { skip policy "python3 not found"; return 0; }
+	python3 -B "$here/policy.py" || failed="$failed policy"
+}
+
+suites=${*:-python cpp selftest kotlin lint policy}
 for s in $suites; do
 	echo "== $s"
 	case $s in
@@ -204,6 +211,7 @@ for s in $suites; do
 	selftest) run_selftest ;;
 	kotlin)   run_kotlin ;;
 	lint)     run_lint ;;
+	policy)   run_policy ;;
 	*) echo "unknown suite: $s" >&2; exit 2 ;;
 	esac
 done

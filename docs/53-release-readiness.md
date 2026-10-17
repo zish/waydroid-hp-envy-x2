@@ -273,7 +273,7 @@ Trivy's database alone is 50–200 MB.
 ### Unit tests and the first workflow — added 2026-10-17
 
 **`tests/run.sh` is the one entry point**, run by lefthook's `pre-push` and by
-[.github/workflows/ci.yml](../.github/workflows/ci.yml) alike. It has four suites, and none needs a
+[.github/workflows/ci.yml](../.github/workflows/ci.yml) alike. It has six suites, and none needs a
 host, a container or privilege:
 
 - **python** — stdlib `unittest` over the daemons' decision logic, loaded straight out of
@@ -309,6 +309,13 @@ host, a container or privilege:
   behaviour. A private member made `internal` for a test says so in a comment.
 - **lint** — `shellcheck -S error` (92 scripts) and `ruff --select F` (28 Python files). Both were
   clean at adoption apart from one F541, fixed; **shellcheck's 33 warnings are not gated yet.**
+- **policy** — [tests/policy.py](../tests/policy.py), stdlib only, for the repository's own rules.
+  **binaries**: every tracked binary must be in
+  [tests/binary-allowlist](../tests/binary-allowlist) *with its sha256*, so a new vendor `.so` fails
+  CI instead of relying on review, and an allowed path cannot quietly take on other bytes. The 23
+  files it lists are docs/54's inventory, the non-compliant ones marked as grandfathered. Adopting
+  it found `bin/__pycache__/magn-calibrate.cpython-313.pyc` still tracked, which docs/54 had said to
+  delete; it is gone.
 
 **Every Kotlin app has tests as of 2026-10-17**, 217 in all: appfuse-probe 26, bt-app 20,
 drm-probe 18, media-app 12, pw-app 42, quat-monitor 38, sensor-app 33, touch-probe 28. Every

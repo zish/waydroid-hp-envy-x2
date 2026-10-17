@@ -42,6 +42,9 @@ their weight in git history — see *Deleting them from `HEAD`…* for why that 
 
 `bin/__pycache__/magn-calibrate.cpython-313.pyc` is also tracked, and is neither evidence nor
 payload: it is build spoil that predates the `.gitignore` entry covering it. Delete it.
+**Deleted 2026-10-17**, when [tests/binary-allowlist](../tests/binary-allowlist) made this
+inventory a CI check: a binary not listed there, or whose sha256 has moved, now fails
+`tests/run.sh policy`.
 
 ## What makes this cheap: the bytes are already on the user's machine
 
