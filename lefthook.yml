@@ -32,7 +32,7 @@ pre-push:
       # about a second in all. Suites whose toolchain is missing here are
       # skipped with a message; GitHub Actions runs the same script with CI=true,
       # where a skip is a failure. .github/workflows/ci.yml calls tests/run.sh
-      # directly rather than `lefthook run pre-push`, because signed-commits
-      # needs the signer's public key in the local keyring and a runner has none.
+      # directly rather than `lefthook run pre-push`, and runs signed-commits as
+      # its own job against .github/commit-signers.asc.
       run: tests/run.sh
       fail_text: "tests/run.sh failed -- the suite and the check are named above"

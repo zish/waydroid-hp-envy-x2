@@ -36,6 +36,17 @@
 # It is deliberately loud. There is no config setting for it, so it cannot be
 # turned on once and forgotten.
 #
+# THE KEYS
+#
+# %G? verifies against whatever keyring the checking machine has, so a fresh
+# clone reports every commit as E until the signers' public keys are imported:
+#
+#     gpg --import .github/commit-signers.asc
+#
+# That file is also the whole list CI accepts -- its `signatures` job imports
+# nothing else (on a pull request, the base branch's copy). Adding a signer is
+# an edit to it.
+#
 # INSTALLING THE HOOK
 #
 # Hooks live in .git/, which is not version-controlled, so a fresh clone has no

@@ -345,7 +345,14 @@ locally `lint` skips.
 scratch directory: 24 of 26 build and test-install passes 133 checks; `sensord` and `wifid` fail
 on `gbinder.h`, which is exactly what the Fedora container's `dnf builddep` supplies. **The Fedora
 job itself has not run yet** — there is no container runtime here — so its first run on GitHub is
-the verification. The signed-commit gate stays local only: `%G?` needs the signer's public key.
+the verification.
+
+**The signed-commit gate runs in CI as well, from 2026-10-17** — the `signatures` job, against
+only the keys in [.github/commit-signers.asc](../.github/commit-signers.asc) (on a pull request,
+the base branch's copy, so a PR cannot vouch for itself by adding a key). It had been local only
+because `%G?` needs the signer's public key; committing that key was all it took. Rehearsed in an
+empty `GNUPGHOME`: all 225 commits then in the branch verify with that one file imported, and the gate fails with
+nothing imported.
 
 ### One blocker for the F-Droid half
 

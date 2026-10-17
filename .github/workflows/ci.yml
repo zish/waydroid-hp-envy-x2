@@ -17,11 +17,15 @@
 #          --prebuilt. --privileged is for test-install.sh's `unshare -r`,
 #          which Docker's default seccomp profile refuses.
 #
+#   signatures
+#          bin/check-signed-commits.sh over every commit reachable from the
+#          tip, against ONLY the keys in .github/commit-signers.asc. The same
+#          gate as the local pre-push hook; here it also catches a push made
+#          with the hook absent or bypassed. Signing is load-bearing in this
+#          repository -- it is what makes committed build output acceptable
+#          (AGENTS.md, "What we built ourselves is not external").
+#
 # Not here, deliberately:
-#   - The signed-commit gate (bin/check-signed-commits.sh). It reads %G?,
-#     which needs the signer's public key in the local keyring; a runner has
-#     none and would report every commit as unverifiable. GitHub's own
-#     "Verified" badge is the server-side equivalent.
 #   - The bin/*-test.sh integration tests. They drive a live Android over ssh.
 #   - Signing, publishing, CodeQL and scanners -- docs/53's later steps.
 name: ci
@@ -67,6 +71,31 @@ jobs:
         run: tests/kotlin/fetch-deps.sh
       - name: tests/run.sh
         run: tests/run.sh
+
+  signatures:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole history: the gate checks every commit in the branch.
+          fetch-depth: 0
+          # On a pull request, the PR's own tip, not the unsigned merge
+          # commit GitHub synthesises for it.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Import the accepted signing keys
+        # On a pull request the key file comes from the BASE branch, so a PR
+        # cannot vouch for itself by adding its own key. %G? accepts any key
+        # in the keyring, so this file is the whole list of who may sign.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            git show "origin/$BASE_REF:.github/commit-signers.asc"
+          else
+            cat .github/commit-signers.asc
+          fi | gpg --batch --import
+      - name: bin/check-signed-commits.sh
+        run: bin/check-signed-commits.sh --branch HEAD
 
   rpm:
     runs-on: ubuntu-24.04
