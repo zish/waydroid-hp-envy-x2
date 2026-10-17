@@ -1,3 +1,10 @@
+* Sat Oct 17 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
+- The feature file was not well-formed XML: its comment contained "--",
+  which XML forbids inside a comment. Android 13's parser tolerated it, so
+  nothing changed on bigtab01, but a strict parser would reject the file and
+  the feature would be silently absent. Found by tests/policy.py's new xml
+  check. The declaration itself is unchanged.
+
 * Thu Sep 24 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
 - First package. One file, and the one that makes the other three Wi-Fi
   packages mean anything.

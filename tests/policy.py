@@ -22,6 +22,13 @@ the dev box, in lefthook's pre-push and on a GitHub runner -- tests/run.sh's
              otherwise breaks them silently. Links outside the repository are
              not followed: that needs network, and their rot is not ours.
 
+  xml        Every tracked XML file parses. Most are Android's: app manifests,
+             resources, and the overlay's feature and VINTF files. A malformed
+             one of those does not fail anywhere visible -- PackageManager or
+             the VINTF loader skips it and the feature is simply absent, the
+             same silence docs/31's stage 0 had to diagnose by hand. xmllint
+             would do, but the stdlib parser needs no install.
+
 Usage:
   tests/policy.py [check ...]     # default: every check
 """
@@ -31,6 +38,7 @@ import os
 import re
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -177,9 +185,29 @@ def check_links(paths):
     return len(docs), problems
 
 
+def is_xml(path):
+    """By name, or by an XML declaration for files named otherwise."""
+    if path.endswith(".xml") or ".xml." in os.path.basename(path):
+        return True
+    with open(os.path.join(REPO, path), "rb") as f:
+        return f.read(5) == b"<?xml"
+
+
+def check_xml(paths):
+    files = [p for p in paths if is_xml(p)]
+    problems = []
+    for p in files:
+        try:
+            ET.parse(os.path.join(REPO, p))
+        except ET.ParseError as e:
+            problems.append(f"{p}: {e}")
+    return len(files), problems
+
+
 CHECKS = {
     "binaries": (check_binaries, "binary files"),
     "links": (check_links, "Markdown files"),
+    "xml": (check_xml, "XML files"),
 }
 
 

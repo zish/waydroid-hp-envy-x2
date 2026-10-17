@@ -7,7 +7,7 @@
   suspected reason WifiService never starts and Settings shows no Wi-Fi panel.
 
   Stage 0 of docs/29-wifi-plan.md. Deployed to
-  /var/lib/waydroid/overlay/system/etc/permissions/ -- reversible by deleting it.
+  /var/lib/waydroid/overlay/system/etc/permissions/; reversible by deleting it.
 -->
 <permissions>
     <feature name="android.hardware.wifi" />

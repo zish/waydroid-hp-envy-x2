@@ -319,6 +319,12 @@ host, a container or privilege:
   **links**: every relative link in the 95 Markdown files names a tracked file, and every
   `#anchor` into a Markdown file names a heading there, by GitHub's slug rules — 1,057 links, 29 of
   them anchored, all resolving at adoption. External URLs are not fetched.
+  **xml**: every tracked XML file parses — the app manifests and resources and the overlay's
+  feature and VINTF files, 31 in all, with the stdlib parser rather than `xmllint`. A malformed
+  feature file fails nowhere visible: the feature is simply absent. **Adopting it found one**:
+  `android.hardware.wifi.xml`, the Stage 0 file, had `--` inside a comment, which XML forbids.
+  Android 13's parser tolerated it, so nothing changed on bigtab01; the comment is fixed and
+  `wifi-framework` is 1.0.1, not installed anywhere yet.
 
 **Every Kotlin app has tests as of 2026-10-17**, 217 in all: appfuse-probe 26, bt-app 20,
 drm-probe 18, media-app 12, pw-app 42, quat-monitor 38, sensor-app 33, touch-probe 28. Every
