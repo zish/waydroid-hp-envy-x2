@@ -1163,8 +1163,8 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
 
 - `docs/` — numbered investigation notes, one per topic
 - `tests/` — the offline tests: `tests/run.sh` runs stdlib `unittest` over the daemons' decision
-  logic, the C++ mapping tests in `tests/cpp/`, the `artifacts/*/selftest.sh` scripts, and the
-  shellcheck/ruff gate. Same script in lefthook's `pre-push` and in
+  logic, the C++ tests in `tests/cpp/`, each Kotlin app's `<app>/test/Tests.kt`, the
+  `artifacts/*/selftest.sh` scripts, and the shellcheck/ruff gate. Same script in lefthook's `pre-push` and in
   [.github/workflows/ci.yml](.github/workflows/ci.yml), whose `rpm` job also builds every
   shipped `.mod` from source on Fedora. Distinct from `bin/*-test.sh`, which need the live host.
   See [docs/53](docs/53-release-readiness.md)

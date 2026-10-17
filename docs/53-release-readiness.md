@@ -299,6 +299,14 @@ host, a container or privilege:
   is a unity build behind a compile-time `IIO_ROOT` guard — the shipped daemon cannot be
   redirected — with `tests/cpp/shim/` standing in for the gbinder and gutil headers.
 - **selftest** — the three `artifacts/*/selftest.sh` `%check` scripts.
+- **kotlin** — `<app>/test/Tests.kt` per app, compiled in one `kotlinc` pass with every app's
+  `src/` against `android.jar` and run on the JVM by a forty-line harness
+  ([tests/kotlin/Harness.kt](../tests/kotlin/Harness.kt)) — no Gradle, no JUnit. `android.jar` is
+  stubs that throw, so only logic that needs no `Context` is reachable, which is also the right
+  shape for it; a real `org.json` goes ahead of the stubs, fetched by
+  `tests/kotlin/fetch-deps.sh` into `build/test-deps` and SHA-256 checked, never committed.
+  Android's `org.json` is a different implementation of the same API, so tests stick to shared
+  behaviour. A private member made `internal` for a test says so in a comment.
 - **lint** — `shellcheck -S error` (92 scripts) and `ruff --select F` (28 Python files). Both were
   clean at adoption apart from one F541, fixed; **shellcheck's 33 warnings are not gated yet.**
 

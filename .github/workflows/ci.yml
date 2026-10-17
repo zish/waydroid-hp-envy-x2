@@ -2,8 +2,8 @@
 #
 # Two jobs, split by what they need, not by how long they take:
 #
-#   tests  tests/run.sh with CI=true -- unit tests, the RPMs' %check
-#          self-tests, shellcheck and ruff. The same script lefthook runs
+#   tests  tests/run.sh with CI=true -- Python, C++ and Kotlin unit tests, the
+#          RPMs' %check self-tests, shellcheck and ruff. The same script lefthook runs
 #          before a push, so nothing can pass locally and mean something
 #          different here. CI=true turns a missing toolchain from a SKIP into a
 #          failure, so this job cannot quietly stop testing something.
@@ -54,6 +54,17 @@ jobs:
             g++ pkg-config libglib2.0-dev python3 python3-dbus python3-gi \
             openssl shellcheck
           pipx install ruff==0.16.10
+      - name: Android platform (android.jar for the Kotlin tests)
+        # The runner image ships an SDK; this makes sure the one platform the
+        # apps compile against is in it. JAVA_HOME is the image's JDK 17.
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-33" >/dev/null
+      - uses: actions/cache@v4
+        with:
+          path: build/test-deps
+          key: test-deps-${{ hashFiles('tests/kotlin/fetch-deps.sh') }}
+      - name: Kotlin test dependencies
+        # Pinned and SHA-256 checked; see the script header.
+        run: tests/kotlin/fetch-deps.sh
       - name: tests/run.sh
         run: tests/run.sh
 
