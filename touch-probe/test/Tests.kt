@@ -53,9 +53,62 @@ private class Rig {
     }
 
     val live get() = ledger.live.keys.toList()
+
+    val buttons = ButtonGestures()
+
+    /** One MotionEvent through TouchView.onTouchEvent: [onButton] says whether
+     *  a DOWN landed on RESET, which resets and is swallowed with its gesture. */
+    fun touch(action: Int, ids: List<Int>, actionId: Int = -1, onButton: Boolean = false) {
+        if (buttons.swallow(action, action == DOWN && onButton)) {
+            if (action == DOWN && onButton) ledger.reset()
+            return
+        }
+        event(action, ids, actionId)
+    }
 }
 
 fun main() = suite("touch-probe") {
+
+    // ---- HUD buttons -------------------------------------------------------
+
+    test("a tap on RESET, wobble included, leaves the count at zero") {
+        val r = Rig()
+        r.touch(DOWN, listOf(0), onButton = true)
+        r.touch(MOVE, listOf(0))
+        r.touch(MOVE, listOf(0))
+        r.touch(UP, listOf(0), actionId = 0)
+        assertEquals(0, r.ledger.maxConcurrent)
+        assertEquals(0, r.ledger.eventCount)
+        assertEquals(emptyList(), r.live)
+    }
+
+    test("the gesture after a RESET tap is counted normally") {
+        val r = Rig()
+        r.touch(DOWN, listOf(0), onButton = true)
+        r.touch(UP, listOf(0), actionId = 0)
+        r.touch(DOWN, listOf(0))
+        r.touch(POINTER_DOWN, listOf(0, 1), actionId = 1)
+        r.touch(POINTER_UP, listOf(0, 1), actionId = 1)
+        r.touch(UP, listOf(0), actionId = 0)
+        assertEquals(2, r.ledger.maxConcurrent)
+        assertEquals(4, r.ledger.eventCount)
+    }
+
+    test("a cancelled button gesture also ends the swallowing") {
+        val r = Rig()
+        r.touch(DOWN, listOf(0), onButton = true)
+        r.touch(CANCEL, listOf(0))
+        r.touch(DOWN, listOf(3))
+        assertEquals(1, r.ledger.maxConcurrent)
+    }
+
+    test("a gesture that starts off the buttons is never swallowed") {
+        val b = ButtonGestures()
+        assertFalse(b.swallow(DOWN, false))
+        // onButton is only read at DOWN, so a MOVE over RESET still counts.
+        assertFalse(b.swallow(MOVE, true))
+        assertFalse(b.swallow(UP, false))
+    }
 
     // ---- PointerLedger: the concurrent count -----------------------------
 

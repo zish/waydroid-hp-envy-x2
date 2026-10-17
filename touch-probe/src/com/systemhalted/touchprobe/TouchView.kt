@@ -108,6 +108,7 @@ class TouchView(context: Context) : View(context) {
     // measurement this app exists to make. A canvas target is consumed in
     // onTouchEvent, on the same terms as RESET, where the rule is written down.
     private val aboutRect = RectF()
+    private val buttonGestures = ButtonGestures()
     private val tmpRect = RectF()
 
     init {
@@ -132,16 +133,13 @@ class TouchView(context: Context) : View(context) {
         summaryText(maxConcurrent, eventCount, deviceLabel, sourceLabel, toolTypesSeen, width, height)
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.actionMasked == MotionEvent.ACTION_DOWN &&
-            resetRect.contains(event.x, event.y)
-        ) {
-            reset()
-            return true
-        }
-        if (event.actionMasked == MotionEvent.ACTION_DOWN &&
-            aboutRect.contains(event.x, event.y)
-        ) {
-            onAbout?.invoke()
+        val down = event.actionMasked == MotionEvent.ACTION_DOWN
+        val onReset = down && resetRect.contains(event.x, event.y)
+        val onAboutButton = down && aboutRect.contains(event.x, event.y)
+        // The whole gesture, not just its DOWN -- see ButtonGestures.
+        if (buttonGestures.swallow(event.actionMasked, onReset || onAboutButton)) {
+            if (onReset) reset()
+            if (onAboutButton) onAbout?.invoke()
             return true
         }
         ingest(event, hover = false)

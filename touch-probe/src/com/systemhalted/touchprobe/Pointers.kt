@@ -137,6 +137,32 @@ internal class PointerLedger<C>(private val make: (Int) -> C) {
     }
 }
 
+/**
+ * Keeps a gesture that began on a HUD button (RESET, About) out of the count.
+ *
+ * Consuming only the button's ACTION_DOWN is not enough: returning true from
+ * onTouchEvent claims the whole gesture, so its MOVEs and UP still arrive, and
+ * once they reached the ledger a tap on RESET counted itself -- the peak read
+ * 1 before anyone had touched the glass. So the decision is made once, at
+ * ACTION_DOWN, and holds for every event up to and including the UP or
+ * CANCEL that ends that gesture.
+ *
+ * The cost: a second finger that lands elsewhere while the button is still
+ * held is swallowed with it. Pressing RESET with one hand while measuring
+ * with the other is not a measurement anyone can make anyway.
+ */
+internal class ButtonGestures {
+    private var swallowing = false
+
+    /** Whether to drop this event. [downOnButton] is only read for ACTION_DOWN. */
+    fun swallow(action: Int, downOnButton: Boolean): Boolean {
+        if (action == MotionEvent.ACTION_DOWN) swallowing = downOnButton
+        val drop = swallowing
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) swallowing = false
+        return drop
+    }
+}
+
 /** The report file's measurement block; MainActivity wraps it in a header
  *  and the declared-feature list. */
 internal fun summaryText(maxConcurrent: Int, eventCount: Int, device: String, source: String,
