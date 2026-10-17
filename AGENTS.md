@@ -1162,6 +1162,12 @@ shipped in a package, and it came from the host rather than from a third party.
 and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-binaries.md).
 
 - `docs/` — numbered investigation notes, one per topic
+- `tests/` — the offline tests: `tests/run.sh` runs stdlib `unittest` over the daemons' decision
+  logic, the C++ mapping tests in `tests/cpp/`, the `artifacts/*/selftest.sh` scripts, and the
+  shellcheck/ruff gate. Same script in lefthook's `pre-push` and in
+  [.github/workflows/ci.yml](.github/workflows/ci.yml), whose `rpm` job also builds every
+  shipped `.mod` from source on Fedora. Distinct from `bin/*-test.sh`, which need the live host.
+  See [docs/53](docs/53-release-readiness.md)
 - `bin/` — helper scripts for working with the host, incl. stdlib-only V4L2 probes
   (`v4l2-formats.py`, `v4l2-curfmt.py`, `v4l2-grab.py`) written because `v4l-utils` is not
   installed and layering a package on an Atomic host costs a reboot, plus the sensor tools

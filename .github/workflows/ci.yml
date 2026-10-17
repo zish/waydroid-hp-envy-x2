@@ -1,0 +1,91 @@
+# Continuous integration for waydroid-hp-envy-x2.
+#
+# Two jobs, split by what they need, not by how long they take:
+#
+#   tests  tests/run.sh with CI=true -- unit tests, the RPMs' %check
+#          self-tests, shellcheck and ruff. The same script lefthook runs
+#          before a push, so nothing can pass locally and mean something
+#          different here. CI=true turns a missing toolchain from a SKIP into a
+#          failure, so this job cannot quietly stop testing something.
+#
+#   rpm    Every shipped modification built FROM SOURCE on Fedora, then
+#          installed, edited and uninstalled by packaging/test-install.sh. This
+#          is the one build the dev box cannot do: sensord and wifid compile
+#          against Fedora's libgbinder-devel/libglibutil-devel, which is why
+#          docs/53 says "the two compiled daemons cannot be built off this dev
+#          box at all" and why build-mod.sh has --prebuilt. Here they need no
+#          --prebuilt. --privileged is for test-install.sh's `unshare -r`,
+#          which Docker's default seccomp profile refuses.
+#
+# Not here, deliberately:
+#   - The signed-commit gate (bin/check-signed-commits.sh). It reads %G?,
+#     which needs the signer's public key in the local keyring; a runner has
+#     none and would report every commit as unverifiable. GitHub's own
+#     "Verified" badge is the server-side equivalent.
+#   - The bin/*-test.sh integration tests. They drive a live Android over ssh.
+#   - Signing, publishing, CodeQL and scanners -- docs/53's later steps.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchains
+        # python3-dbus and python3-gi so test_btd.py runs against the real
+        # bindings' type hierarchy rather than tests/_scripts.py's stand-in.
+        # shellcheck is preinstalled on the image but named so a newer image
+        # without it fails here, loudly, instead of in the lint suite.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            g++ pkg-config libglib2.0-dev python3 python3-dbus python3-gi \
+            openssl shellcheck
+          pipx install ruff==0.16.10
+      - name: tests/run.sh
+        run: tests/run.sh
+
+  rpm:
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:44
+      options: --privileged
+    steps:
+      - name: Install build tooling
+        # git before checkout, or actions/checkout falls back to the REST API
+        # and the tree has no .git for gen-spec.sh and friends.
+        run: |
+          dnf -y -q install git rpm-build rpmlint dnf-plugins-core \
+            systemd-rpm-macros util-linux findutils tar gzip
+      - uses: actions/checkout@v4
+      - name: Source packages
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/build-mod.sh --srpm --all
+      - name: Build dependencies
+        run: dnf -y -q builddep build/rpm/SRPMS/*.src.rpm
+      - name: Build and lint every shipped modification
+        # rpmlint reports here but does not gate: build-mod.sh runs it with
+        # `|| true` against waydroid-ext.rpmlintrc's accepted baseline.
+        run: packaging/build-mod.sh --lint --all
+      - name: Install / edit / uninstall test
+        run: packaging/test-install.sh --all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpms
+          path: |
+            build/rpm/RPMS/
+            build/rpm/SRPMS/
+          retention-days: 14

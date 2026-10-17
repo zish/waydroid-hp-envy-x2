@@ -446,7 +446,7 @@ def probe(name, node, secs, zero_hyst, set_hz, list_only, only,
                if a not in writable_hyst]
 
     print(f"\n=== {name} ({devn})")
-    print(f"  channels: " + "; ".join(str(c) for c in layout(allchans)[0]))
+    print("  channels: " + "; ".join(str(c) for c in layout(allchans)[0]))
     if others:
         print(f"  left disabled: {', '.join(others)}")
     print(f"  freq={rd(freq_attr) if freq_attr else '-'} "

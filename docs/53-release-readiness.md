@@ -270,6 +270,38 @@ binder-facing C++), **Trivy or Grype plus a `syft` SBOM** (the real exposure her
 prebuilt Android `.so` blobs), and `rpm -K` after signing. Do not put scanners in pre-commit:
 Trivy's database alone is 50–200 MB.
 
+### Unit tests and the first workflow — added 2026-10-17
+
+**`tests/run.sh` is the one entry point**, run by lefthook's `pre-push` and by
+[.github/workflows/ci.yml](../.github/workflows/ci.yml) alike. It has four suites, and none needs a
+host, a container or privilege:
+
+- **python** — stdlib `unittest` over the daemons' decision logic, loaded straight out of
+  `artifacts/` (they are extensionless executables, so `tests/_scripts.py` imports them by path).
+  `waydroid-mediad`'s disk selection — mostly its *refusals*, since the failure mode is mounting the
+  system disk into Android — `waydroid-restartd`'s choice of what to signal, `waydroid-btd`'s API
+  negotiation and certificate pin, and **`waydroid-wifi-sync`'s bash UUIDv5 against Python's
+  `uuid.uuid5`**, because ownership of NM profiles is *by* that UUID (docs/59).
+- **cpp** — `tests/cpp/test_nm_mapping.cpp`, one `g++` line against glib only. To make it possible
+  the four pure NM→Android translations moved out of `NmBackend.cpp` into
+  [wifi/NmMapping.h](../wifi/NmMapping.h), with no behaviour change. It checks docs/59's claim
+  whole — all 61 representable dBm values survive the round trip through NM's own forward function
+  — and was **mutation-checked**: putting back the old `q/2 - 100` fails 66 of its 91 checks.
+- **selftest** — the three `artifacts/*/selftest.sh` `%check` scripts.
+- **lint** — `shellcheck -S error` (92 scripts) and `ruff --select F` (28 Python files). Both were
+  clean at adoption apart from one F541, fixed; **shellcheck's 33 warnings are not gated yet.**
+
+A suite whose toolchain is missing is skipped locally but **fails under `CI=true`**, so the runner
+cannot quietly stop testing something. Neither shellcheck nor ruff is installed on the dev box, so
+locally `lint` skips.
+
+**The `rpm` job is the build this box cannot do**: every shipped `.mod` from source on Fedora 44,
+`sensord` and `wifid` included, then `test-install.sh --all`. Rehearsed here with `TOP` in a
+scratch directory: 24 of 26 build and test-install passes 133 checks; `sensord` and `wifid` fail
+on `gbinder.h`, which is exactly what the Fedora container's `dnf builddep` supplies. **The Fedora
+job itself has not run yet** — there is no container runtime here — so its first run on GitHub is
+the verification. The signed-commit gate stays local only: `%G?` needs the signer's public key.
+
 ### One blocker for the F-Droid half
 
 Every APK build script auto-generates a **debug keystore with the password `android`** if one is
