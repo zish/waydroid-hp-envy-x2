@@ -3,7 +3,7 @@
 # Two jobs, split by what they need, not by how long they take:
 #
 #   tests  tests/run.sh with CI=true -- Python, C++ and Kotlin unit tests, the
-#          RPMs' %check self-tests, shellcheck and ruff. The same script lefthook runs
+#          RPMs' %check self-tests, shellcheck, ruff, actionlint and zizmor. The same script lefthook runs
 #          before a push, so nothing can pass locally and mean something
 #          different here. CI=true turns a missing toolchain from a SKIP into a
 #          failure, so this job cannot quietly stop testing something.
@@ -39,6 +39,11 @@ on:
 permissions:
   contents: read
 
+# Every action is pinned to a commit, not a tag: a tag can be moved to
+# different code after review, a commit cannot. The comment names the release;
+# .github/dependabot.yml proposes the bumps, and zizmor in tests/run.sh fails
+# on an unpinned `uses:`.
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -47,7 +52,9 @@ jobs:
   tests:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install toolchains
         # python3-dbus and python3-gi so test_btd.py runs against the real
         # bindings' type hierarchy rather than tests/_scripts.py's stand-in.
@@ -59,11 +66,13 @@ jobs:
             g++ pkg-config libglib2.0-dev python3 python3-dbus python3-gi \
             openssl shellcheck
           pipx install ruff==0.16.10
+          pipx install actionlint-py==1.7.12.25
+          pipx install zizmor==1.31.1
       - name: Android platform (android.jar for the Kotlin tests)
         # The runner image ships an SDK; this makes sure the one platform the
         # apps compile against is in it. JAVA_HOME is the image's JDK 17.
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-33" >/dev/null
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: build/test-deps
           key: test-deps-${{ hashFiles('tests/kotlin/fetch-deps.sh') }}
@@ -76,13 +85,14 @@ jobs:
   signatures:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The whole history: the gate checks every commit in the branch.
           fetch-depth: 0
           # On a pull request, the PR's own tip, not the unsigned merge
           # commit GitHub synthesises for it.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: Import the accepted signing keys
         # On a pull request the key file comes from the BASE branch, so a PR
         # cannot vouch for itself by adding its own key. %G? accepts any key
@@ -110,7 +120,9 @@ jobs:
         run: |
           dnf -y -q install git rpm-build rpmlint dnf-plugins-core \
             systemd-rpm-macros util-linux findutils tar gzip systemd cpio
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Source packages
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -127,7 +139,7 @@ jobs:
         # Against the units as packaged, placeholders substituted; see the
         # script header for what is stubbed and why.
         run: packaging/verify-units.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: rpms
           path: |

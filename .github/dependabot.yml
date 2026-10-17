@@ -1,0 +1,18 @@
+# Proposes bumps to the actions .github/workflows/ci.yml pins by commit SHA,
+# rewriting the SHA and its "# vX.Y.Z" comment together. Nothing else here has
+# a manifest Dependabot understands: the Kotlin test jars are pinned and
+# SHA-256 checked in tests/kotlin/fetch-deps.sh, and ruff, actionlint and
+# zizmor by version in the workflow.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # A pull request a month, not one per action.
+    groups:
+      actions:
+        patterns: ["*"]
+    # A release less than two weeks old has had the least scrutiny.
+    cooldown:
+      default-days: 14

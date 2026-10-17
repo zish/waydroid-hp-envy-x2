@@ -28,7 +28,7 @@
 #            android-33 android.jar and the jars tests/kotlin/fetch-deps.sh
 #            puts in build/test-deps. KOTLIN_APPS="a b" limits it to those.
 #   lint     shellcheck -S error over every shell script, ruff's pyflakes rules
-#            (F) over every Python one. Both were clean when this was added
+#            (F) over every Python one, actionlint and zizmor over .github/. Both were clean when this was added
 #            (2026-10-17: 0 errors in 92 shell scripts, 1 F541 in 28 Python
 #            files, fixed), so the gate costs nothing today. Shellcheck's 33
 #            warnings are NOT gated yet -- raise -S once they are worked off.
@@ -202,6 +202,21 @@ run_lint() {
 			failed="$failed ruff"
 	else
 		skip ruff "ruff not found"
+	fi
+	# The workflow is code that runs with a token, so it is linted too:
+	# actionlint for what GitHub would reject or misread, zizmor for what it
+	# would accept and should not -- an unpinned `uses:`, a template expanded
+	# into a shell, a checkout that leaves the token on disk. --offline: no
+	# network, so the same answer on the dev box and the runner.
+	if command -v actionlint >/dev/null 2>&1; then
+		actionlint && echo "ok   actionlint" || failed="$failed actionlint"
+	else
+		skip actionlint "actionlint not found"
+	fi
+	if command -v zizmor >/dev/null 2>&1; then
+		zizmor --offline --quiet .github/ && echo "ok   zizmor" || failed="$failed zizmor"
+	else
+		skip zizmor "zizmor not found"
 	fi
 	cd - >/dev/null
 }

@@ -371,6 +371,16 @@ value in the drop-in, a missing binary — each fail exactly the unit they are i
 `systemd-analyze security` was tried and left out: every daemon here is a root service that mounts
 or labels by design, so all score 9.4 UNSAFE, which is noise.
 
+**The workflow is linted and its actions pinned, from 2026-10-17.** Every `uses:` names a commit
+SHA with the release in a comment (`checkout` v4.4.0, `cache` v4.3.0, `upload-artifact` v4.6.2,
+all lightweight tags resolved with `git ls-remote`), because a tag can be moved to other code after
+review. [.github/dependabot.yml](../.github/dependabot.yml) proposes the bumps, grouped monthly and
+holding back releases younger than 14 days. `actionlint` and `zizmor --offline` run in the `lint`
+suite; zizmor's first pass found the five unpinned actions and three checkouts leaving the token in
+`.git/config` (`persist-credentials: false` now, as no job pushes). A planted unpinned action and a
+PR title expanded into `run:` both fail it. Left alone: the `fedora:44` container is not pinned by
+digest (auditor persona only, and Dependabot cannot bump it there).
+
 **The signed-commit gate runs in CI as well, from 2026-10-17** — the `signatures` job, against
 only the keys in [.github/commit-signers.asc](../.github/commit-signers.asc) (on a pull request,
 the base branch's copy, so a PR cannot vouch for itself by adding a key). It had been local only
