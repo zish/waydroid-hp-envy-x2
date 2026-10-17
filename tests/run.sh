@@ -17,6 +17,10 @@
 # Suites:
 #   python   tests/test_*.py, stdlib unittest, loads the daemons in artifacts/
 #   cpp      tests/cpp/*.cpp, each one g++ line against glib only
+#   sanitize the same tests again under AddressSanitizer and UBSan. The code
+#            they cover builds and decodes 802.11 elements byte by byte and
+#            parses sysfs text, which is where an off-by-one reads past a
+#            buffer and still passes. About five seconds, mostly compiling.
 #   selftest artifacts/*/selftest.sh, the RPMs' %check scripts
 #   kotlin   <app>/test/Tests.kt for every Kotlin app that has one, compiled
 #            with the app's whole src/ against android.jar and run on the JVM;
@@ -65,10 +69,13 @@ run_python() {
 		-s "$here" -p 'test_*.py' -t "$here") || failed="$failed python"
 }
 
+# run_cpp <suite name> [extra compiler flags...]
 run_cpp() {
+	suite=$1
+	shift
 	cxx=${CXX:-g++}
-	command -v "$cxx" >/dev/null 2>&1 || { skip cpp "$cxx not found"; return 0; }
-	pkg-config --exists glib-2.0 2>/dev/null || { skip cpp "glib-2.0 development files not found"; return 0; }
+	command -v "$cxx" >/dev/null 2>&1 || { skip "$suite" "$cxx not found"; return 0; }
+	pkg-config --exists glib-2.0 2>/dev/null || { skip "$suite" "glib-2.0 development files not found"; return 0; }
 	out=$(mktemp -d)
 	for src in "$here"/cpp/test_*.cpp; do
 		bin=$out/$(basename "$src" .cpp)
@@ -83,13 +90,13 @@ run_cpp() {
 			tr ' ' '\n' | sed "/^$/d; s#^#-I$repo/#")
 		# Same warning set as the daemons' own builds, plus -Werror.
 		# shellcheck disable=SC2046,SC2086  # pkg-config output, $incs and $extra are word lists
-		if "$cxx" -std=gnu++17 -Wall -Wextra -Wno-unused-parameter -Werror \
+		if "$cxx" -std=gnu++17 -Wall -Wextra -Wno-unused-parameter -Werror "$@" \
 			$incs -I"$repo/wifi" \
 			$(pkg-config --cflags glib-2.0) "$src" $extra \
 			$(pkg-config --libs glib-2.0) -o "$bin" && "$bin"; then
 			:
 		else
-			failed="$failed cpp:$(basename "$src")"
+			failed="$failed $suite:$(basename "$src")"
 		fi
 	done
 	rm -rf "$out"
@@ -204,12 +211,16 @@ run_policy() {
 	python3 -B "$here/policy.py" || failed="$failed policy"
 }
 
-suites=${*:-python cpp selftest kotlin lint policy}
+suites=${*:-python cpp sanitize selftest kotlin lint policy}
 for s in $suites; do
 	echo "== $s"
 	case $s in
 	python)   run_python ;;
-	cpp)      run_cpp ;;
+	cpp)      run_cpp cpp ;;
+	# -O1 so ASan's reports name real frames; no-recover so a UBSan finding
+	# fails the test rather than printing and carrying on.
+	sanitize) run_cpp sanitize -O1 -g -fno-omit-frame-pointer \
+			-fsanitize=address,undefined -fno-sanitize-recover=all ;;
 	selftest) run_selftest ;;
 	kotlin)   run_kotlin ;;
 	lint)     run_lint ;;

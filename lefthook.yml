@@ -28,8 +28,9 @@ pre-push:
       run: bin/check-signed-commits.sh --branch
       fail_text: "unsigned commit in this branch -- see the list above"
     tests:
-      # The offline unit tests, the RPMs' %check self-tests and the lint gate,
-      # about a second in all. Suites whose toolchain is missing here are
+      # The offline unit tests (C++ twice, once under ASan/UBSan), the RPMs'
+      # %check self-tests, the lint gate and the repository policy checks --
+      # under half a minute, most of it kotlinc. Suites whose toolchain is missing here are
       # skipped with a message; GitHub Actions runs the same script with CI=true,
       # where a skip is a failure. .github/workflows/ci.yml calls tests/run.sh
       # directly rather than `lefthook run pre-push`, and runs signed-commits as

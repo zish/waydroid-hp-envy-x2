@@ -273,7 +273,7 @@ Trivy's database alone is 50–200 MB.
 ### Unit tests and the first workflow — added 2026-10-17
 
 **`tests/run.sh` is the one entry point**, run by lefthook's `pre-push` and by
-[.github/workflows/ci.yml](../.github/workflows/ci.yml) alike. It has six suites, and none needs a
+[.github/workflows/ci.yml](../.github/workflows/ci.yml) alike. It has seven suites, and none needs a
 host, a container or privilege:
 
 - **python** — stdlib `unittest` over the daemons' decision logic, loaded straight out of
@@ -298,6 +298,10 @@ host, a container or privilege:
   azimuth 102.93° and pitch −62.24°. Putting docs/18's sign bug back fails 7 of its 59 checks. It
   is a unity build behind a compile-time `IIO_ROOT` guard — the shipped daemon cannot be
   redirected — with `tests/cpp/shim/` standing in for the gbinder and gutil headers.
+- **sanitize** — the same three C++ tests rebuilt with `-fsanitize=address,undefined
+  -fno-sanitize-recover=all`, from 2026-10-17. All pass. A planted one-past-the-end read passes the
+  plain `cpp` suite and fails this one with `heap-buffer-overflow`, which is the case for having
+  both: the beacon-element code builds and decodes bytes by hand.
 - **selftest** — the three `artifacts/*/selftest.sh` `%check` scripts.
 - **kotlin** — `<app>/test/Tests.kt` per app, compiled in one `kotlinc` pass with every app's
   `src/` against `android.jar` and run on the JVM by a forty-line harness
