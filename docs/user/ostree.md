@@ -40,7 +40,8 @@ only in memory.
 |---|---|
 | `systemctl reboot` | **Yes.** Shutdown finalizes it, next boot runs it. |
 | `systemctl poweroff`, then power on later | **Yes.** A clean poweroff finalizes it just like a reboot. |
-| Close the lid / suspend / hibernate, then resume | **No, and nothing is lost.** The system never shut down, so it is still staged and still pending. It applies at your next real reboot. |
+| Close the lid / suspend / hibernate, **and it resumes** | **Not yet, and nothing is lost.** The system never shut down, so it is still staged and still pending. It applies at your next real reboot. |
+| Suspend, and it **never comes back** — battery runs out, or the resume hangs and you force it off | **No, and the staged deployment is gone.** The suspend was not a shutdown, so finalization never ran. See below: on a laptop this is the usual way to lose one. |
 | Hard power-off, forced reset, battery pull, crash | **No, and the staged deployment is gone.** |
 | Power is lost *during* shutdown, before finalization | **No, and it is gone**, same as above. |
 
@@ -50,8 +51,28 @@ at the new deployment, and the `/run/ostree/` record that named it went away wit
 come back up on the old deployment, with no error and no warning. **Re-run the `rpm-ostree` command
 to stage it again.**
 
-> This follows from the unit definition above and from `/run` being tmpfs, both of which are
-> verified. It has not been confirmed by deliberately power-cutting a machine mid-stage.
+That re-run is cheaper than the first one: the fetched objects are still in the local repo and the
+remote ref already points at the new base, so only the layering is redone, not the download.
+
+**A suspend that never comes back is a hard power-off, and on a laptop it is the usual way to lose a
+deployment** — more likely than any of the dramatic rows above, because it needs nothing to go wrong
+except walking away. Observed on the reference machine: it suspended at 20:17:05 with an upgrade and
+a newly layered package staged, the journal ends there, and the next entry is a fresh boot sixteen
+hours later. Both were gone — same version running, same kernel, and the new package simply not
+installed. **Stage and reboot in one sitting.**
+
+The signature, if you suspect this is what happened to you:
+
+| Check | What a deployment lost this way looks like |
+|---|---|
+| `journalctl -b -1 -u ostree-finalize-staged` | only the `Finished` line from when it started at boot — no `Stopping`, no `Finalizing staged deployment`, so `ExecStop` never ran |
+| `journalctl --list-boots` | a gap between the end of the previous boot and the start of the next, rather than one running into the other |
+| `rpm-ostree status` | no staged entry at all, and the version you are running is the one you were running before |
+| `ls -d /ostree/deploy/*/deploy/*.0` | the orphaned deployment directory is **still there**, referenced by nothing — it got as far as being written, and only finalization was missed |
+
+> The unit definition and `/run` being tmpfs were already verified. The sequence above is now an
+> observed instance rather than an inference, though still an accidental one: no machine was
+> deliberately power-cut mid-stage to produce it.
 
 ## A staged deployment's `/etc` looks empty of your files, and that is correct
 
@@ -109,10 +130,11 @@ One thing this explains away: a staged deployment that has *just* been supersede
 tells you whether your local packages survived. Read `rpm-ostree status` for that instead — the
 staged entry lists its own `LocalPackages`.
 
-> The 23 s, the log lines, the 3.0 GB and the `TimeoutStopSec` are measured. That the gigabytes are
-> **reflinked** rather than byte-copied is inferred: 2 s is not a 3 GB copy on that hardware, and
-> each deployment's images have their own inodes, which rules out hardlinks. Confirm it on your own
-> host by comparing physical extents with `filefrag -v` on two deployments' `system.img`.
+> All of this is measured, the reflink included: two deployments' `system.img` have different inodes
+> but byte-identical physical extents, every one of which `filefrag -v` flags `shared`. So the
+> 3.0 GB that each deployment's `/etc` reports under `du` costs the disk almost nothing, and `du`
+> totals across deployments are not real consumption. Worth re-running that check if your `/var` is
+> not btrfs, where the copy is genuine.
 
 ## `--apply-live` can report failure after having already applied
 
