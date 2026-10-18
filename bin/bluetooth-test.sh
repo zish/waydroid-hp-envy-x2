@@ -117,7 +117,11 @@ def send(obj):
 
 send({"id": 1, "cmd": "state"})
 first = read(time.time() + 5)
-print("GATED" if first and not first.get("ok") else "UNGATED")
+# NOREPLY is its own answer: folded into UNGATED, silence read as "auth is
+# not enforced". And the shell tests UNGATED before GATED, which is a
+# substring of it -- the other order reported an unauthenticated daemon as
+# refusing unauthenticated commands.
+print("NOREPLY" if not first else "UNGATED" if first.get("ok") else "GATED")
 
 send({"id": 2, "cmd": "auth", "token": token})
 auth = read(time.time() + 5)
@@ -148,8 +152,8 @@ sock.close()
 PY
 )
     case "$RESULT" in
-    *GATED*)   ok "an unauthenticated command is refused" ;;
     *UNGATED*) na "auth is not enforced (--no-auth)" ;;
+    *GATED*)   ok "an unauthenticated command is refused" ;;
     *)         no "no reply to the first command" ;;
     esac
     case "$RESULT" in
