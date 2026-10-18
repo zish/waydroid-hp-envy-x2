@@ -78,6 +78,22 @@ static const char* const LOCK_PATHS[] = {
 
 static const char logtag[] = "waydroid-wifid";
 
+/*
+ * Why app_run()'s loop ended, because it now matters which one happened.
+ *
+ * There used to be only one answer -- stop -- and g_main_loop_quit() could
+ * carry all of it.  A quit can now also mean "the container went away, wait
+ * for the next one", which must not be confused with the two that still mean
+ * stop: a signal, and wificond's registration failing, which is fatal by
+ * design (app_add_service_done).
+ */
+typedef enum quit_reason {
+    QUIT_NONE = 0,
+    QUIT_SIGNAL,                /* SIGTERM/SIGINT -- exit */
+    QUIT_SESSION_GONE,          /* container gone -- wait for the next one */
+    QUIT_FATAL,                 /* cannot serve wificond -- exit */
+} QuitReason;
+
 typedef struct app {
     GMainLoop* loop;
     GBinderServiceManager* sm;
@@ -85,6 +101,9 @@ typedef struct app {
     Supplicant* supplicant;
     int registered;             /* how many of the two names we hold */
     int ret;
+    QuitReason quit;            /* why app_run()'s loop ended */
+    guint sessionWatch;         /* armed when the service manager dies */
+    guint sessionWatchMs;       /* how long it has been asking */
 } App;
 
 static gboolean
@@ -93,6 +112,7 @@ app_signal(gpointer user_data)
     App* app = (App*) user_data;
 
     GINFO("Caught signal, shutting down...");
+    app->quit = QUIT_SIGNAL;
     g_main_loop_quit(app->loop);
     return G_SOURCE_CONTINUE;
 }
@@ -167,6 +187,7 @@ app_add_service_done(GBinderServiceManager* sm, int status, void* user_data)
         app->ret = RET_OK;
     } else {
         GERR("Failed to register \"%s\" (%d)", SERVICE_NAME, status);
+        app->quit = QUIT_FATAL;
         g_main_loop_quit(app->loop);
     }
 }
@@ -200,25 +221,6 @@ app_register_all(App* app)
         app->service->object(), app_add_service_done, app);
     gbinder_servicemanager_add_service(app->sm, SUPPLICANT_SERVICE_NAME,
         app->supplicant->object(), app_add_supplicant_done, app);
-}
-
-/*
- * docs/16-waydroid-network.md is a direct warning here: a stale binder
- * registration that survived a system_server restart deadlocked Android's
- * network stack for 38 minutes.  When servicemanager goes and comes back we
- * re-register rather than leaving a dead name behind.
- */
-static void
-app_sm_presence_handler(GBinderServiceManager* sm, void* user_data)
-{
-    App* app = (App*) user_data;
-
-    if (gbinder_servicemanager_is_present(app->sm)) {
-        GINFO("Service manager reappeared, re-registering");
-        app_register_all(app);
-    } else {
-        GINFO("Service manager has died");
-    }
 }
 
 /*
@@ -325,6 +327,116 @@ app_wait_for_session(void)
     g_object_unref(bus);
 }
 
+/*
+ * After the service manager dies, find out whether the container is coming
+ * back -- and stop probing binder if it is not.
+ *
+ * libgbinder answers a death by arming its own presence-check timer, which
+ * probes handle 0 on a delay that backs off from 100 ms to a 1 s ceiling and
+ * then stays there (PRESENSE_WAIT_MS_* in gbinder_servicemanager.c), and every
+ * probe that lands on an unowned handle costs two kernel log lines.  So the
+ * cost of a death is the same cost as the ungated startup this daemon stopped
+ * paying in 1.1.1; it was simply being paid at the other end of the session.
+ * The 1 Hz ceiling is where the measured rate comes from -- 2,600 lines at 2 a
+ * second after one logout, still climbing when the host was next looked at
+ * (docs/69).
+ *
+ * The question cannot be answered at the moment of death.  A system_server
+ * restart under a live session and a logout both present as exactly one dead
+ * service manager, and the one thing this daemon must not do is drop a
+ * registration Android is about to come back for -- docs/16's stale binder
+ * deadlocked Android's network stack for 38 minutes.  GetSession separates the
+ * two, but not at once: container_manager.stop() clears args.session AFTER it
+ * has taken the container down, so there is a window where the service manager
+ * is already gone and the session still reads as present.  Measured at about
+ * 6 s on this host (death 16:31:58, session cleared 16:32:04), which is why
+ * this polls rather than asking once and believing the answer.
+ *
+ * Giving up means carrying on as before, for the same reason the startup gate
+ * falls back to an unguarded probe: a waydroid that does not answer GetSession
+ * at all must still get a working Wi-Fi daemon.
+ */
+#define SESSION_WATCH_INTERVAL_MS   (2000)
+#define SESSION_WATCH_GIVEUP_MS     (60000)
+
+static gboolean
+app_session_watch(void* user_data)
+{
+    App* app = (App*) user_data;
+    GError* err = nullptr;
+    GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, nullptr, &err);
+    gboolean answered = FALSE;
+    gboolean present = TRUE;
+
+    app->sessionWatchMs += SESSION_WATCH_INTERVAL_MS;
+
+    if (bus) {
+        present = app_session_present(bus, &answered);
+        g_object_unref(bus);
+    } else {
+        GDEBUG("no system bus (%s)", err ? err->message : "?");
+        g_clear_error(&err);
+    }
+
+    /*
+     * Fail towards staying up, in both directions.  A missing bus and a
+     * GetSession that did not answer must never be read as "the session is
+     * gone"; only a container manager that answered and reported no sessions
+     * counts, which is what `answered` is for.
+     */
+    if (answered && !present) {
+        GINFO("the session this daemon registered for is gone; dropping the "
+              "service manager and waiting for the next session rather than "
+              "probing a binder nobody owns");
+        app->sessionWatch = 0;
+        app->quit = QUIT_SESSION_GONE;
+        g_main_loop_quit(app->loop);
+        return G_SOURCE_REMOVE;
+    }
+
+    if (app->sessionWatchMs >= SESSION_WATCH_GIVEUP_MS) {
+        GWARN("nothing has answered for the session %d s after the service "
+              "manager died; leaving the binder probe running, which is what "
+              "this daemon did before 1.1.2", SESSION_WATCH_GIVEUP_MS / 1000);
+        app->sessionWatch = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+/*
+ * docs/16-waydroid-network.md is a direct warning here: a stale binder
+ * registration that survived a system_server restart deadlocked Android's
+ * network stack for 38 minutes.  When servicemanager goes and comes back we
+ * re-register rather than leaving a dead name behind.
+ *
+ * That is also why a death is not treated as the container being gone: at this
+ * instant the two are indistinguishable, so the death only arms the watch
+ * above and GetSession answers it a few seconds later.
+ */
+static void
+app_sm_presence_handler(GBinderServiceManager* sm, void* user_data)
+{
+    App* app = (App*) user_data;
+
+    if (gbinder_servicemanager_is_present(app->sm)) {
+        GINFO("Service manager reappeared, re-registering");
+        if (app->sessionWatch) {
+            /* A framework restart after all, not a logout; stop asking. */
+            g_source_remove(app->sessionWatch);
+            app->sessionWatch = 0;
+        }
+        app_register_all(app);
+    } else {
+        GINFO("Service manager has died");
+        if (!app->sessionWatch) {
+            app->sessionWatchMs = 0;
+            app->sessionWatch = g_timeout_add(SESSION_WATCH_INTERVAL_MS,
+                app_session_watch, app);
+        }
+    }
+}
+
 static void
 app_run(App* app)
 {
@@ -334,6 +446,7 @@ app_run(App* app)
         app_sm_presence_handler, app);
 
     app->loop = g_main_loop_new(nullptr, TRUE);
+    app->quit = QUIT_NONE;
 
     app_register_all(app);
 
@@ -342,6 +455,10 @@ app_run(App* app)
 
     if (sigtrm) g_source_remove(sigtrm);
     if (sigint) g_source_remove(sigint);
+    if (app->sessionWatch) {
+        g_source_remove(app->sessionWatch);
+        app->sessionWatch = 0;
+    }
     gbinder_servicemanager_remove_handler(app->sm, presence_id);
     g_main_loop_unref(app->loop);
     app->loop = nullptr;
@@ -526,19 +643,53 @@ main(int argc, char* argv[])
 
     app_take_lock();
 
-    /* Before new2(), so nothing can poll binder while we wait.  See above. */
-    app_wait_for_session();
-
     memset(&app, 0, sizeof(app));
-    app.ret = RET_ERR;
-    app.sm = gbinder_servicemanager_new2(device, SM_PROTOCOL, RPC_PROTOCOL);
-    if (!app.sm) {
-        GERR("cannot open %s", device);
-        return RET_ERR;
-    }
 
-    GINFO("waiting for the container's service manager on %s", device);
-    if (gbinder_servicemanager_wait(app.sm, -1)) {
+    /*
+     * One pass per container lifetime.
+     *
+     * This is a loop and not an exit on purpose.  The daemon outlives the
+     * container by design -- the unit is deliberately not ordered after
+     * waydroid-container.service, so that a container restart cannot take the
+     * daemon with it -- and exiting at logout would reverse that.  It would
+     * also work only under the packaged unit: docs/34's start-it-by-hand mode,
+     * which `systemctl disable --now waydroid-wifid` restores, has no
+     * Restart=always to bring the daemon back, so the first logout would end
+     * it for good.
+     *
+     * The service manager is created inside the loop and dropped at the end of
+     * one, because libgbinder's reanimate timer lives on that object and
+     * releasing the last reference is what stops it probing.  Coming back
+     * round costs one open() of the binder device per session, and the pass
+     * begins where startup does -- in the session gate, touching no binder.
+     */
+    while (TRUE) {
+        /*
+         * Per pass, not once: the exit status has to describe the pass that
+         * actually ended the loop.  Left set once outside it, a first session
+         * that registered fine would leave RET_OK behind and a later session
+         * whose wificond registration failed -- the one failure this daemon
+         * treats as fatal -- would exit 0 and report success.
+         */
+        app.ret = RET_ERR;
+
+        /* Before new2(), so nothing can poll binder while we wait.  See above. */
+        app_wait_for_session();
+
+        app.sm = gbinder_servicemanager_new2(device, SM_PROTOCOL, RPC_PROTOCOL);
+        if (!app.sm) {
+            GERR("cannot open %s", device);
+            return RET_ERR;
+        }
+
+        GINFO("waiting for the container's service manager on %s", device);
+        if (!gbinder_servicemanager_wait(app.sm, -1)) {
+            GERR("gave up waiting for the service manager on %s", device);
+            gbinder_servicemanager_unref(app.sm);
+            app.sm = nullptr;
+            return RET_ERR;
+        }
+
         app.service = new Wificond(app.sm, backend.get());
         app.supplicant = new Supplicant(app.sm, backend.get());
         app_run(&app);
@@ -546,7 +697,28 @@ main(int argc, char* argv[])
         app.supplicant = nullptr;
         delete app.service;
         app.service = nullptr;
+
+        /*
+         * After the two services, never before: both hold a reference of their
+         * own, and the probing stops when the last one is released, not when
+         * ours is.
+         *
+         * That releasing it is enough was read out of libgbinder rather than
+         * assumed, because the whole loop rests on it:
+         * gbinder_servicemanager_finalize() calls gbinder_timeout_remove() on
+         * the presence check, and dispose() drops self->dev from the class's
+         * instance table -- which is the other half of it, since service
+         * managers are cached per device and a new2() that found the dead one
+         * still in that table would hand back the object we were trying to be
+         * rid of.
+         */
         gbinder_servicemanager_unref(app.sm);
+        app.sm = nullptr;
+
+        if (app.quit != QUIT_SESSION_GONE) {
+            break;
+        }
+        GINFO("waiting for another waydroid session");
     }
     return app.ret;
 }
