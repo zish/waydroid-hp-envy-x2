@@ -28,7 +28,8 @@
 #            android-33 android.jar and the jars tests/kotlin/fetch-deps.sh
 #            puts in build/test-deps. KOTLIN_APPS="a b" limits it to those.
 #   lint     shellcheck -S error over every shell script, ruff's pyflakes rules
-#            (F) over every Python one, actionlint and zizmor over .github/. Both were clean when this was added
+#            (F) over every Python one, actionlint and zizmor over .github/,
+#            and gitleaks over the whole history. Both were clean when this was added
 #            (2026-10-17: 0 errors in 92 shell scripts, 1 F541 in 28 Python
 #            files, fixed), so the gate costs nothing today. Shellcheck's 33
 #            warnings are NOT gated yet -- raise -S once they are worked off.
@@ -217,6 +218,17 @@ run_lint() {
 		zizmor --offline --quiet .github/ && echo "ok   zizmor" || failed="$failed zizmor"
 	else
 		skip zizmor "zizmor not found"
+	fi
+	# Every commit on every branch, every time: 340 commits take about two
+	# seconds, and the push that matters most is the first public one, when
+	# all of history goes out at once. Findings print redacted. Public test
+	# certificates (bt-app, pw-app) are not secrets and do not trip it.
+	if command -v gitleaks >/dev/null 2>&1; then
+		gitleaks git --no-banner --redact --log-level warn . &&
+			echo "ok   gitleaks ($(git rev-list --all | wc -l) commits)" ||
+			failed="$failed gitleaks"
+	else
+		skip gitleaks "gitleaks not found"
 	fi
 	cd - >/dev/null
 }

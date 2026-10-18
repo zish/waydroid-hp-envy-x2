@@ -3,7 +3,8 @@
 # Two jobs, split by what they need, not by how long they take:
 #
 #   tests  tests/run.sh with CI=true -- Python, C++ and Kotlin unit tests, the
-#          RPMs' %check self-tests, shellcheck, ruff, actionlint and zizmor. The same script lefthook runs
+#          RPMs' %check self-tests, shellcheck, ruff, actionlint, zizmor and
+#          gitleaks. The same script lefthook runs
 #          before a push, so nothing can pass locally and mean something
 #          different here. CI=true turns a missing toolchain from a SKIP into a
 #          failure, so this job cannot quietly stop testing something.
@@ -54,6 +55,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # All of history, for gitleaks.
+          fetch-depth: 0
           persist-credentials: false
       - name: Install toolchains
         # python3-dbus and python3-gi so test_btd.py runs against the real
@@ -68,6 +71,19 @@ jobs:
           pipx install ruff==0.16.10
           pipx install actionlint-py==1.7.12.25
           pipx install zizmor==1.31.1
+      - name: gitleaks
+        # Not packaged for Ubuntu or PyPI: the release tarball, pinned by
+        # version and by sha256 from that release's checksums file.
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "$GITLEAKS_SHA256  /tmp/gitleaks.tgz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/gitleaks.tgz -C "$HOME/.local/bin" gitleaks
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Android platform (android.jar for the Kotlin tests)
         # The runner image ships an SDK; this makes sure the one platform the
         # apps compile against is in it. JAVA_HOME is the image's JDK 17.

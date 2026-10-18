@@ -381,6 +381,13 @@ suite; zizmor's first pass found the five unpinned actions and three checkouts l
 PR title expanded into `run:` both fail it. Left alone: the `fedora:44` container is not pinned by
 digest (auditor persona only, and Dependabot cannot bump it there).
 
+**Secrets are scanned on every push, from 2026-10-17**: `gitleaks git` over every commit on every
+branch, in the `lint` suite — so lefthook runs it before each push, including the first public
+one, when all of history goes out at once. First pass: **339 commits, no findings.** The two PEM
+blocks in `bt-app` and `pw-app`'s tests are public certificates and correctly do not trip it; a
+planted private key and GitHub token both do. CI fetches the v8.30.1 tarball and checks its sha256
+against the release's checksums file, since gitleaks is packaged for neither Ubuntu nor PyPI.
+
 **The signed-commit gate runs in CI as well, from 2026-10-17** — the `signatures` job, against
 only the keys in [.github/commit-signers.asc](../.github/commit-signers.asc) (on a pull request,
 the base branch's copy, so a PR cannot vouch for itself by adding a key). It had been local only
