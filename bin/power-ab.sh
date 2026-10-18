@@ -188,12 +188,11 @@ measure() {
     local label="$1"
     local n=$((SAMPLE / INTERVAL))
     local tmp; tmp=$(mktemp)
-    local e0 e1 t0 t1 pkg="-" bl_first bl_last
+    local e0 e1 t0 t1 pkg="-"
     local raw="${RESULTS%.txt}-${label}.raw"
 
     printf '  settling %ss ... ' "$SETTLE"; sleep "$SETTLE"; echo "done"
 
-    bl_first=$(read_bl)
     e0=$(cat "$RAPL" 2>/dev/null || echo "")
     t0=$(date +%s.%N)
 
@@ -230,7 +229,6 @@ measure() {
 
     t1=$(date +%s.%N)
     e1=$(cat "$RAPL" 2>/dev/null || echo "")
-    bl_last=$(read_bl)
 
     # THE INSTRUMENT SAMPLES AT 1/60 Hz. Measured on this host 2026-09-10: BAT0's
     # current_now changes exactly once every 60 s, and battery.cache_time is 1000 ms, so

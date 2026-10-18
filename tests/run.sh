@@ -27,12 +27,12 @@
 #            see tests/kotlin/Harness.kt. Needs a JDK 17/21, kotlinc, an
 #            android-33 android.jar and the jars tests/kotlin/fetch-deps.sh
 #            puts in build/test-deps. KOTLIN_APPS="a b" limits it to those.
-#   lint     shellcheck -S error over every shell script, ruff's pyflakes rules
-#            (F) over every Python one, actionlint and zizmor over .github/,
-#            and gitleaks over the whole history. Both were clean when this was added
-#            (2026-10-17: 0 errors in 92 shell scripts, 1 F541 in 28 Python
-#            files, fixed), so the gate costs nothing today. Shellcheck's 33
-#            warnings are NOT gated yet -- raise -S once they are worked off.
+#   lint     shellcheck -S warning over every shell script, ruff's pyflakes
+#            and bugbear rules (F, B) over every Python one, actionlint and
+#            zizmor over .github/, and gitleaks over the whole history. All
+#            clean as of 2026-10-17. Shellcheck was gated at -S error first and
+#            raised once its 31 warnings were worked off, which found one real
+#            bug in two test scripts. ruff's E (style) is not gated.
 #   policy   tests/policy.py, the repository rules no compiler checks: every
 #            tracked binary is in tests/binary-allowlist with its sha256, and
 #            every relative Markdown link and #anchor resolves, and every
@@ -190,7 +190,7 @@ run_lint() {
 		files=$( { tracked_by_shebang '^#!(/usr)?/bin/(env )?(ba)?sh'
 			git ls-files '*.sh'; } | sort -u)
 		# shellcheck disable=SC2086  # one path per word; no tracked path has a space
-		shellcheck -S error $files && echo "ok   shellcheck ($(echo "$files" | wc -l) files)" ||
+		shellcheck -S warning $files && echo "ok   shellcheck ($(echo "$files" | wc -l) files)" ||
 			failed="$failed shellcheck"
 	else
 		skip shellcheck "shellcheck not found"
@@ -199,7 +199,12 @@ run_lint() {
 		files=$( { tracked_by_shebang '^#!.*python3'
 			git ls-files '*.py'; ls tests/*.py; } | sort -u)
 		# shellcheck disable=SC2086
-		ruff check --quiet --no-cache --select F $files && echo "ok   ruff ($(echo "$files" | wc -l) files)" ||
+		# F (pyflakes) and B (bugbear), less two bugbear rules that are
+		# deliberate here: B904, because every hit wraps an error in a
+		# clearer message on purpose and the chained traceback adds nothing
+		# for an operator; B905, because zip(a, a[1:]) is MEANT to be uneven.
+		ruff check --quiet --no-cache --select F,B --ignore B904,B905 $files &&
+			echo "ok   ruff ($(echo "$files" | wc -l) files)" ||
 			failed="$failed ruff"
 	else
 		skip ruff "ruff not found"

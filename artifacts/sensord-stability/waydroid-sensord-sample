@@ -54,6 +54,7 @@ if [ -z "$pid" ]; then
     exit 0
 fi
 
+# shellcheck disable=SC2046  # split on purpose, one field per parameter
 set -- $(ps -eo etimes=,times=,rss=,vsz= -p "$pid")
 et=$1 cpu=$2 rss=$3 vsz=$4
 
@@ -90,6 +91,7 @@ life=$(awk -v c="$cpu" -v e="$et" 'BEGIN { printf "%.3f", (e > 0) ? 100 * c / e 
 # The interval figure, against the last sample of the same pid.
 iv='-'
 if [ -r "$STATE" ]; then
+    # shellcheck disable=SC2046  # split on purpose, one field per parameter
     set -- $(cat "$STATE")
     if [ "$1" = "$pid" ]; then
         # Spelled out rather than as a ternary format string: `printf (d>0) ?

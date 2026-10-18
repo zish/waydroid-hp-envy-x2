@@ -25,7 +25,7 @@
 # drops the session back to the SDDM greeter and needs someone at the machine, so
 # it prints the restart and lets a human choose. --apply opts in.
 
-VERSION=1.1.0
+VERSION=1.1.1
 RELEASE=1
 KIND=host
 

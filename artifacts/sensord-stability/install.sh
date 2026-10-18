@@ -13,7 +13,7 @@ PREFIX=${PREFIX:-/usr/local}
 BINDIR=${BINDIR:-$PREFIX/bin}
 UNITDIR=${UNITDIR:-/etc/systemd/system}
 
-src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+src=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)
 
 if [ "${1:-}" = "--uninstall" ]; then
     systemctl disable --now waydroid-sensord-sample.timer 2>/dev/null || true

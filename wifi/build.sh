@@ -241,6 +241,7 @@ if [ "$DO_RPM" = 1 ]; then
 	# linking and has nothing to apply them to.
 	# shellcheck disable=SC2206
 	LDFLAGS=(${ENV_CXXFLAGS:-} ${ENV_LDFLAGS:-})
+	# shellcheck disable=SC2054  # -Wl,<opt> is one linker flag, not a list
 	LDFLAGS+=(
 		-Wl,--gc-sections
 		-static-libstdc++ -static-libgcc
@@ -262,6 +263,7 @@ else
 	# shellcheck disable=SC2206
 	CXXFLAGS+=($GLIB_CFLAGS)
 
+	# shellcheck disable=SC2054  # -Wl,<opt> is one linker flag, not a list
 	LDFLAGS=(
 		-L"$OUT/sysroot/lib"
 		-Wl,--gc-sections

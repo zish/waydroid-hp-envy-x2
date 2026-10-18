@@ -311,8 +311,22 @@ host, a container or privilege:
   `tests/kotlin/fetch-deps.sh` into `build/test-deps` and SHA-256 checked, never committed.
   Android's `org.json` is a different implementation of the same API, so tests stick to shared
   behaviour. A private member made `internal` for a test says so in a comment.
-- **lint** — `shellcheck -S error` (92 scripts) and `ruff --select F` (28 Python files). Both were
-  clean at adoption apart from one F541, fixed; **shellcheck's 33 warnings are not gated yet.**
+- **lint** — `shellcheck`, `ruff`, `actionlint`, `zizmor` and `gitleaks`. Shellcheck started at
+  `-S error` and **was raised to `-S warning` on 2026-10-17** once its 31 warnings were worked off;
+  ruff went from `F` to `F,B` the same day, ignoring B904 (every hit re-raises with a clearer
+  message on purpose) and B905 (`zip(a, a[1:])` is meant to be uneven). `E` is style and is not
+  gated. **The warnings held one real bug**, the same one in `bin/bluetooth-test.sh` and
+  `bin/pipewire-test.sh`: the auth probe printed `UNGATED` for a daemon that does not enforce its
+  token, and the `case` tested `*GATED*` first — which matches `UNGATED` — so an unauthenticated
+  daemon was reported as *"an unauthenticated command is refused"*, a pass. No reply was folded
+  into `UNGATED` as well. Both are fixed: `NOREPLY` is its own answer and `*UNGATED*` is tested
+  first. The rest were idioms given a directive, three dead variables removed (`power-ab.sh`'s
+  endpoint backlight reads had been superseded by a min/max over every sample, and
+  `pw-quantum-bisect.sh`'s `BOUNDED` was set on every path and read on none), and unused loop
+  names. Two shipped runtime files gained a directive comment, so `hw-ite8350` is 1.0.2 and
+  `overlay-sync` 1.1.1, both "no behaviour change"; the six packages whose `install.sh` changed
+  were rebuilt before and after and their payloads are digest-for-digest identical, so they keep
+  their versions. None of this is installed anywhere yet.
 - **policy** — [tests/policy.py](../tests/policy.py), stdlib only, for the repository's own rules.
   **binaries**: every tracked binary must be in
   [tests/binary-allowlist](../tests/binary-allowlist) *with its sha256*, so a new vendor `.so` fails

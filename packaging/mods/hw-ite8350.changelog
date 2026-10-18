@@ -1,3 +1,8 @@
+* Sat Oct 17 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.2-1
+- No behaviour change. ite8350-resume-check gains one shellcheck directive
+  comment on its poll loop, whose index is unused, so the repository's
+  shell lint can run at warning level.
+
 * Sun Sep 27 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.1-1
 - Be inert on a machine that has no ITE8350, which is the promise the hw- prefix
   makes and which 1.0.0 did not keep. The resume check treated a missing

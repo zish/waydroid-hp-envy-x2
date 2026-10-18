@@ -1,3 +1,8 @@
+* Sat Oct 17 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.1-1
+- No behaviour change. waydroid-overlay-sync gains one shellcheck directive
+  comment where it splits "<image> <path>" into positional parameters on
+  purpose, so the repository's shell lint can run at warning level.
+
 * Sat Sep 26 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
 - Three new manifest row types, and the mechanism the no-vendored-binaries
   policy needs (docs/54). A DERIVE row carries no bytes: it records where the

@@ -95,7 +95,7 @@
 # consecutive resumes, which sits oddly with docs/19's "intermittent" framing and
 # has not been explained.
 
-VERSION=1.0.1
+VERSION=1.0.2
 RELEASE=1
 KIND=host
 

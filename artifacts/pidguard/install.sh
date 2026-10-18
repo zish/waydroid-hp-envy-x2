@@ -14,7 +14,7 @@ PREFIX=${PREFIX:-/usr/local}
 BINDIR=${BINDIR:-$PREFIX/bin}
 UNITDIR=${UNITDIR:-/etc/systemd/system}
 
-src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+src=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)
 
 install -D -m 0755 "$src/waydroid-pidguard"   "$DESTDIR$BINDIR/waydroid-pidguard"
 install -D -m 0755 "$src/waydroid-pid-reset"  "$DESTDIR$BINDIR/waydroid-pid-reset"

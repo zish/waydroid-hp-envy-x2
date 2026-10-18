@@ -36,8 +36,11 @@ while [ $# -gt 0 ]; do
 		for m in "$MODDIR"/*.mod; do
 			[ -e "$m" ] || continue
 			n=$(basename "$m" .mod)
+			# shellcheck source=/dev/null  # a .mod, chosen at run time
 			s=$(. "$m" >/dev/null 2>&1; printf '%s' "${SUMMARY:-}")
+			# shellcheck source=/dev/null  # a .mod, chosen at run time
 			u=$(. "$m" >/dev/null 2>&1; printf '%s' "${SHIPPED:-}")
+			# shellcheck source=/dev/null  # a .mod, chosen at run time
 			a=$(. "$m" >/dev/null 2>&1; printf '%s' "${ANDROID:-}")
 			[ -n "$a" ] || a="?"
 			case "$u" in

@@ -83,7 +83,7 @@ def main():
         print(line, flush=True)
 
     emit(f"# watching {len(watched)} sources for {args.secs:.0f}s")
-    for fd, (kind, label) in sorted(watched.items(), key=lambda kv: kv[1][1]):
+    for _fd, (kind, label) in sorted(watched.items(), key=lambda kv: kv[1][1]):
         emit(f"#   {kind:6s} {label}")
     emit("# --- tap the button now ---")
 

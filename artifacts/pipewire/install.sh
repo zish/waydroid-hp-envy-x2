@@ -17,7 +17,7 @@ UNITDIR=${UNITDIR:-/etc/systemd/system}
 # %{_userunitdir} lands in the right place and a by-hand install stays out of it.
 USERUNITDIR=${USERUNITDIR:-/etc/systemd/user}
 
-src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+src=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)
 
 install -D -m 0755 "$src/waydroid-pwd" "$DESTDIR$BINDIR/waydroid-pwd"
 install -D -m 0755 "$src/waydroid-pwd-publish" \

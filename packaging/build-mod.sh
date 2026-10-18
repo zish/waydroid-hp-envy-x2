@@ -105,6 +105,9 @@ for mod in $mods; do
 	modfile="$MODDIR/$mod.mod"
 	[ -f "$modfile" ] || { echo "no such modification: $mod" >&2; exit 1; }
 
+	# Every field a .mod may set, cleared so one module cannot inherit the last
+	# one's; SHIPPED is read by gen-spec.sh, not here.
+	# shellcheck disable=SC2034
 	NAME=$mod VERSION=0.0.0 KIND=host FILES="" SOURCES="" DOCS="" PREBUILT_FILES="" SHIPPED=""
 	# shellcheck disable=SC1090
 	. "$modfile"
@@ -128,7 +131,7 @@ for mod in $mods; do
 		# rather than a path, which is how a tripwire stops requiring a copy of
 		# the file it watches (docs/54-no-vendored-binaries.md).
 		echo "packaging/stage-overlay.sh" >>"$list"
-		printf '%s\n' "$FILES" | while read -r f1 f2 f3 f4; do
+		printf '%s\n' "$FILES" | while read -r f1 _ f3 f4; do
 			case "$f1" in '' | \#* | derive | link) continue ;; esac
 			echo "$f3"
 			if [ -n "${f4:-}" ]; then
