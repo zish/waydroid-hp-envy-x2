@@ -6,8 +6,8 @@
 # ever owning a phy. WifiBackend.h is the seam: NmBackend is one implementation
 # and iwd or connman could be others.
 
-VERSION=1.1.1
-RELEASE=2
+VERSION=1.1.2
+RELEASE=1
 KIND=host
 ARCH=x86_64
 
