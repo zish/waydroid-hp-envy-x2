@@ -94,6 +94,36 @@ transaction. The group went to 1.0.1 for the dependency change.
 **Superseded 2026-09-27: 22 modifications are written and all 22 produce something
 installable**, `wifid` included, once `--prebuilt` is used for the two compiled daemons.
 
+**Recounted 2026-10-19: there are 28 `.mod` files, 27 of them shipped, and 26 installed on
+bigtab01** — counted from `rpm-ostree status` on the booted deployment that day, not carried
+forward from the paragraphs below. The 28th is `swtpm`, installed the same day (sixth migration,
+below). `binder-policy` is the one shipped and not installed, as the next paragraph says. The count
+stood at **25** earlier that day, because **`mdns`, which the paragraph after that says was installed
+on 2026-10-06, was not**: `rpm -q waydroid-ext-mdns` answered *not installed*, and `/usr/bin/waydroid-mdns-reflector` and its
+unit were gone, while the `/etc` side of that live apply survives — `/etc/waydroid-mdns.conf`
+dated 2026-10-06 19:39, and `/etc/avahi/avahi-daemon.conf` hash-identical to
+`artifacts/mdns/avahi-daemon.conf` with `enable-reflector=yes`. So reflection should still work,
+and what is missing is the per-boot reconcile, `--verify`/`--revert` and rpm ownership. **How it
+was lost is established**, from rpm-ostreed's own transaction log and the boot list: the fifth
+migration's `--apply-live` put mdns on `/usr` for that boot only, with the durable copy in a
+*staged* deployment; an upgrade was staged on top on 2026-10-11; and at 20:17:05 on 2026-10-12 the
+machine suspended and never resumed, so finalization never ran and both were lost — the next boot,
+sixteen hours later, came up on the old deployment. That is the "observed instance" in
+[docs/user/ostree.md](../docs/user/ostree.md), and this was its package. The package's unit logged
+in that one live-applied boot and in none of the sixteen since. Uninstalling kdeconnect, on
+2026-10-14, came a day later and is not the cause. **A live apply is not an install until the
+machine has booted the staged deployment** — reboot in the same sitting.
+
+**Re-staged the same evening, 2026-10-19**: the same `waydroid-ext-mdns-1.0.0-1.noarch.rpm`
+(sha256 `e94c842d…`, `test-install.sh mdns` 7 of 7 again), by plain `rpm-ostree install` with no
+`--apply-live`, because the owner was rebooting straight after. The staged commit `84b9685a` adds
+that one package and nothing else, carries 26 local packages, and holds the reflector, its unit and
+its enable link. **Confirmed after the reboot (17:30):** booted `84b9685a`, nothing left staged,
+`rpm -q waydroid-ext-mdns` answers, the reflector unit ran at boot from `/usr/lib` with
+`Result=success`, and `waydroid-mdns-reflector --verify` exits 0 — `avahi-daemon.conf` agrees with
+`/etc/waydroid-mdns.conf` (still hash `49d456d8…`) and the source-port rule is live and permanent.
+Still unmeasured: avahi joining `waydroid0`, which needs a Waydroid session.
+
 **Recounted 2026-10-09: there are 27 `.mod` files, 26 of them shipped.** The 27th is
 `binder-policy`, added 2026-10-09. **It is built, linted and install-tested but NOT yet
 installed anywhere**, so there is no sixth migration section below and the "every shipped
@@ -961,7 +991,8 @@ ships or runs chowns `/var`; every `chown` in the tree is scoped to one file ins
 or a BlueZ or PipeWire temp file. At boot the same complaints are non-fatal and the unit still
 reports `Finished`; it is rpm-ostree's own invocation that treats a non-zero result as an error.
 **The fix is `chown root:root /var` and it was deliberately not done here** — it is outside this
-migration and is the owner's call.
+migration and is the owner's call. **Done 2026-10-19 at the owner's direction**, in the sixth
+migration below — which also found that fixing it does not unblock `apply-live` by itself.
 
 **The consequence that does matter: `InterruptedLiveCommit`, not `LiveCommit`.** The section above
 gives `LiveCommit` equalling the pending `Commit` as the test for a consistent live apply. That is
@@ -1028,6 +1059,39 @@ One thing that fell out of the greeter state and is worth collecting at the next
 joined `lo` and `wlp1s0` only, because `waydroid0` is created at session start. That is exactly
 [docs/45](../docs/45-mdns-reflection.md)'s last open question — whether avahi picks the bridge up by
 hotplug when it appears after the daemon — and the next session start answers it for free.
+
+### Sixth migration — swtpm, done 2026-10-19, and a reboot instead of `--apply-live`
+
+`waydroid-ext-swtpm` 1.0.0, goal 10's stage 0 ([docs/71](../docs/71-swtpm-host.md)). Built here
+(`build-mod.sh --lint swtpm`: 2 errors and 2 warnings, the `binder-policy` baseline — it carries a
+`%check` too), `test-install.sh swtpm` 6 of 6, `verify-units.sh` clean, and its `%check` runs the
+selftest's **live** half — a real swtpm through the wrapper, `waydroid-tpm-check`, a restart on
+the same state — with `WAYDROID_SWTPM_SELFTEST_LIVE=require`, so the CI `rpm` job cannot pass it by
+skipping. It is the first package here whose BuildRequires exist to make `%check` real.
+
+Before the transaction it was preflighted on bigtab01 itself, unprivileged: Fedora 44's swtpm,
+swtpm-libs and libtpms extracted into `/var/tmp`, run against the host's own tpm2-tools and
+tcti-swtpm, 15 of 15 and 19 of 19, then deleted. `rpm -K` on those RPMs says `SIGNATURES NOT OK`
+on this host and that is **`NOKEY`, not a bad signature** — an rpm-ostree rpmdb holds no
+`gpg-pubkey`; `rpm -Kv` says so, and a scratch keyring with
+`/etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-primary` verifies all three.
+
+The transaction, in order:
+
+| Step | Result |
+|---|---|
+| `chown root:root /var` | the fifth migration's fault, fixed at the owner's direction; `systemd-tmpfiles --dry-run --boot` then reports no unsafe transition |
+| `rpm-ostree install /var/tmp/waydroid-ext-swtpm-1.0.0-1.noarch.rpm` | exit 0; added the package, `swtpm`, `swtpm-libs`, `libtpms`, `swtpm-selinux`; carried the staged wifid 1.1.1 → 1.1.2; **and re-resolved `android-tools`, `vim-filesystem` and `xxd` to newer updates**, because a layered install recomposes against today's repo metadata |
+| `rpm-ostree apply-live --allow-replacement` | **refused**: *Previously interrupted while targeting commit 15e75a09…, cannot change target to 1d1fb43f…*. Nothing changed live |
+| reboot at the console | booted `1d1fb43f`; `InterruptedLiveCommit` gone; nothing staged |
+
+So the fifth migration's interrupted apply was what blocked this one, and fixing `/var` was
+necessary but not sufficient — [docs/user/ostree.md](../docs/user/ostree.md) now has the three ways
+out. Verified on the booted system: unit active from boot with `NRestarts=0` and
+`FragmentPath` under `/usr/lib` (no shadow), process in `unconfined_service_t`, labels and modes as
+designed, `semodule -l` listing swtpm's three modules, 15 of 15 and 19 of 19 across a restart, zero
+AVCs, and 11 journal lines for the whole boot with the per-connection spam filtered out. Full table
+in [docs/71](../docs/71-swtpm-host.md).
 
 ## What was deployed on bigtab01 before that — audited 2026-09-15
 

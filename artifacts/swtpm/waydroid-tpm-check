@@ -1,0 +1,258 @@
+#!/bin/sh
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# waydroid-tpm-check -- prove a TPM 2.0 does the operations Waydroid's keystore
+# backend will ask of it, through whichever TCTI you name. The same sequence runs
+# against waydroid-swtpm.service and against a hardware TPM, which is the backend
+# seam of docs/65 showing up at the shell before it shows up in code.
+#
+#   waydroid-tpm-check                          # swtpm:path=/run/swtpm-waydroid/sock
+#   waydroid-tpm-check --tcti device:/dev/tpmrm0
+#   waydroid-tpm-check --save DIR               # then restart the TPM, and:
+#   waydroid-tpm-check --verify-saved DIR       # the seed and a sealed blob survived
+#
+# The socket and /dev/tpmrm0 are both group tss, so run it with sudo or as a
+# member of tss.
+#
+# WHAT IT TOUCHES. Transient objects only. It never makes anything persistent,
+# never writes NV, never takes a hierarchy password, and never clears -- a
+# hardware TPM here may hold a previous OS's SRK and EK (docs/65 found four
+# persistent objects on vidiot01's). --save writes files into DIR, not the TPM.
+#
+# WHY IT FLUSHES, AND WHAT. swtpm has no resource manager, and tpm2-tools leave
+# every object they load in the TPM when they exit: createprimary leaves the
+# primary, create leaves a second copy of the parent it context-loaded, and the
+# third object fails TPM_RC_OBJECT_MEMORY -- after which swtpm refuses everything
+# until it restarts. Measured, three transient slots, on swtpm and on Intel PTT
+# alike. So after every step this flushes the transient objects and sessions
+# that were NOT loaded when it started. Behind /dev/tpmrm0 the kernel's resource
+# manager does that on close anyway and there is never anything to flush. Against
+# swtpm, do not run this while another client is mid-operation: a handle that
+# client loads after our baseline is indistinguishable from one of ours.
+#
+# Exit: 0 every step passed; 1 a step failed; 2 usage, or a tool is missing;
+# 3 the TPM could not be reached at all.
+
+TCTI=${TPM2TOOLS_TCTI:-swtpm:path=/run/swtpm-waydroid/sock}
+SAVE=
+VERIFY=
+
+usage() {
+    sed -n 's/^#   //p' "$0"
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tcti) [ $# -ge 2 ] || usage; TCTI=$2; shift ;;
+        --tcti=*) TCTI=${1#--tcti=} ;;
+        --save) [ $# -ge 2 ] || usage; SAVE=$2; shift ;;
+        --verify-saved) [ $# -ge 2 ] || usage; VERIFY=$2; shift ;;
+        -h|--help) usage ;;
+        *) echo "waydroid-tpm-check: unknown argument: $1" >&2; usage ;;
+    esac
+    shift
+done
+export TPM2TOOLS_TCTI="$TCTI"
+
+# Both are used after a cd into the work directory.
+case $SAVE in /*|'') ;; *) SAVE=$PWD/$SAVE ;; esac
+case $VERIFY in /*|'') ;; *) VERIFY=$PWD/$VERIFY ;; esac
+
+for t in tpm2_getcap tpm2_getrandom tpm2_createprimary tpm2_readpublic tpm2_create \
+         tpm2_load tpm2_sign tpm2_verifysignature tpm2_unseal tpm2_flushcontext sha256sum; do
+    command -v "$t" >/dev/null 2>&1 || { echo "waydroid-tpm-check: $t not found (tpm2-tools, coreutils)" >&2; exit 2; }
+done
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/waydroid-tpm-check.XXXXXX") || exit 2
+log=$work/log
+pass=0
+fail=0
+
+handles() {
+    { tpm2_getcap handles-transient; tpm2_getcap handles-loaded-session; } 2>/dev/null | sed -n 's/^- //p'
+}
+
+flush_ours() {
+    for h in $(handles); do
+        case " $baseline " in
+            *" $h "*) ;;
+            *) tpm2_flushcontext "$h" >/dev/null 2>&1 ;;
+        esac
+    done
+}
+
+cleanup() {
+    [ -n "${baseline+set}" ] && flush_ours
+    rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM
+
+now_ms() { date +%s%3N; }
+
+# same A B -- byte-identical. sha256sum rather than cmp, which is diffutils and
+# not something a minimal host or a build container is guaranteed to carry.
+same() { [ "$(sha256sum <"$1")" = "$(sha256sum <"$2")" ]; }
+
+# step NAME CMD... -- run one TPM operation, flush what it left behind, report.
+step() {
+    name=$1; shift
+    t0=$(now_ms)
+    if "$@" >"$log" 2>&1; then
+        rc=0
+    else
+        rc=1
+    fi
+    t1=$(now_ms)
+    flush_ours
+    if [ $rc -eq 0 ]; then
+        pass=$((pass + 1))
+        printf '  ok   %-44s %5s ms\n' "$name" "$((t1 - t0))"
+    else
+        fail=$((fail + 1))
+        printf '  FAIL %s\n' "$name"
+        sed 's/^/         /' "$log"
+    fi
+    return $rc
+}
+
+# expect_fail NAME CMD... -- the same, for an operation that must be refused.
+expect_fail() {
+    name=$1; shift
+    if "$@" >"$log" 2>&1; then
+        fail=$((fail + 1))
+        printf '  FAIL %s (it was accepted)\n' "$name"
+    else
+        pass=$((pass + 1))
+        printf '  ok   %s\n' "$name"
+    fi
+    flush_ours
+}
+
+# prop CAPABILITY NAME -> the property's value, else its raw field. getcap prints
+# both "NAME: 0x3" on one line and a "NAME:" block of raw:/value: lines.
+prop() {
+    tpm2_getcap "$1" 2>/dev/null | awk -v k="$2:" '
+        $1 == k { if (NF > 1) { v = $2; exit } want = 1; next }
+        !want { next }
+        $1 == "raw:" { v = $2; next }
+        $1 == "value:" { sub(/^[^:]*:[ \t]*/, ""); gsub(/"/, ""); v = $0; exit }
+        { exit }
+        END { if (v != "") print v }'
+}
+
+echo "waydroid-tpm-check via $TCTI"
+
+if ! tpm2_getcap properties-fixed >"$log" 2>&1; then
+    echo "  FAIL cannot reach a TPM"
+    sed 's/^/         /' "$log"
+    case $TCTI in
+        swtpm:*) echo "  is waydroid-swtpm.service running? systemctl status waydroid-swtpm" ;;
+    esac
+    if grep -qi 'permission denied\|EACCES' "$log"; then
+        echo "  permission denied: run with sudo, or as a member of group tss"
+    fi
+    exit 3
+fi
+
+family=$(prop properties-fixed TPM2_PT_FAMILY_INDICATOR)
+manuf=$(prop properties-fixed TPM2_PT_MANUFACTURER)
+vendor=$(prop properties-fixed TPM2_PT_VENDOR_STRING_1)
+rev=$(prop properties-fixed TPM2_PT_REVISION)
+slots=$(prop properties-variable TPM2_PT_HR_TRANSIENT_AVAIL)
+echo "  TPM $family, manufacturer $manuf, vendor \"$vendor\", spec revision $rev"
+
+baseline=$(handles | tr '\n' ' ')
+if [ -n "$baseline" ]; then
+    echo "  note: $(echo "$baseline" | wc -w) object(s) already loaded by another client; left alone: $baseline"
+fi
+
+if [ "$family" != "2.0" ]; then
+    echo "  FAIL not a TPM 2.0 (family indicator \"$family\")"
+    exit 1
+fi
+pass=$((pass + 1))
+printf '  ok   %s\n' "family is 2.0"
+
+# Two slots at once is the most this ever holds: a parent and one child.
+case $slots in
+    0x0|0) echo "  FAIL no free transient object slots -- a client without a resource"
+           echo "       manager has leaked objects. Restart the TPM (waydroid-swtpm.service)."
+           exit 1 ;;
+    0x1|1) echo "  FAIL only one free transient object slot; this needs two"; exit 1 ;;
+    *) pass=$((pass + 1)); printf '  ok   %s\n' "free transient object slots: $((slots))" ;;
+esac
+
+w=$work
+
+step "random: getrandom 32" tpm2_getrandom 32 -o "$w/rand"
+if [ "$(wc -c <"$w/rand" 2>/dev/null)" != 32 ]; then
+    fail=$((fail + 1)); echo "  FAIL getrandom did not return 32 bytes"
+fi
+
+# The owner hierarchy's primary is derived from its seed and the template, so
+# the same command yields the same key every time -- which is what lets a
+# backend keep only wrapped blobs on disk and still load them after a restart.
+step "primary: createprimary -C o -G ecc" tpm2_createprimary -C o -G ecc -c "$w/primary.ctx" || {
+    grep -q '0x9a2\|bad auth\|authorization' "$log" &&
+        echo "  the owner hierarchy has a password; this check takes none and will never clear it"
+    exit 1
+}
+step "primary: readpublic name" tpm2_readpublic -c "$w/primary.ctx" -n "$w/primary.name"
+
+step "sign: create ECC P-256 key" tpm2_create -C "$w/primary.ctx" -G ecc256 -u "$w/key.pub" -r "$w/key.priv"
+step "sign: load it under the primary" tpm2_load -C "$w/primary.ctx" -u "$w/key.pub" -r "$w/key.priv" -c "$w/key.ctx"
+printf 'waydroid-tpm-check %s\n' "$(date +%s)" >"$w/msg"
+step "sign: ECDSA SHA-256" tpm2_sign -c "$w/key.ctx" -g sha256 -o "$w/sig" "$w/msg"
+step "sign: verify signature" tpm2_verifysignature -c "$w/key.ctx" -g sha256 -m "$w/msg" -s "$w/sig"
+printf 'tampered\n' >>"$w/msg"
+expect_fail "sign: tampered message is rejected" tpm2_verifysignature -c "$w/key.ctx" -g sha256 -m "$w/msg" -s "$w/sig"
+
+# Seal and unseal is the whole backend contract docs/65 asks a TPM for.
+tpm2_getrandom 32 -o "$w/secret" >/dev/null 2>&1; flush_ours
+step "seal: create sealed object" tpm2_create -C "$w/primary.ctx" -i "$w/secret" -u "$w/seal.pub" -r "$w/seal.priv"
+step "seal: load it" tpm2_load -C "$w/primary.ctx" -u "$w/seal.pub" -r "$w/seal.priv" -c "$w/seal.ctx"
+step "seal: unseal" tpm2_unseal -c "$w/seal.ctx" -o "$w/unsealed"
+if same "$w/secret" "$w/unsealed"; then
+    pass=$((pass + 1)); printf '  ok   %s\n' "seal: unsealed bytes match"
+else
+    fail=$((fail + 1)); printf '  FAIL %s\n' "seal: unsealed bytes do not match"
+fi
+
+if [ -n "$SAVE" ]; then
+    mkdir -p "$SAVE" && cp "$w/primary.name" "$w/seal.pub" "$w/seal.priv" "$SAVE"/ &&
+        sha256sum <"$w/secret" | cut -d' ' -f1 >"$SAVE/secret.sha256" &&
+        echo "  saved: $SAVE (primary name, sealed blob, sha256 of the secret)"
+fi
+
+if [ -n "$VERIFY" ]; then
+    for f in primary.name seal.pub seal.priv secret.sha256; do
+        [ -r "$VERIFY/$f" ] || { echo "  FAIL $VERIFY/$f missing -- was it written by --save?"; exit 1; }
+    done
+    if same "$w/primary.name" "$VERIFY/primary.name"; then
+        pass=$((pass + 1)); printf '  ok   %s\n' "saved: owner primary is the same key (seed kept)"
+    else
+        fail=$((fail + 1)); printf '  FAIL %s\n' "saved: owner primary differs -- the seed did not survive"
+    fi
+    step "saved: load the saved sealed blob" tpm2_load -C "$w/primary.ctx" -u "$VERIFY/seal.pub" \
+        -r "$VERIFY/seal.priv" -c "$w/saved.ctx"
+    step "saved: unseal it" tpm2_unseal -c "$w/saved.ctx" -o "$w/saved.out"
+    if [ -r "$w/saved.out" ] &&
+       [ "$(sha256sum <"$w/saved.out" | cut -d' ' -f1)" = "$(cat "$VERIFY/secret.sha256")" ]; then
+        pass=$((pass + 1)); printf '  ok   %s\n' "saved: unsealed secret matches"
+    else
+        fail=$((fail + 1)); printf '  FAIL %s\n' "saved: unsealed secret does not match"
+    fi
+fi
+
+leftover=$(handles | tr '\n' ' ')
+if [ "$leftover" = "$baseline" ]; then
+    pass=$((pass + 1)); printf '  ok   %s\n' "nothing left loaded"
+else
+    fail=$((fail + 1)); printf '  FAIL %s\n' "left loaded: $leftover (baseline: ${baseline:-none})"
+fi
+
+echo "$pass passed, $fail failed"
+[ "$fail" -eq 0 ]

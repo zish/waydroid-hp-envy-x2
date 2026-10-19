@@ -900,6 +900,25 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
     **`arc-keymaster`** — a host daemon serving Android's keymaster HAL backed by the host TPM
     through Chaps and cryptohome, which is this project's own daemon architecture already shipping
     for this exact interface.
+    **Stage 0 is done, 2026-10-19: `waydroid-ext-swtpm` 1.0.0 is installed and verified on
+    bigtab01** — swtpm under systemd on `/run/swtpm-waydroid/sock`, 15/15 and then 19/19 across a
+    restart, zero AVCs — and **Android still sees nothing, by design**: the owner chose to stop at
+    stage 0, and the keystore HAL (stages 1–5) is the part that would change that. Four findings
+    shaped it. **systemd cannot start Fedora's swtpm directly**: swtpm-selinux confines it for
+    libvirt only, so a plain unit would stay `init_t` and be denied `execute`, and neither
+    `SELinuxContext=swtpm_t` nor `=unconfined_service_t` is permitted — a `bin_t` wrapper entered
+    as `unconfined_service_t` is the one open route, with no policy module. **Anything named
+    `waydroid-*` under `/run` or `/var/lib` inherits Waydroid's SELinux types** by prefix, so the
+    directories are `swtpm-waydroid`; check `matchpathcon` before naming any future one.
+    **tpm2-tools leak every object into swtpm**, which has no resource manager, so the third object
+    exhausts its three transient slots and swtpm refuses everything until restarted — the check
+    flushes what it loads, and the backend must own the connection. And **swtpm logs a line per
+    TPM command**, filtered with `LogFilterPatterns=`. The owner enabled **Secure Boot** first; it
+    does not enable the TPM 1.2 (still no device, no `TCPA`/`TPM2` table), and no OS-side command
+    can read this firmware's settings — `hp-bioscfg` exists but enumerates nothing useful. Secure
+    Boot also put the kernel in `lockdown=integrity`, which **refuses hibernation** (measured) and
+    blocks `/dev/port`, goal 2's last vibration avenue. See
+    [docs/71-swtpm-host.md](docs/71-swtpm-host.md).
     See [docs/65-tpm-keystore.md](docs/65-tpm-keystore.md).
 11. **A fingerprint HAL fed by libfprint — Chipsailing on bigtab01, Goodix on vidiot01.** **Added
     2026-10-10 at the owner's request as two items; scoped the same day as one, nothing built.**
@@ -1279,7 +1298,11 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   `artifacts/pidguard/` caps the container's PID namespace below the 32-bit bionic cliff, with
   `waydroid-pid-reset` for a container already past it; read its README for why the guard
   reconciles on a timer rather than hooking an event, and why it refuses to run on a pre-6.14
-  kernel where `pid_max` is still global
+  kernel where `pid_max` is still global.
+  `artifacts/swtpm/` is `waydroid-swtpm`, a software TPM 2.0 on a unix socket for goal 10's
+  keystore backend, and `waydroid-tpm-check`, which runs one TPM sequence through any TCTI; read
+  the wrapper's header before "simplifying" `ExecStart=` to `/usr/bin/swtpm` — under Fedora's
+  swtpm-selinux that unit cannot start
 - `packaging/` — RPM specs and build drivers. The current design is **one source package per
   modification**, generated from `packaging/mods/*.mod` by `gen-spec.sh` and built by
   `build-mod.sh` ([docs/47-package-split.md](docs/47-package-split.md)); the four hand-written
@@ -1287,13 +1310,20 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   can build. `packaging/README.md` records what has actually been through `rpmbuild`.
   **Read it before assuming anything is packaged**, and get the count from
   `packaging/gen-spec.sh --list` rather than from prose — it marks the unshipped ones and cannot
-  go stale. **27 `.mod` files as of 2026-10-09, 26 shipped; 25 of them installed on bigtab01** —
-  the 26th is `binder-policy`, built and tested but not yet installed anywhere —
-  `mdns` was the last and closed that gap; `dexopt` is the only one absent and declares
-  `SHIPPED=no`. Two caveats behind the headline: `media` runs 1.0.0 against a `.mod` declaring
-  1.1.0 that was never built, and the fifth migration left `InterruptedLiveCommit` set from a
-  pre-existing `/var` ownership fault (`packaging/README.md`, *Fifth migration*;
-  [docs/user/ostree.md](docs/user/ostree.md) has the general case). The newest is `mdns`, which is also
+  go stale. **28 `.mod` files as of 2026-10-19, 27 shipped; 26 of them installed on bigtab01**,
+  counted from that day's `rpm-ostree status` rather than carried forward. The one shipped and not
+  installed is `binder-policy`, built and tested but not installed anywhere. **`mdns` was found
+  missing the same day although this file said it was installed**: its package, reconciler and
+  unit were absent while the avahi config it manages stayed in force. It had been lost with its
+  staged deployment when a 2026-10-12 suspend never resumed — its live apply was never followed by
+  a boot into it, and **a live apply is not an install until that reboot happens**. Reinstalled
+  and verified the same evening (`--verify` exits 0). `dexopt` is the only one absent and declares
+  `SHIPPED=no`. One caveat behind the headline: `media` runs 1.0.0 against a `.mod` declaring
+  1.1.0 that was never built. The fifth migration's `InterruptedLiveCommit` is **gone** since the
+  2026-10-19 reboot, and `/var` is `root:root` again at the owner's direction — but fixing `/var`
+  did **not** unblock `apply-live`, which pins an interrupted target
+  ([docs/71](docs/71-swtpm-host.md); [docs/user/ostree.md](docs/user/ostree.md) has the general
+  case). The newest is `swtpm` ([docs/71](docs/71-swtpm-host.md)). `mdns` was
   the first host modification to declare a `CHECK` (its `%check` reproduces the verified
   `avahi-daemon.conf` from the stock one byte for byte, and `gen-spec.sh` needed a one-line fix
   before a host `.mod` could declare one at all). Revised 2026-09-24, there were 14 `.mod`

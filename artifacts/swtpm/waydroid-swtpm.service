@@ -1,0 +1,68 @@
+[Unit]
+Description=Software TPM 2.0 for Waydroid's keystore backend (swtpm)
+Documentation=man:swtpm(8)
+# Deliberately not ordered against waydroid-container.service. Nothing inside the
+# Android container speaks TPM -- the client is a host-side keystore backend
+# (docs/65), and that orders itself after this unit, not the other way round.
+
+[Service]
+Type=simple
+# A bin_t wrapper rather than /usr/bin/swtpm, for SELinux: see its header.
+ExecStart=@LIBEXECDIR@/waydroid-swtpm
+
+# tss is the conventional owner of TPM access on Fedora -- /dev/tpmrm0 is
+# root:tss 0660 -- so a backend in group tss reaches this socket and a hardware
+# TPM alike. The user comes from tpm2-tss's sysusers.d.
+User=tss
+Group=tss
+
+# NOT /var/lib/waydroid-swtpm and /run/waydroid-swtpm: Fedora's waydroid policy
+# labels /var/lib/waydroid(.*)? as waydroid_data_t and /run/waydroid-(?!lxc).* as
+# waydroid_var_run_t -- by prefix, so any name starting "waydroid" inherits
+# Waydroid's own types, which Android's container domain is meant to reach. The
+# TPM's seeds should not wear that label. Inverted, these are var_lib_t and
+# var_run_t. Measured with matchpathcon on Fedora 43 and 44.
+StateDirectory=swtpm-waydroid
+StateDirectoryMode=0700
+RuntimeDirectory=swtpm-waydroid
+RuntimeDirectoryMode=0750
+UMask=0077
+
+Restart=on-failure
+RestartSec=2s
+
+# tcti-swtpm opens a fresh connection for every TPM command, and swtpm logs each
+# close -- 543 lines for three runs of waydroid-tpm-check, on 0.10.2 as on 0.7.1.
+# Its --log level does not filter that message, and --log fd=2 makes swtpm exit
+# silently, so the one line is dropped here and everything else is kept.
+LogFilterPatterns=~^swtpm: Data client disconnected$
+
+# swtpm needs a directory, two pathname unix sockets and nothing else. A pathname
+# AF_UNIX socket is reached through the filesystem, so PrivateNetwork= costs the
+# clients nothing and guarantees this never opens a TCP port -- which matters on
+# a host that also serves an access point (docs/64).
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

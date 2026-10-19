@@ -1,6 +1,8 @@
 # 65 — A TPM behind Android's keystore: swtpm on bigtab01, Intel PTT on vidiot01
 
-**Date:** 2026-10-10. **Status:** feasibility only, nothing deployed, no code written. Opened at the
+**Date:** 2026-10-10. **Status:** feasibility only when written. **Stage 0 done 2026-10-19** —
+`waydroid-ext-swtpm` is built, packaged, installed and verified on bigtab01, and corrects two claims
+below; see [71](71-swtpm-host.md). Stages 1–5, the keystore HAL itself, are not started. Opened at the
 owner's request as two roadmap items — *deploy swtpm to bigtab01 and configure LineageOS to use it*,
 and *configure vidiot01's hardware TPM2 device to Waydroid*. They are scoped together here because
 they are **one component with two backends**, in the same sense that
@@ -255,6 +257,11 @@ swtpm socket --tpm2 --tpmstate dir=/run/swtpm/state \
 export TPM2TOOLS_TCTI="swtpm:path=/run/swtpm/s"
 ```
 
+> **Corrected 2026-10-19 ([71](71-swtpm-host.md)).** This demonstration passed only because it
+> stopped at two objects. swtpm has no resource manager and tpm2-tools leave every object they load
+> behind, so the third object fails `TPM_RC_OBJECT_MEMORY` and swtpm refuses everything until it
+> restarts. Any client of the socket must flush what it loads.
+
 **Prefer this unix-socket shape to the two alternatives**, for a reason that is about the host policy
 rather than taste: a socket involves no character device, so none of the `tpm_device_t` labelling
 question arises at all, whereas `swtpm cuse` creates a `/dev/vtpmX` whose label would have to be
@@ -352,7 +359,8 @@ The work is in the semantics:
    machine in front of you. The host rig behind it is **already proven on the dev box** (above), so
    what is left is: layer `swtpm`/`swtpm-tools` on bigtab01 (one rpm-ostree transaction and a
    reboot — and check that the `tss` user gets created, because `tpm2-tss` is installed there today
-   without one and its tmpfiles fail on every boot), then show the same tpm2-tools sequence passing
+   without one and its tmpfiles fail on every boot — **corrected in [71](71-swtpm-host.md): `tss` is
+   uid 59 in `/usr/lib/passwd`, and the failing lines are the initrd's**), then show the same tpm2-tools sequence passing
    through `swtpm:path=…` on bigtab01 and through `device:/dev/tpmrm0` on vidiot01. Deliverable: one
    script in `bin/` that takes the TCTI as a parameter and passes on both hosts — which is the
    backend seam appearing at the shell before it appears in code.
@@ -379,7 +387,10 @@ Android image; and any claim that bigtab01's swtpm improves that machine's secur
 1. **What does bigtab01's firmware setup actually offer** — a *TPM Device* / *TPM State* pair, and
    crucially a **1.2 → 2.0 mode switch**? The machine's TPM 1.2 is currently not exposed to the OS
    at all, and which of the three outcomes above applies decides whether this item has one backend
-   or two.
+   or two. **Still open 2026-10-19.** The owner has since enabled Secure Boot, which does
+   not enable the TPM — still no device and no `TCPA`/`TPM2` table — and no OS-side command can
+   read the answer: `hp-bioscfg` is present but enumerates only `Sure_Start`
+   ([71](71-swtpm-host.md)). It is on the setup screen or nowhere.
 2. **Are vidiot01's four resident persistent handles and two NV indices expendable?** They look like
    a prior Windows install's SRK and EK. Nothing here needs them cleared; confirm before anyone is
    tempted.

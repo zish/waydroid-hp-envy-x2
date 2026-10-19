@@ -59,7 +59,11 @@ deployment** — more likely than any of the dramatic rows above, because it nee
 except walking away. Observed on the reference machine: it suspended at 20:17:05 with an upgrade and
 a newly layered package staged, the journal ends there, and the next entry is a fresh boot sixteen
 hours later. Both were gone — same version running, same kernel, and the new package simply not
-installed. **Stage and reboot in one sitting.**
+installed. The package was `waydroid-ext-mdns`, applied with `--apply-live`, which is what made the
+loss easy to miss: it worked for the rest of that boot, and its `/etc` files — written live, into the
+real `/etc` — are still there, so the host *looks* configured while the package is gone. It went
+unnoticed for thirteen days, until an `rpm -q`. **Stage and reboot in one sitting, `--apply-live` or
+not.**
 
 The signature, if you suspect this is what happened to you:
 
@@ -160,9 +164,24 @@ happened"**, and do not re-run the install on that assumption; check first.
 | `LiveCommit: <hash>` equal to the pending deployment's `Commit` | the running filesystem is consistent with what the next boot lands on, and nothing is owed |
 | `InterruptedLiveCommit: <hash>` | the content applied, and rpm-ostree does not consider the sequence finished |
 
-With `InterruptedLiveCommit` set, expect a further `--apply-live` on that host to object until
-either the underlying fault is fixed or the machine is rebooted into the staged deployment. A
-reboot clears it.
+With `InterruptedLiveCommit` set, a further `--apply-live` on that host **will** object, and
+fixing the underlying fault is **not** enough to stop it — measured 2026-10-19, with `/var` already
+given back to `root` and `systemd-tmpfiles --dry-run` clean:
+
+```
+error: Previously interrupted while targeting commit 15e75a09…, cannot change target to 1d1fb43f…
+```
+
+An interrupted live apply pins the commit it was targeting, and any new `rpm-ostree install` stages
+a new commit, which is a different target. Three ways out, none of them automatic:
+
+| | What it does |
+|---|---|
+| `rpm-ostree apply-live --target=<the interrupted commit>` | finishes the old apply first; then a plain `apply-live` can move on to the new one |
+| `rpm-ostree apply-live --reset` | puts `/usr` back to the booted commit, briefly undoing whatever the old apply had already landed |
+| reboot into the staged deployment | clears it, and is what the owner chose that day |
+
+Fix the fault first in every case, or the retry fails the same way the original did.
 
 **One cause seen in practice, on a host that had been working for weeks:** `/var` owned by a
 regular user instead of `root`. systemd 259 refuses what it calls an unsafe path transition when a
