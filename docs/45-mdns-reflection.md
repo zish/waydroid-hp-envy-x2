@@ -537,5 +537,11 @@ and `waydroid status` is what answers.
   attached the container's veth to the new bridge -- avahi logged *Joining mDNS multicast group on
   interface waydroid0.IPv4* and `.IPv6`, with no restart. 22 seconds later, as Android's Wi-Fi stack
   re-associated the host radio, `wlp1s0` left and re-joined with a new IPv6 link-local address,
-  and avahi followed that too. Not yet watched: an Android client actually discovering a service
-  after such a boot, as distinct from avahi being on the right interfaces.
+  and avahi followed that too. **And end to end, the same session:** the owner searched for
+  printers in Mopria, which found `Canon-MF642C-643C-644C-UFR-II @ vidiot01` -- the CUPS queue
+  vidiot01 shares, which bigtab01's avahi sees on `wlp1s0` as `vidiot01.local` at `10.42.0.1:631` --
+  and printed a test page. vidiot01's cupsd logged it as **job 194** at 17:41:28: `Print-Job
+  successful-ok` from `10.42.0.137`, user `WayDroid x86_64 Device`, `MopriaTestPage.pdf`, completed
+  17:41:32. A trap in checking that: `lpstat -W completed -o` on vidiot01 put jobs from May at the
+  end of its list, so `tail` showed nothing from today; `journalctl -u cups` and `lpstat -W all -o`
+  are what show the job.

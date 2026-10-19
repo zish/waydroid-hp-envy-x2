@@ -124,6 +124,9 @@ its enable link. **Confirmed after the reboot (17:30):** booted `84b9685a`, noth
 `/etc/waydroid-mdns.conf` (still hash `49d456d8…`) and the source-port rule is live and permanent.
 And when the owner then logged in, avahi joined the new `waydroid0` by hotplug with no restart,
 which answers the fifth migration's last open question below ([docs/45](../docs/45-mdns-reflection.md)).
+The owner then printed a Mopria test page from Android to vidiot01's shared Canon queue, and
+vidiot01's cupsd logged the job from bigtab01 as `successful-ok` — the package's purpose, verified
+end to end after the reboot.
 
 **Recounted 2026-10-09: there are 27 `.mod` files, 26 of them shipped.** The 27th is
 `binder-policy`, added 2026-10-09. **It is built, linted and install-tested but NOT yet
