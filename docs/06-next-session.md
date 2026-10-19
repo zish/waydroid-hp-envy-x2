@@ -409,8 +409,10 @@ Four things to know before touching it:
   `waydroid-wifid.service` handles it. **`bin/wifi-test.sh` checks this first** — see
   [35](35-wifi-stage5.md).
 
-- **An overlay file is not deployed until the container *service* restarts.**
-  `waydroid container restart` does nothing for it — see [32](32-wifi-stage3.md). This already bit a
+- **An overlay file is not deployed until the Waydroid *session* restarts** — on bigtab01, log out
+  of the `waydroid-cage` session at SDDM and back in. `waydroid container restart` does nothing for
+  it ([32](32-wifi-stage3.md)), and `systemctl restart waydroid-container.service` ends the session,
+  applies nothing and still reports success ([AGENTS.md](../AGENTS.md)). This already bit a
   Stage 0 file that had not been in effect for a day without anyone noticing. Verify from inside the
   container, not by listing the overlay directory.
 

@@ -338,7 +338,13 @@ The work is in the semantics:
   libgbinder 1.1.47 implements `aidl6`. Any new daemon should take the version from a parameter.
 - **A VINTF fragment declares the instance**, the same mechanism the widevine fix and Wi-Fi stage 4
   use; `artifacts/overlay/vendor/etc/vintf/manifest/` already holds one to copy.
-- **An overlay file is not live until the container *service* restarts** — [32](32-wifi-stage3.md).
+- **An overlay file is not live until the Waydroid *session* restarts.** The overlay merge and the
+  LXC `config_nodes` entries are both read at session start: on bigtab01 that means logging out of
+  the `waydroid-cage` session and back in, and in app mode `waydroid session stop` and relaunching
+  the app ([63](63-second-host-and-android-16.md)). Neither `waydroid container restart`
+  ([32](32-wifi-stage3.md)) nor `systemctl restart waydroid-container.service` applies it — the
+  second ends the session, applies nothing and still reports success
+  ([AGENTS.md](../AGENTS.md)). Read the file from inside the container to confirm it.
 
 ## Prior art worth reading before designing anything
 

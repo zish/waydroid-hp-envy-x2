@@ -209,8 +209,12 @@ numbers from the laptop the driver was developed on.
   allows for `call` and denies-and-`dontaudit`s for `transfer`: a bare `DeadObjectException` with a
   clean `ausearch`, which cost [35](35-wifi-stage5.md) a day. Ship `SELinuxContext=` in the unit from
   the first commit, and have the test script check it first, as `bin/wifi-test.sh` does.
-- **An overlay file is not deployed until the container *service* restarts** — [32](32-wifi-stage3.md).
-  A stage-0 XML can sit there looking deployed and doing nothing for a day.
+- **An overlay file is not deployed until the Waydroid *session* restarts** — on bigtab01 a logout
+  and login of the `waydroid-cage` session, in app mode `waydroid session stop` and relaunching
+  ([63](63-second-host-and-android-16.md)). Neither `waydroid container restart`
+  ([32](32-wifi-stage3.md)) nor `systemctl restart waydroid-container.service`
+  ([AGENTS.md](../AGENTS.md)) applies it. A stage-0 XML can sit there looking deployed and doing
+  nothing for a day.
 - **Setting a lockscreen credential changes how the machine comes back.** Android requires a PIN,
   pattern or password before any fingerprint can be enrolled. On bigtab01 that means the kiosk
   session will demand it after every sleep, and [52](52-launcher-lock-and-wake.md) is the record of
