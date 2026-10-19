@@ -122,7 +122,8 @@ its enable link. **Confirmed after the reboot (17:30):** booted `84b9685a`, noth
 `rpm -q waydroid-ext-mdns` answers, the reflector unit ran at boot from `/usr/lib` with
 `Result=success`, and `waydroid-mdns-reflector --verify` exits 0 — `avahi-daemon.conf` agrees with
 `/etc/waydroid-mdns.conf` (still hash `49d456d8…`) and the source-port rule is live and permanent.
-Still unmeasured: avahi joining `waydroid0`, which needs a Waydroid session.
+And when the owner then logged in, avahi joined the new `waydroid0` by hotplug with no restart,
+which answers the fifth migration's last open question below ([docs/45](../docs/45-mdns-reflection.md)).
 
 **Recounted 2026-10-09: there are 27 `.mod` files, 26 of them shipped.** The 27th is
 `binder-policy`, added 2026-10-09. **It is built, linted and install-tested but NOT yet

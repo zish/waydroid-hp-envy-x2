@@ -56,8 +56,9 @@ same day, and each is worth knowing before touching it: **Secure Boot is on** (s
 installed** although every record said it was — lost with its staged deployment when a 2026-10-12
 suspend never resumed; its avahi config is still in force, its reconciler is not. **It was reinstalled
 and verified the same evening** — `waydroid-mdns-reflector --verify` exits 0
-([packaging/README.md](../packaging/README.md), *Recounted 2026-10-19*). Whether avahi joins
-`waydroid0` when a session creates it is still [45](45-mdns-reflection.md)'s open question.
+([packaging/README.md](../packaging/README.md), *Recounted 2026-10-19*). avahi joins `waydroid0`
+by hotplug when a session creates it, measured the same evening, which closes
+[45](45-mdns-reflection.md)'s last reboot question.
 
 ## One-paragraph state
 
