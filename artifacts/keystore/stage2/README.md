@@ -1,5 +1,14 @@
 # keystore stage 2 — declare a StrongBox instance and watch keystore2
 
+> **Superseded 2026-10-22: do not run step 2 below.** Stage 2 was never armed, because the clean
+> baseline answered it ([docs/73](../../../docs/73-keystore-stage1-engine.md)). Stage 3a then
+> measured that the VINTF *fragment* here **breaks boot**. libvintf rejects a second declaration of
+> `android.hardware.keymaster@4.0` as a conflict and poisons the whole device manifest, after which
+> keymaster and keystore2 crash-loop. The route that works overrides `/vendor/etc/vintf/manifest.xml`
+> itself, adding `strongbox` as a second `<instance>` and `<fqname>` inside the existing keymaster
+> `<hal>`. That file is derived from the image, so it is not committed here. The feature XML (step 1)
+> is still correct. Everything below is kept as the record of what was planned.
+
 These two overlay files are [docs/65](../../../docs/65-tpm-keystore.md) /
 [docs/73](../../../docs/73-keystore-stage1-engine.md) **stage 2**: make Android *declare* a StrongBox
 secure element with nothing serving it yet, so the first failure tells us how `keystore2` reacts —

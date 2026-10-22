@@ -1,8 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
+  SUPERSEDED 2026-10-22 - DO NOT DEPLOY AS A FRAGMENT. Stage 3a measured that
+  libvintf rejects a fragment re-declaring android.hardware.keymaster@4.0 as a
+  conflict with the vendor manifest, which poisons the whole device manifest:
+  keymaster and keystore2 crash-loop and boot never completes. The working route
+  is to override /vendor/etc/vintf/manifest.xml itself, adding "strongbox" as a
+  second <instance> and <fqname> inside the existing keymaster <hal>. docs/73.
+  Kept as the record of what stage 2 planned.
+
   docs/65 / docs/73 stage 2: a VINTF manifest fragment declaring a second
   keymaster@4.0 instance named "strongbox". This is what makes keystore2 TRY to
-  find a StrongBox KeyMint (via its km_compat HIDL shim) -- IServiceManager
+  find a StrongBox KeyMint (via its km_compat HIDL shim) - IServiceManager
   isDeclared() gates the attempt. With nothing serving the instance, the expected
   stage-2 result is keystore2 logging a declared-but-absent strongbox instance.
 
