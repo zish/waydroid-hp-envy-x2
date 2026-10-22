@@ -993,6 +993,30 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
     the owner at the machine, see [docs/52](docs/52-launcher-lock-and-wake.md).
     See [docs/66-fingerprint-hal.md](docs/66-fingerprint-hal.md).
 
+12. **Direct hardware passthrough — optional "pick-and-choose" control of host devices.**
+    **Added 2026-10-21 at the owner's request as a roadmap item; scoping-only, and explicitly
+    gated on a design discussion before anything is built.** The vision is a family of opt-in RPMs
+    (`waydroid-direct-usb` as the foundation, then `-fingerprint`, `-bt`, `-net`, `-audio`,
+    `-boot-kiosk`, `-direct-input`) that let a user hand Waydroid *direct* ownership of USB devices,
+    a network interface, Bluetooth, removable storage and USB/BT audio — skipping NetworkManager,
+    BlueZ, SDDM and parts of systemd where that can be done reliably, up to booting straight into
+    Waydroid. **This does not replace anything already built; it is a parallel set of options.**
+    The load-bearing fact is that Waydroid is **LXC, not a VM**: there is no IOMMU/VFIO passthrough,
+    the host kernel's drivers always run host-side, and "give Android a device" means moving it into
+    a namespace (net) or allowing it in the container's cgroup device filter and bind-mounting the
+    node (USB/char), plus masking whatever host userspace owns it. VT-x/VT-d are therefore
+    irrelevant here, and SELinux cannot be "containerized" — inside the container it is effectively
+    Disabled, so the only choices are host-Enforcing with targeted CIL or host-Permissive globally.
+    **The single-radio hard constraint stands**: bigtab01's only NIC is its Wi-Fi, so handing the
+    radio to Android strands the host — the direct-`-net`/`-bt` options are unsafe on bigtab01 and
+    are for multi-radio hosts only. Ground-truthed 2026-10-21: `lxc-device add`/`del` is present
+    (lxc 6.0.6, container at `/var/lib/waydroid/lxc/waydroid`) and is the runtime bind/unbind
+    primitive, but on this host's unified cgroup **v2** the device filter is an eBPF program, so
+    clean *detach*/revoke is the fiddly half and a live keyboard toggle is better done with
+    `EVIOCGRAB` than by repeated cgroup attach/detach. **Nothing here is scoped for build** until the
+    owner and I have talked it through. Full feasibility, per-subsystem verdicts and the open
+    questions are in [docs/72-direct-hardware-options.md](docs/72-direct-hardware-options.md).
+
 **Screen brightness — DONE, and not on the list above.** Added at the owner's request on
 2026-09-09, between Wi-Fi Stage 5 and removable media. Android's brightness slider now drives the real
 panel backlight. The machine has **no ambient light sensor** — the ITE8350 declares only five
