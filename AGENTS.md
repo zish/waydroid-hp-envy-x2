@@ -919,6 +919,18 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
     Boot also put the kernel in `lockdown=integrity`, which **refuses hibernation** (measured) and
     blocks `/dev/port`, goal 2's last vibration avenue. See
     [docs/71-swtpm-host.md](docs/71-swtpm-host.md).
+    **Stage 1 is done, 2026-10-21 — [docs/73](docs/73-keystore-stage1-engine.md):** the TPM-backed
+    keyblob engine ([keystore/](keystore)), 15/15 on the dev box and bigtab01, EC P-256 and AES keys
+    as native TPM objects with tag enforcement, behind a `TpmBackend` seam (tpm2-tools-exec now,
+    ESAPI — the one that ships — next). No binder, nothing Android can see yet. **Stage 2 answered
+    itself from a clean boot, 2026-10-22, with no overlay armed:** `keystore2` reaches for a StrongBox
+    KeyMint through its km_compat *Legacy wrapper* every boot and fails `-68`
+    (`HARDWARE_TYPE_UNAVAILABLE`) **without wedging** — the lockscreen stays up — so OQ4's absent case
+    is safe and OQ3 is yes: the discovery path is live and wants a *served*
+    `keymaster@4.0::IKeymasterDevice/strongbox`, not just the feature XML. **Next is stage 3**: a
+    libgbinder hwbinder service that serves that instance, with `computeSharedHmac` load-bearing from
+    the first commit (a disagreeing strongbox could break the TEE instance's shared-secret
+    negotiation), landed behind a `session stop` not a reboot until measured.
     See [docs/65-tpm-keystore.md](docs/65-tpm-keystore.md).
 11. **A fingerprint HAL fed by libfprint — Chipsailing on bigtab01, Goodix on vidiot01.** **Added
     2026-10-10 at the owner's request as two items; scoped the same day as one, nothing built.**

@@ -380,6 +380,13 @@ The work is in the semantics:
    wrapping-key design and a hard concurrency cap — exercised by a test harness on the host. No
    binder yet. This is where the TPM semantics get settled, and it is portable between the two hosts
    by construction.
+   **Done 2026-10-21 — [73](73-keystore-stage1-engine.md), 15/15 on the dev box and on bigtab01.**
+   One design change on contact: the engine is **native-TPM, not the wrapping-key hybrid**. A TPM
+   2.0 does EC P-256 / AES / HMAC natively, so a stage-1 key is a TPM child object and the primitive
+   runs *inside* the TPM — no OpenSSL, no build dependency, and key material never leaves the TPM
+   mid-operation (the hybrid's weak point). The hybrid seal/unseal contract is kept as the path to a
+   1.2/smartcard/Yubikey backend behind the same `TpmBackend` seam, not written. The backend under
+   that seam is tpm2-tools-exec for now; the ESAPI backend that ships in the RPM drops in unchanged.
 2. **The feature XML alone**, into the overlay, plus a VINTF fragment for a `strongbox` instance with
    nothing behind it. Expect `keystore2` to log a declared-but-absent instance. That informative
    first failure is the stage-0 result, and it also answers the open question about whether each
@@ -417,6 +424,27 @@ Android image; and any claim that bigtab01's swtpm improves that machine's secur
    tempted.
 3. **Does A13's `keystore2` surface `FEATURE_STRONGBOX_KEYSTORE` from a declared second HIDL
    keymaster instance**, or does it need more than the feature XML? Pin from `services.jar` bytecode.
+   **Answered 2026-10-22 from a clean boot, no overlay change — yes, and it needs a *served
+   instance*, not the feature XML.** `android.security.compat` (`IKeystoreCompatService`) is running,
+   and `keystore2` already reaches for a StrongBox KeyMint **every boot** through its km_compat
+   *Legacy wrapper* — the boot log reads `keystore2::error: In get_keymint_device … In
+   connect_keymint: Trying to get Legacy wrapper … Error::Km(ErrorCode(-68))` (−68 =
+   `HARDWARE_TYPE_UNAVAILABLE`), and `shared_secret_negotiation: No StrongBox Keymint available`. So
+   the discovery path is live with no VINTF strongbox entry present; serving
+   `android.hardware.keymaster@4.0::IKeymasterDevice/strongbox` (as the `default` HIDL instance
+   already is, wrapped for TEE) is what turns −68 into a real StrongBox. The feature XML is only
+   PackageManager's half. Still to pin: whether the legacy wrapper needs the VINTF declaration to
+   *bind* a served instance or binds it from hwservicemanager regardless — stage 3 settles it.
 4. **What does each `keystore2` do when a strongbox instance fails `computeSharedHmac`?** If it
    refuses to boot the keystore rather than dropping the instance, stage 3 is riskier than it looks
    and belongs behind a `session stop` rather than a reboot.
+   **The *absent* case is answered 2026-10-22: `keystore2` does not refuse to boot.** With no
+   StrongBox present it logs the −68 above, `earlyBootEnded` fails for `STRONGBOX` (and `vold` logs
+   `earlyBootEnded returned service specific error: -68`), shared-secret negotiation still
+   *concludes successfully* for the TEE instance, and `keystore2` registers and runs with a working
+   lockscreen. So a declared-but-absent StrongBox is safe — the stage-2 "informative failure" was
+   obtained from the baseline, which is why no empty instance was ever armed. **The *present but
+   failing* case is still unproven**: when a strongbox instance joins shared-secret negotiation and
+   computes a *disagreeing* HMAC, whether negotiation still concludes for everyone or breaks the TEE
+   instance too is the real stage-3/5 risk. Treat `computeSharedHmac` as load-bearing from the first
+   strongbox commit, and land stage 3 behind a `session stop`, not a reboot, until this is measured.
