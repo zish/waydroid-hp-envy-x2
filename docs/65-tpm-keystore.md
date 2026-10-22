@@ -220,6 +220,12 @@ answers there, it appears without any ACPI declaration. Do it with the machine i
 [02](02-ssh-access.md): a reboot there means the LUKS passphrase and starting `sshd` by hand — and
 drop the argument again if nothing appears.
 
+> **Done 2026-10-20 — nothing appeared, and this is now the settled answer.** Password cleared (DMI
+> type 24 *Disabled*), no hidden menu by any keystroke, WMI still only `Sure_Start`, no TCG efivar.
+> `tpm_tis.force=1` returned `TPM vid 0xFFFF, did 0xFFFF … error -19` — a floating bus, so no discrete
+> chip. The ME is present (10.0.25.1048) but PTT is un-activated and unreachable from the OS. The
+> third table row is the real one: **swtpm is bigtab01's backend.** Evidence in [71](71-swtpm-host.md).
+
 ## swtpm works with no TPM hardware at all — demonstrated
 
 Run in the **dev container on 2026-10-10**, which is the closest available analogue of bigtab01: it
@@ -391,12 +397,21 @@ Android image; and any claim that bigtab01's swtpm improves that machine's secur
 ## Open questions
 
 1. **What does bigtab01's firmware setup actually offer** — a *TPM Device* / *TPM State* pair, and
-   crucially a **1.2 → 2.0 mode switch**? The machine's TPM 1.2 is currently not exposed to the OS
-   at all, and which of the three outcomes above applies decides whether this item has one backend
-   or two. **Still open 2026-10-19.** The owner has since enabled Secure Boot, which does
-   not enable the TPM — still no device and no `TCPA`/`TPM2` table — and no OS-side command can
-   read the answer: `hp-bioscfg` is present but enumerates only `Sure_Start`
-   ([71](71-swtpm-host.md)). It is on the setup screen or nowhere.
+   crucially a **1.2 → 2.0 mode switch**? **Answered 2026-10-20: there is no TPM in reach, and no
+   OS-side way to put one there — this item has one backend on bigtab01, swtpm, not two.** The owner
+   cleared the administrator password (DMI type 24 now reads *Administrator Password Status:
+   Disabled*) and still found **no hidden setup menu** by any keystroke — the third table outcome
+   above, the one predicted for a consumer Insyde BIOS. With the password gone the writable WMI
+   surface is unchanged: `hp-bioscfg` exposes only `Sure_Start` and `fwupdmgr` only a read-only
+   `pending_reboot`, so there is no TPM attribute to set; no TCG/TPM/PPI EFI variable exists; and the
+   one place the bit could live, the 1404-byte Insyde `Setup` blob, has its offset locked in the
+   encrypted firmware image. The attended `tpm_tis.force=1` probe then settled the hardware — the
+   kernel read **`TPM vid 0xFFFF, did 0xFFFF … error -19`**, a floating bus with *nothing* wired at
+   the TIS window, so there is **no discrete chip**. The Management Engine is present and healthy
+   (Wildcat Point-LP, `mei_me`, ME firmware **10.0.25.1048**), so the "TPM 1.2" is **Intel PTT the
+   firmware never activates**, not a discrete part — and PTT is switched on only in setup, which
+   offers no such control. Real hardware TPM 2.0 stays vidiot01's alone. Full evidence in
+   [71](71-swtpm-host.md).
 2. **Are vidiot01's four resident persistent handles and two NV indices expendable?** They look like
    a prior Windows install's SRK and EK. Nothing here needs them cleared; confirm before anyone is
    tempted.

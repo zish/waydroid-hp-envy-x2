@@ -202,6 +202,23 @@ two audit-log files return `EINVAL`, plus an unprovisioned Secure Platform Manag
 boot setting is enumerated. The setup screen is the only place the answer to
 [65](65-tpm-keystore.md)'s open question 1 can be read.
 
+**Settled 2026-10-20: the setup screen offered nothing, and there is no hardware TPM to reach.** The
+owner cleared the administrator password — DMI type 24 now reads *Administrator Password Status:
+Disabled*, where [65](65-tpm-keystore.md) recorded it enabled — and still found **no hidden menu** by
+any keystroke. With the password gone the WMI surface was re-read and is unchanged (`hp-bioscfg` only
+`Sure_Start`, `fwupdmgr` only a read-only `pending_reboot`), so there is no TPM attribute to write;
+there is still no TCG/TPM/PPI EFI variable, only the 1404-byte Insyde `Setup` blob whose offset is
+locked in the encrypted image. The attended `tpm_tis.force=1` probe then ran (karg appended, reboot,
+LUKS, manual `sshd`) and the kernel read **`tpm_tis tpm_tis: TPM vid 0xFFFF, did 0xFFFF init failed
+with error -19`** — a floating bus, so **nothing is wired at the standard TIS window** and there is no
+discrete chip. The Management Engine is present and healthy (Wildcat Point-LP MEI `[8086:9cba]`,
+`mei_me` bound, ME firmware **10.0.25.1048**, Broadwell-era), and PTT does not appear as an OS-facing
+MEI client — when active it is a TPM 2.0 behind a `TPM2` ACPI table, which this machine does not have.
+So the "TPM 1.2" is **Intel PTT the firmware never activates**, not a discrete part, and PTT is
+switched on only in setup, which offers no such control. **No software path exists to give bigtab01 a
+TPM.** The karg was dropped again afterward. This closes [65](65-tpm-keystore.md)'s open question 1:
+bigtab01 is swtpm, one backend.
+
 Secure Boot also put the kernel in **`lockdown=integrity`**, which has two consequences elsewhere in this
 project. **Hibernation is refused** — this boot logged `Lockdown: systemd-logind: hibernation is
 restricted` — so [41](41-battery-cutoff.md)'s suggestion of hibernate as `CriticalPowerAction` is void
