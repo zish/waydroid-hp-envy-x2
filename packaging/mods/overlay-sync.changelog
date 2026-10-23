@@ -1,3 +1,18 @@
+* Fri Oct 23 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.2.0-1
+- A derive row's edit list may now insert bytes as well as replace one:
+  <hex offset>+<hex bytes> inserts before that offset. Every offset is into the
+  stock file, and the edits are applied from the highest offset down so none
+  moves another; at one offset a replacement goes first, so an insertion lands
+  before that byte. The stock and result hashes judge both kinds exactly as
+  before. It exists for waydroid-ext-strongbox, whose edit is two added lines in
+  the image's VINTF manifest -- a text file the image ships, which a byte swap
+  cannot extend and which is not ours to ship whole.
+- packaging/stage-overlay.sh validates insertions at build time: whole bytes,
+  hex only, at least one.
+- A %check, the first: artifacts/overlay-manager/selftest.sh runs derive rows
+  through stage-overlay.sh and the reconciler end to end with a stub debugfs,
+  19 checks, and was shown to fail when the edit order is reversed either way.
+
 * Sat Oct 17 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.1-1
 - No behaviour change. waydroid-overlay-sync gains one shellcheck directive
   comment where it splits "<image> <path>" into positional parameters on
