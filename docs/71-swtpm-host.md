@@ -3,6 +3,11 @@
 **Date:** 2026-10-19. **Status:** built, packaged as `waydroid-ext-swtpm` 1.0.0, and **installed and
 verified on bigtab01** the same day — layered with rpm-ostree, running from boot, 15/15 and then 19/19
 across a restart, zero AVCs. This is the 25th `waydroid-ext-*` package on that machine.
+**2026-10-22: uninstalled at the owner's request and rebooted out** (exactly the package and its four
+swtpm dependencies left, nothing re-resolved), **then reinstalled the same evening** with
+`rpm-ostree install --apply-live` to back stage 4 ([73](73-keystore-stage1-engine.md)). A live apply
+is not durable until the next boot into it; until then `/usr/bin/swtpm` reads `unlabeled_t`, as
+predicted below, and the service ran fine regardless.
 
 This is stage 0 of [65](65-tpm-keystore.md): a software TPM 2.0 the host-side keystore backend can talk
 to, and one script that proves a TPM does what that backend needs through any TCTI. **Nothing inside

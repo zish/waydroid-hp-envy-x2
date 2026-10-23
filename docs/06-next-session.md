@@ -46,6 +46,16 @@ crash is really gone — the *wake* direction has now been survived by accident,
 has not been tried — and re-deriving `camera-hal`'s offset against the A16 binary, whose new stock
 hash is recorded in 64.
 
+**bigtab01, 2026-10-22: goal 10's StrongBox works from an app.** Stages 1–4 of
+[65](65-tpm-keystore.md) are done — an ordinary app gets EC P-256 and AES keys at security level
+STRONGBOX, backed by swtpm, 20/20 in [keystore-probe/](../keystore-probe) — and the next step is stage
+5 (a real `computeSharedHmac`, then auth-bound keys) or packaging; see
+[73](73-keystore-stage1-engine.md), whose *Still not done* list is current. Nothing of it is packaged.
+The hand deployment — the strongbox manifest in the overlay and `/usr/local/bin/waydroid-keystored` —
+**removes itself at the next logout** via `/var/tmp/keystore-cleanup.sh`, and a redeploy is three
+steps in 73. `waydroid-ext-swtpm` was uninstalled that afternoon and **reinstalled live** that evening;
+it becomes durable at the next boot.
+
 **bigtab01, 2026-10-19: goal 10's stage 0 is done and the owner chose to stop there.**
 `waydroid-ext-swtpm` is installed and verified — [71](71-swtpm-host.md) — and Android sees nothing,
 because the keystore HAL that would consume it is stages 1–5. Four things changed on that machine the
@@ -502,8 +512,10 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 ## State left on bigtab01
 | Item | State |
 |---|---|
-| **`waydroid-ext-swtpm` 1.0.0** (layered, 2026-10-19) | `waydroid-swtpm.service` running swtpm on `/run/swtpm-waydroid/sock`, enabled from `/usr/lib`. Remove with `rpm-ostree uninstall waydroid-ext-swtpm`; its swtpm dependencies go with it. See [71](71-swtpm-host.md) |
-| **`/var/lib/swtpm-waydroid/`** | the software TPM's state and seeds, `tss` 0700. **Not owned by any package and kept on uninstall on purpose** — deleting it discards every key ever sealed under it. Nothing is sealed under it yet |
+| **`waydroid-ext-swtpm` 1.0.0** (layered 2026-10-19; uninstalled and rebooted out 2026-10-22, reinstalled with `--apply-live` the same evening — durable at the next boot) | `waydroid-swtpm.service` running swtpm on `/run/swtpm-waydroid/sock`, enabled from `/usr/lib`. Remove with `rpm-ostree uninstall waydroid-ext-swtpm`; its swtpm dependencies go with it. See [71](71-swtpm-host.md) |
+| **`/var/lib/swtpm-waydroid/`** | the software TPM's state and seeds, `tss` 0700. **Not owned by any package and kept on uninstall on purpose** — deleting it discards every key ever sealed under it. Deleted with the 2026-10-22 cleanup and recreated by the reinstall; it now holds the keystore's persistent primary at `0x81010020`, under which the StrongBox keys of 2026-10-22's tests were made — discarding it invalidates those test keys and nothing else |
+| `/var/lib/waydroid/overlay/vendor/etc/vintf/manifest.xml`, `/usr/local/bin/waydroid-keystored` | the stage-4 hand deployment ([73](73-keystore-stage1-engine.md)). **Removed automatically at the next logout** by `/var/tmp/keystore-cleanup.sh`, together with `/var/tmp/wks`; the daemon's log `/var/tmp/waydroid-keystored.log` stays |
+| Keystore Probe (`com.systemhalted.keystoreprobe`) in Android | installed 2026-10-22, like the other probes; `pm uninstall` to remove |
 | **`/var`** | `chown root:root` on 2026-10-19 at the owner's direction; it had been `jmelanso:jmelanso`, which broke every `--apply-live`'s tmpfiles step ([packaging/README.md](../packaging/README.md), fifth and sixth migrations) |
 | **`/usr/local/bin/waydroid-sync`**, **`waydroid-bt-restore`** | periodic sync-window scripts, mode `0755`. See [17](17-hybrid-sleep.md). Delete to revert |
 | `/etc/systemd/system-sleep/50-waydroid-sync` | **REMOVED 2026-09-07** — it had never run. systemd 259 scans only `/usr/lib/systemd/system-sleep`, empty and read-only here; measured, 9 suspends in one boot and 0 hook runs, and `/run/waydroid-sync.cycle` had never existed. Replaced by `waydroid-sync-sleep.service` below. `/etc/systemd/system-sleep/` is now **empty and must stay that way** — anything put there is silently dead. See [27](27-android-power-button.md) |
