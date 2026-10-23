@@ -10,7 +10,7 @@
 # that verify signatures independently; without it those are SKIPPED.
 set -eu
 
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # KEYSTORE_ENGINE names a prebuilt binary -- how it runs on bigtab01, which has
 # no compiler. Otherwise rebuild every time: a stale binary passing is worse
 # than a slow run.
@@ -27,8 +27,11 @@ command -v tpm2_createprimary >/dev/null 2>&1 || { echo "tpm2-tools not found" >
 # swtpm refuses a long unixio path (docs/65), so keep it short under /tmp.
 dir=$(mktemp -d /tmp/wks-st.XXXXXX)
 mkdir -p "$dir/state"
+# Stopped by the PID it writes, not swtpm_ioctl: that is swtpm-tools, which
+# bigtab01 does not have, so the old `swtpm_ioctl -s 2>/dev/null` failed silently
+# there and left one swtpm running per selftest (docs/74).
 cleanup() {
-    [ -S "$dir/s.ctrl" ] && swtpm_ioctl --unix "$dir/s.ctrl" -s 2>/dev/null || true
+    [ -s "$dir/pid" ] && kill "$(cat "$dir/pid")" 2>/dev/null || true
     rm -rf "$dir"
 }
 trap cleanup EXIT INT TERM
@@ -36,6 +39,7 @@ trap cleanup EXIT INT TERM
 swtpm socket --tpm2 --tpmstate dir="$dir/state" \
     --server type=unixio,path="$dir/s" \
     --ctrl   type=unixio,path="$dir/s.ctrl" \
+    --pid file="$dir/pid" \
     --flags not-need-init,startup-clear --daemon 2>"$dir/err"
 
 # Wait for the socket rather than sleeping a fixed time.

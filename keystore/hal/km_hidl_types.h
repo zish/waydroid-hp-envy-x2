@@ -84,9 +84,12 @@ struct km_key_characteristics {
 } KM_ALIGNED(8);
 G_STATIC_ASSERT(sizeof(struct km_key_characteristics) == 32);
 
+G_STATIC_ASSERT(sizeof(struct km_hmac_sharing_parameters) == 48);
+
 // VerificationToken { uint64_t challenge; Timestamp timestamp;
 //   vec<KeyParameter> parametersVerified; SecurityLevel securityLevel;
-//   vec<uint8_t> mac; } -- only ever written empty, by verifyAuthorization.
+//   vec<uint8_t> mac; }. keystore2 hands a StrongBox one on update/finish of an
+// auth-bound key; its children follow the struct in field order.
 struct km_verification_token {
     guint64 challenge;
     guint64 timestamp;
@@ -97,8 +100,20 @@ struct km_verification_token {
 } KM_ALIGNED(8);
 G_STATIC_ASSERT(sizeof(struct km_verification_token) == 56);
 
-// HardwareAuthToken and VerificationToken arrive as the last arguments of
-// begin/update/finish. Nothing here verifies them -- auth-bound keys are
-// refused at generation until stage 5 -- so they are never parsed.
+// HardwareAuthToken { uint64_t challenge; uint64_t userId;
+//   uint64_t authenticatorId; HardwareAuthenticatorType authenticatorType;
+//   Timestamp timestamp; vec<uint8_t> mac; } -- the last argument of begin, and
+// next to last of update/finish. An empty one has an empty mac.
+struct km_hardware_auth_token {
+    guint64 challenge;
+    guint64 userId;
+    guint64 authenticatorId;
+    guint32 authenticatorType;
+    guint32 pad;
+    guint64 timestamp;
+    GBinderHidlVec mac;
+} KM_ALIGNED(8);
+G_STATIC_ASSERT(sizeof(struct km_hardware_auth_token) == 56);
+G_STATIC_ASSERT(G_STRUCT_OFFSET(struct km_hardware_auth_token, mac) == 40);
 
 #endif

@@ -46,15 +46,22 @@ crash is really gone — the *wake* direction has now been survived by accident,
 has not been tried — and re-deriving `camera-hal`'s offset against the A16 binary, whose new stock
 hash is recorded in 64.
 
+**bigtab01, 2026-10-23: goal 10's stage 5 works in Android.** A StrongBox key bound to the lockscreen
+signed one second after the owner's real pattern unlock, and refused both before it and 18 s after.
+keystore2 negotiated the shared HMAC key with the TEE *and* the StrongBox and found them in agreement.
+See [74](74-keystore-stage5-auth.md), whose *Still not done* list is current. The next step is
+packaging, or the launch model that would let the daemon register without someone logging out and in.
+The feature XML is the owner's policy call. **Android here has the owner's Pattern lock**:
+`bin/keystore-auth-test.sh` detects it, never touches it, and needs the owner at the machine to unlock
+when the screen re-locks. Nothing is packaged. The hand deployment removes itself at the next logout
+(table below), and [artifacts/keystore/hand-deploy.sh](../artifacts/keystore/hand-deploy.sh) is how
+to redeploy a build.
+
 **bigtab01, 2026-10-22: goal 10's StrongBox works from an app.** Stages 1–4 of
 [65](65-tpm-keystore.md) are done — an ordinary app gets EC P-256 and AES keys at security level
-STRONGBOX, backed by swtpm, 20/20 in [keystore-probe/](../keystore-probe) — and the next step is stage
-5 (a real `computeSharedHmac`, then auth-bound keys) or packaging; see
-[73](73-keystore-stage1-engine.md), whose *Still not done* list is current. Nothing of it is packaged.
-The hand deployment — the strongbox manifest in the overlay and `/usr/local/bin/waydroid-keystored` —
-**removes itself at the next logout** via `/var/tmp/keystore-cleanup.sh`, and a redeploy is three
-steps in 73. `waydroid-ext-swtpm` was uninstalled that afternoon and **reinstalled live** that evening;
-it becomes durable at the next boot.
+STRONGBOX, backed by swtpm, 20/20 in [keystore-probe/](../keystore-probe); see
+[73](73-keystore-stage1-engine.md). `waydroid-ext-swtpm` was uninstalled that afternoon and
+**reinstalled live** that evening; it becomes durable at the next boot.
 
 **bigtab01, 2026-10-19: goal 10's stage 0 is done and the owner chose to stop there.**
 `waydroid-ext-swtpm` is installed and verified — [71](71-swtpm-host.md) — and Android sees nothing,
@@ -514,8 +521,8 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 |---|---|
 | **`waydroid-ext-swtpm` 1.0.0** (layered 2026-10-19; uninstalled and rebooted out 2026-10-22, reinstalled with `--apply-live` the same evening — durable at the next boot) | `waydroid-swtpm.service` running swtpm on `/run/swtpm-waydroid/sock`, enabled from `/usr/lib`. Remove with `rpm-ostree uninstall waydroid-ext-swtpm`; its swtpm dependencies go with it. See [71](71-swtpm-host.md) |
 | **`/var/lib/swtpm-waydroid/`** | the software TPM's state and seeds, `tss` 0700. **Not owned by any package and kept on uninstall on purpose** — deleting it discards every key ever sealed under it. Deleted with the 2026-10-22 cleanup and recreated by the reinstall; it now holds the keystore's persistent primary at `0x81010020`, under which the StrongBox keys of 2026-10-22's tests were made — discarding it invalidates those test keys and nothing else |
-| `/var/lib/waydroid/overlay/vendor/etc/vintf/manifest.xml`, `/usr/local/bin/waydroid-keystored` | the stage-4 hand deployment ([73](73-keystore-stage1-engine.md)). **Removed automatically at the next logout** by `/var/tmp/keystore-cleanup.sh`, together with `/var/tmp/wks`; the daemon's log `/var/tmp/waydroid-keystored.log` stays |
-| Keystore Probe (`com.systemhalted.keystoreprobe`) in Android | installed 2026-10-22, like the other probes; `pm uninstall` to remove |
+| `/var/lib/waydroid/overlay/vendor/etc/vintf/manifest.xml`, `/usr/local/bin/waydroid-keystored`, `/etc/systemd/system/waydroid-keystore-hand-deploy-guard.service` | the **stage-5** hand deployment ([74](74-keystore-stage5-auth.md)), running `--accept-unsigned-auth-tokens` and serving the session that started 2026-10-23 14:35. **All three are removed automatically at the next logout** by `artifacts/keystore/hand-deploy.sh`, still running as root from `/var/tmp/wks-deploy/`. If a reboot comes first, the guard unit removes the manifest and the binary before `waydroid-container.service`, then removes itself. `/var/tmp/wks-deploy/` (the script and a copy of the daemon) and the log `/var/tmp/waydroid-keystored.log` stay |
+| Keystore Probe (`com.systemhalted.keystoreprobe`) in Android | installed 2026-10-22, updated 2026-10-23 with the `auth-*` modes, like the other probes; `pm uninstall` to remove |
 | **`/var`** | `chown root:root` on 2026-10-19 at the owner's direction; it had been `jmelanso:jmelanso`, which broke every `--apply-live`'s tmpfiles step ([packaging/README.md](../packaging/README.md), fifth and sixth migrations) |
 | **`/usr/local/bin/waydroid-sync`**, **`waydroid-bt-restore`** | periodic sync-window scripts, mode `0755`. See [17](17-hybrid-sleep.md). Delete to revert |
 | `/etc/systemd/system-sleep/50-waydroid-sync` | **REMOVED 2026-09-07** — it had never run. systemd 259 scans only `/usr/lib/systemd/system-sleep`, empty and read-only here; measured, 9 suspends in one boot and 0 hook runs, and `/run/waydroid-sync.cycle` had never existed. Replaced by `waydroid-sync-sleep.service` below. `/etc/systemd/system-sleep/` is now **empty and must stay that way** — anything put there is silently dead. See [27](27-android-power-button.md) |

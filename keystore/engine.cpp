@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <sys/random.h>
+#include <time.h>
 
 namespace wks {
 
@@ -24,6 +25,7 @@ const char* kmErrorName(KmError e) {
     case KmError::INCOMPATIBLE_DIGEST: return "INCOMPATIBLE_DIGEST";
     case KmError::UNSUPPORTED_KEY_FORMAT: return "UNSUPPORTED_KEY_FORMAT";
     case KmError::INVALID_INPUT_LENGTH: return "INVALID_INPUT_LENGTH";
+    case KmError::KEY_USER_NOT_AUTHENTICATED: return "KEY_USER_NOT_AUTHENTICATED";
     case KmError::INVALID_OPERATION_HANDLE: return "INVALID_OPERATION_HANDLE";
     case KmError::VERIFICATION_FAILED: return "VERIFICATION_FAILED";
     case KmError::TOO_MANY_OPERATIONS: return "TOO_MANY_OPERATIONS";
@@ -58,6 +60,8 @@ struct Engine::Operation {
     uint32_t macBytes = 0;
     Bytes aad;
     Bytes data;
+    bool authBound = false;           // the key has a USER_SECURE_ID
+    bool perOpAuth = false;           // ... and no AUTH_TIMEOUT
 };
 
 namespace {
@@ -86,27 +90,29 @@ template <typename E> uint32_t u(E e) { return static_cast<uint32_t>(e); }
 
 // Tags whose meaning this engine checks on every use, and so reports as
 // hardware-enforced. Everything else in a request is stored but not claimed.
-bool engineEnforces(Tag t) {
+// The auth tags are checked either way; whether that is worth claiming depends
+// on whether the tokens they rest on are authenticated (EngineOptions).
+bool engineEnforces(Tag t, bool authInHardware) {
     switch (t) {
     case Tag::PURPOSE: case Tag::ALGORITHM: case Tag::KEY_SIZE:
     case Tag::BLOCK_MODE: case Tag::DIGEST: case Tag::PADDING:
     case Tag::CALLER_NONCE: case Tag::MIN_MAC_LENGTH: case Tag::EC_CURVE:
     case Tag::NO_AUTH_REQUIRED: case Tag::ORIGIN:
         return true;
+    case Tag::USER_SECURE_ID: case Tag::USER_AUTH_TYPE: case Tag::AUTH_TIMEOUT:
+        return authInHardware;
     default:
         return false;
     }
 }
 
-// Requests asking for something this engine cannot honour. Auth-bound keys need
-// a HardwareAuthToken we can verify, which needs computeSharedHmac (stage 5);
-// claiming to enforce them without it would be a lie keystore2 would believe.
+// Requests asking for something this engine cannot honour. Trusted user
+// presence and trusted confirmation each need a token from hardware this
+// machine does not have; claiming them would be a lie keystore2 would believe.
 KmError refuseUnsupported(const AuthList& req) {
     if (req.has(Tag::ROLLBACK_RESISTANCE))
         return KmError::ROLLBACK_RESISTANCE_UNAVAILABLE;
-    if (req.has(Tag::USER_SECURE_ID) || req.has(Tag::USER_AUTH_TYPE) ||
-        req.has(Tag::AUTH_TIMEOUT) ||
-        req.has(Tag::TRUSTED_USER_PRESENCE_REQUIRED) ||
+    if (req.has(Tag::TRUSTED_USER_PRESENCE_REQUIRED) ||
         req.has(Tag::TRUSTED_CONFIRMATION_REQUIRED))
         return KmError::UNSUPPORTED_TAG;
     return KmError::OK;
@@ -116,19 +122,38 @@ const Bytes kEmpty;
 
 } // namespace
 
-KeyCharacteristics characteristicsOf(const AuthList& stored) {
+KeyCharacteristics characteristicsOf(const AuthList& stored, bool authInHardware) {
     KeyCharacteristics kc;
     for (const auto& p : stored.params) {
         if (p.tag == Tag::APPLICATION_ID || p.tag == Tag::APPLICATION_DATA)
             continue;
-        (engineEnforces(p.tag) ? kc.hardwareEnforced : kc.softwareEnforced)
+        (engineEnforces(p.tag, authInHardware) ? kc.hardwareEnforced
+                                               : kc.softwareEnforced)
             .params.push_back(p);
     }
     return kc;
 }
 
-Engine::Engine(std::unique_ptr<TpmBackend> backend) : backend_(std::move(backend)) {}
-Engine::~Engine() = default;
+Engine::Engine(std::unique_ptr<TpmBackend> backend, EngineOptions options)
+    : backend_(std::move(backend)), opts_(std::move(options)) {
+    // The seed is ours to choose (a TEE sends an empty one, a StrongBox may
+    // send anything); both are random so a restarted daemon is a new party.
+    mine_.seed.resize(32);
+    mine_.nonce.resize(kSharingNonceLength);
+    if (!fillRandom(mine_.seed.data(), mine_.seed.size()) ||
+        !fillRandom(mine_.nonce.data(), mine_.nonce.size()))
+        mine_.nonce.clear();   // computeSharedHmac then never finds us
+}
+Engine::~Engine() {
+    std::fill(sharedKey_.begin(), sharedKey_.end(), 0);
+}
+
+uint64_t Engine::nowMs() const {
+    if (opts_.clockMs) return opts_.clockMs();
+    struct timespec ts;
+    if (clock_gettime(CLOCK_BOOTTIME, &ts) != 0) return 0;
+    return uint64_t(ts.tv_sec) * 1000 + uint64_t(ts.tv_nsec) / 1000000;
+}
 
 KmError Engine::ensurePrimary() {
     if (primaryReady_) return KmError::OK;
@@ -217,7 +242,7 @@ KmError Engine::mint(const AuthList& requestIn, Algorithm alg, Origin origin,
     if (!ok) return KmError::SECURE_HW_COMMUNICATION_FAILED;
 
     blobOut = kb.serialize();
-    kc = characteristicsOf(kb.authorizations);
+    kc = characteristicsOf(kb.authorizations, !opts_.acceptUnsignedAuthTokens);
     return KmError::OK;
 }
 
@@ -267,7 +292,7 @@ KmError Engine::getKeyCharacteristics(const Bytes& blob, const Bytes& clientId,
     KeyBlob kb;
     KmError e = parseBound(blob, clientId, appData, kb);
     if (e != KmError::OK) return e;
-    kc = characteristicsOf(kb.authorizations);
+    kc = characteristicsOf(kb.authorizations, !opts_.acceptUnsignedAuthTokens);
     return KmError::OK;
 }
 
@@ -283,13 +308,139 @@ KmError Engine::exportKey(KeyFormat format, const Bytes& blob, const Bytes& clie
     return out.empty() ? KmError::INVALID_KEY_BLOB : KmError::OK;
 }
 
+// --- the shared HMAC key and tokens (stage 5, docs/74) ---------------------------
+
+KmError Engine::computeSharedHmac(const std::vector<HmacSharingParams>& params,
+                                  Bytes& check) {
+    std::lock_guard<std::mutex> g(lock_);
+    check.clear();
+    bool mine = false;
+    for (const auto& p : params)
+        mine = mine || (p.seed == mine_.seed && p.nonce == mine_.nonce);
+    if (!mine || mine_.nonce.empty()) return KmError::INVALID_ARGUMENT;
+    Bytes h = deriveSharedHmacKey(opts_.keyAgreementKey, params);
+    if (h.size() != 32) return KmError::UNKNOWN_ERROR;
+    std::fill(sharedKey_.begin(), sharedKey_.end(), 0);
+    sharedKey_ = std::move(h);
+    check = sharingCheck(sharedKey_);
+    return KmError::OK;
+}
+
+bool Engine::hasSharedKey() {
+    std::lock_guard<std::mutex> g(lock_);
+    return !sharedKey_.empty();
+}
+
+namespace {
+KmError deny(std::string* why, const std::string& reason) {
+    if (why) *why = reason;
+    return KmError::KEY_USER_NOT_AUTHENTICATED;
+}
+bool allZero(const Bytes& b) {
+    uint8_t acc = 0;
+    for (uint8_t x : b) acc |= x;
+    return acc == 0;
+}
+} // namespace
+
+// The HardwareAuthToken checks of IKeymasterDevice::begin and ::update: the MAC,
+// a USER_SECURE_ID in common, the auth type, and then either the challenge (a
+// per-operation key) or the age (a timeout key). Called with the lock held.
+KmError Engine::authorize(const AuthList& key, const HardwareAuthToken& t,
+                          const uint64_t* challenge, std::string* why) {
+    if (!t.present()) return deny(why, "no auth token");
+    if (t.mac.size() != kAuthMacLength) return deny(why, "auth token MAC is not 32 bytes");
+
+    const char* how;
+    if (!sharedKey_.empty() &&
+        ctEqual(authTokenMac(sharedKey_, t).data(), t.mac.data(), kAuthMacLength)) {
+        how = "signed with the shared key";
+    } else if (opts_.acceptUnsignedAuthTokens && allZero(t.mac)) {
+        how = "unsigned, accepted by --accept-unsigned-auth-tokens";
+    } else if (sharedKey_.empty()) {
+        return deny(why, "auth token cannot be verified: no shared key was negotiated");
+    } else {
+        return deny(why, allZero(t.mac) ? "auth token is unsigned (32 zero bytes)"
+                                        : "auth token MAC is invalid");
+    }
+
+    bool sid = false;
+    for (uint64_t s : key.all(Tag::USER_SECURE_ID))
+        sid = sid || s == t.userId || s == t.authenticatorId;
+    if (!sid) return deny(why, "auth token's secure IDs match none of the key's");
+    auto type = key.first(Tag::USER_AUTH_TYPE);
+    if (!type || (uint32_t(*type) & t.authenticatorType) == 0)
+        return deny(why, "auth token's authenticator type is not one the key allows");
+
+    char buf[128];
+    if (challenge) {
+        if (t.challenge != *challenge)
+            return deny(why, "auth token was issued for another operation");
+        snprintf(buf, sizeof buf, "%s, for this operation", how);
+    } else {
+        // Both clocks are CLOCK_BOOTTIME on one kernel (docs/74 measured it to
+        // the millisecond), so a token from the future is not skew; it is
+        // something that did not come from the authenticator.
+        uint64_t now = nowMs(), limit = key.first(Tag::AUTH_TIMEOUT).value_or(0) * 1000;
+        if (t.timestamp > now) return deny(why, "auth token is dated in the future");
+        if (now - t.timestamp > limit) {
+            snprintf(buf, sizeof buf, "auth token is %llu ms old, the key allows %llu",
+                     (unsigned long long) (now - t.timestamp), (unsigned long long) limit);
+            return deny(why, buf);
+        }
+        snprintf(buf, sizeof buf, "%s, %llu ms old of %llu allowed", how,
+                 (unsigned long long) (now - t.timestamp), (unsigned long long) limit);
+    }
+    if (why) *why = buf;
+    return KmError::OK;
+}
+
+// A VerificationToken is another instance vouching for its clock at this
+// operation. Both MAC forms are a MAC under H; see auth.h.
+KmError Engine::checkVerificationToken(const VerificationToken& vt, uint64_t handle,
+                                       std::string* why) {
+    if (vt.parametersVerified)
+        return deny(why, "verification token carries parametersVerified, which is not MACed here");
+    if (vt.challenge != handle)
+        return deny(why, "verification token was issued for another operation");
+    if (sharedKey_.empty())
+        return deny(why, "verification token cannot be verified: no shared key was negotiated");
+    if (vt.mac.size() == kAuthMacLength) {
+        for (VtForm f : {VtForm::SPEC, VtForm::AOSP_SOFTWARE}) {
+            if (ctEqual(verificationTokenMac(sharedKey_, vt, f).data(), vt.mac.data(),
+                        kAuthMacLength)) {
+                if (why) *why += std::string("; verification token valid (") +
+                                 vtFormName(f) + " form)";
+                return KmError::OK;
+            }
+        }
+    }
+    return deny(why, "verification token MAC is invalid");
+}
+
+// The per-call half: a per-operation key's token on every update and finish,
+// and any verification token handed to an auth-bound operation.
+KmError Engine::authorizeStep(Operation& op, uint64_t handle, const HardwareAuthToken& hat,
+                              const VerificationToken& vt, std::string* why) {
+    if (!op.authBound) return KmError::OK;
+    if (op.perOpAuth) {
+        KmError e = authorize(op.key.authorizations, hat, &handle, why);
+        if (e != KmError::OK) return e;
+    } else if (why) {
+        *why = "authorized at begin";
+    }
+    return vt.present() ? checkVerificationToken(vt, handle, why) : KmError::OK;
+}
+
 // --- operations ------------------------------------------------------------------
 
 KmError Engine::begin(Purpose purpose, const Bytes& blob, const AuthList& in,
-                      AuthList& outParams, uint64_t& handle) {
+                      AuthList& outParams, uint64_t& handle,
+                      const HardwareAuthToken& authToken, std::string* why) {
     std::lock_guard<std::mutex> g(lock_);
     outParams.params.clear();
     handle = 0;
+    if (why) why->clear();
 
     if (ops_.size() >= kMaxOperations) return KmError::TOO_MANY_OPERATIONS;
 
@@ -303,6 +454,19 @@ KmError Engine::begin(Purpose purpose, const Bytes& blob, const AuthList& in,
     op->auth = authDigest(key);
 
     if (!key.hasEnumVal(Tag::PURPOSE, u(purpose))) return KmError::INCOMPATIBLE_PURPOSE;
+
+    // A USER_SECURE_ID binds the key to an authentication whatever else the
+    // list says, NO_AUTH_REQUIRED included: the safe reading of a contradiction.
+    if (key.has(Tag::USER_SECURE_ID)) {
+        op->authBound = true;
+        if (key.has(Tag::AUTH_TIMEOUT)) {
+            e = authorize(key, authToken, nullptr, why);
+            if (e != KmError::OK) return e;
+        } else {
+            op->perOpAuth = true;   // the token comes with each update and finish
+            if (why) *why = "per-operation key: a token is due on each update and finish";
+        }
+    }
 
     if (op->key.algorithm == Algorithm::EC) {
         // Public-key operations belong to the caller (KeyMint dropped them, and
@@ -390,30 +554,40 @@ KmError Engine::absorb(Operation& op, const AuthList& in, const Bytes& input) {
 }
 
 KmError Engine::update(uint64_t handle, const AuthList& in, const Bytes& input,
-                       uint32_t& inputConsumed, AuthList& outParams, Bytes& output) {
+                       uint32_t& inputConsumed, AuthList& outParams, Bytes& output,
+                       const HardwareAuthToken& authToken,
+                       const VerificationToken& verificationToken, std::string* why) {
     std::lock_guard<std::mutex> g(lock_);
     inputConsumed = 0;
     outParams.params.clear();
     output.clear();
+    if (why) why->clear();
     auto it = ops_.find(handle);
     if (it == ops_.end()) return KmError::INVALID_OPERATION_HANDLE;
-    KmError e = absorb(*it->second, in, input);
+    KmError e = authorizeStep(*it->second, handle, authToken, verificationToken, why);
+    if (e != KmError::OK) { ops_.erase(it); return e; }
+    e = absorb(*it->second, in, input);
     if (e != KmError::OK) { ops_.erase(it); return e; }  // an error ends the op
     inputConsumed = uint32_t(input.size());
     return KmError::OK;
 }
 
 KmError Engine::finish(uint64_t handle, const AuthList& in, const Bytes& input,
-                       const Bytes& /*signature*/, AuthList& outParams, Bytes& output) {
+                       const Bytes& /*signature*/, AuthList& outParams, Bytes& output,
+                       const HardwareAuthToken& authToken,
+                       const VerificationToken& verificationToken, std::string* why) {
     std::lock_guard<std::mutex> g(lock_);
     outParams.params.clear();
     output.clear();
+    if (why) why->clear();
     auto it = ops_.find(handle);
     if (it == ops_.end()) return KmError::INVALID_OPERATION_HANDLE;
     std::unique_ptr<Operation> op = std::move(it->second);
     ops_.erase(it);  // finish ends the op whatever happens next
 
-    KmError e = absorb(*op, in, input);
+    KmError e = authorizeStep(*op, handle, authToken, verificationToken, why);
+    if (e != KmError::OK) return e;
+    e = absorb(*op, in, input);
     if (e != KmError::OK) return e;
     e = ensurePrimary();
     if (e != KmError::OK) return e;

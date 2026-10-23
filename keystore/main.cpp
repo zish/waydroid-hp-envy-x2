@@ -152,6 +152,209 @@ static int opensslVerify(const Bytes& spki, const Bytes& msg, const Bytes& sig) 
 
 static bool hasTagVal(const AuthList& a, Tag t, uint32_t v) { return a.hasEnumVal(t, v); }
 
+// Stage 5 (docs/74): the shared HMAC key and auth-bound keys, against a clock
+// the test owns. The KDF and the MACs are checked against OpenSSL and the live
+// TEE elsewhere (tests/cpp/test_keystore_auth.cpp, km-bench --tee-probe); what
+// is checked here is the engine's use of them -- which token opens which key.
+static void authSelftest(const std::string& tcti) {
+    printf("-- stage 5: the shared HMAC key --\n");
+    uint64_t clock = 1000000;
+    EngineOptions strictOpts;
+    strictOpts.clockMs = [&clock] { return clock; };
+    Engine eng(std::unique_ptr<TpmBackend>(makeToolsBackend(tcti)), strictOpts);
+    const HmacSharingParams& mine = eng.hmacSharingParameters();
+    check(mine.nonce.size() == 32, "a 32-byte per-process nonce");
+    HmacSharingParams tee{Bytes(), Bytes(32, 0x77)};
+    Bytes chk;
+    check(eng.computeSharedHmac({tee}, chk) == KmError::INVALID_ARGUMENT && chk.empty() &&
+              !eng.hasSharedKey(),
+          "computeSharedHmac without our own parameters: INVALID_ARGUMENT");
+    std::vector<HmacSharingParams> all{tee, mine};
+    check(eng.computeSharedHmac(all, chk) == KmError::OK &&
+              chk == sharingCheck(deriveSharedHmacKey(imageKeyAgreementKey(), all)),
+          "with them: OK, and the check is HMAC(H, ...) for K = 0^256");
+    const Bytes h = deriveSharedHmacKey(imageKeyAgreementKey(), all);
+
+    const uint64_t sid = 0x5151a5a5c3c3e7e7ull;
+    auto token = [&](uint64_t challenge, uint32_t type, uint64_t ts) {
+        HardwareAuthToken t;
+        t.challenge = challenge;
+        t.userId = sid;
+        t.authenticatorId = 0;
+        t.authenticatorType = type;
+        t.timestamp = ts;
+        t.mac = authTokenMac(h, t);
+        return t;
+    };
+    const uint32_t pw = u(HwAuthType::PASSWORD), fp = u(HwAuthType::FINGERPRINT);
+
+    printf("-- stage 5: a key with an AUTH_TIMEOUT --\n");
+    AuthList req = ecRequest();
+    req.remove(Tag::NO_AUTH_REQUIRED);
+    req.params.emplace_back(Tag::USER_SECURE_ID, sid);
+    req.addEnum(Tag::USER_AUTH_TYPE, pw);
+    req.addUint(Tag::AUTH_TIMEOUT, 30);
+    Bytes key, spki;
+    KeyCharacteristics kc;
+    check(eng.generateKey(req, key, kc) == KmError::OK &&
+              kc.hardwareEnforced.has(Tag::USER_SECURE_ID) &&
+              kc.hardwareEnforced.has(Tag::AUTH_TIMEOUT),
+          "generates, the auth tags hardware-enforced (tokens must be signed)");
+    eng.exportKey(KeyFormat::X509, key, {}, {}, spki);
+    Bytes msg = str("signed only after the user authenticated");
+    auto beginWith = [&](const HardwareAuthToken& t, std::string* why = nullptr) {
+        AuthList out;
+        uint64_t hd = 0;
+        KmError e = eng.begin(Purpose::SIGN, key, signParams(Digest::SHA_2_256), out, hd, t,
+                              why);
+        if (e == KmError::OK) eng.abort(hd);
+        return e;
+    };
+    std::string why;
+    check(beginWith(HardwareAuthToken(), &why) == KmError::KEY_USER_NOT_AUTHENTICATED &&
+              why == "no auth token",
+          "begin without a token: KEY_USER_NOT_AUTHENTICATED (\"no auth token\")");
+    {
+        AuthList out;
+        uint64_t hd = 0;
+        HardwareAuthToken t = token(0, pw, clock - 5000);
+        KmError e = eng.begin(Purpose::SIGN, key, signParams(Digest::SHA_2_256), out, hd, t,
+                              &why);
+        Bytes sig;
+        AuthList fo;
+        e = e == KmError::OK ? eng.finish(hd, AuthList(), msg, {}, fo, sig) : e;
+        int v = e == KmError::OK ? opensslVerify(spki, msg, sig) : 0;
+        check(e == KmError::OK && v != 0,
+              "a signed password token 5 s old opens it, and the signature verifies");
+        printf("         (%s)\n", why.c_str());
+    }
+    HardwareAuthToken bad = token(0, pw, clock);
+    bad.userId = sid + 1;
+    bad.mac = authTokenMac(h, bad);
+    check(beginWith(bad) == KmError::KEY_USER_NOT_AUTHENTICATED, "another user's token: refused");
+    check(beginWith(token(0, fp, clock)) == KmError::KEY_USER_NOT_AUTHENTICATED,
+          "a fingerprint token on a password-only key: refused");
+    check(beginWith(token(0, pw, clock - 30001)) == KmError::KEY_USER_NOT_AUTHENTICATED,
+          "30.001 s old on a 30 s key: refused");
+    check(beginWith(token(0, pw, clock - 30000)) == KmError::OK, "30.000 s old: accepted");
+    check(beginWith(token(0, pw, clock + 1)) == KmError::KEY_USER_NOT_AUTHENTICATED,
+          "dated 1 ms in the future: refused");
+    bad = token(0, pw, clock);
+    bad.mac[7] ^= 0x10;
+    check(beginWith(bad) == KmError::KEY_USER_NOT_AUTHENTICATED, "one MAC bit flipped: refused");
+    bad.mac.assign(32, 0);
+    check(beginWith(bad, &why) == KmError::KEY_USER_NOT_AUTHENTICATED &&
+              why == "auth token is unsigned (32 zero bytes)",
+          "an unsigned token (what this image's gatekeeper sends): refused when strict");
+
+    printf("-- stage 5: verification tokens --\n");
+    {
+        AuthList out, fo;
+        uint64_t hd = 0;
+        Bytes sig;
+        eng.begin(Purpose::SIGN, key, signParams(Digest::SHA_2_256), out, hd,
+                  token(0, pw, clock));
+        VerificationToken vt;
+        vt.challenge = hd;
+        vt.timestamp = clock;
+        vt.securityLevel = 1;   // km_compat's label; the MAC is over SOFTWARE
+        vt.mac = verificationTokenMac(h, vt, VtForm::AOSP_SOFTWARE);
+        VerificationToken wrong = vt;
+        wrong.challenge = hd + 1;
+        wrong.mac = verificationTokenMac(h, wrong, VtForm::AOSP_SOFTWARE);
+        uint32_t c = 0;
+        Bytes o;
+        check(eng.update(hd, AuthList(), msg, c, out, o, HardwareAuthToken(), wrong) ==
+                  KmError::KEY_USER_NOT_AUTHENTICATED &&
+              eng.abort(hd) == KmError::INVALID_OPERATION_HANDLE,
+              "a verification token for another operation: refused, and it ends the op");
+        eng.begin(Purpose::SIGN, key, signParams(Digest::SHA_2_256), out, hd,
+                  token(0, pw, clock));
+        vt.challenge = hd;
+        vt.mac = verificationTokenMac(h, vt, VtForm::AOSP_SOFTWARE);
+        KmError e = eng.finish(hd, AuthList(), msg, {}, fo, sig, HardwareAuthToken(), vt, &why);
+        check(e == KmError::OK, "the TEE's own form (machine order, SOFTWARE) is accepted");
+        printf("         (%s)\n", why.c_str());
+        eng.begin(Purpose::SIGN, key, signParams(Digest::SHA_2_256), out, hd,
+                  token(0, pw, clock));
+        vt.challenge = hd;
+        vt.mac = verificationTokenMac(h, vt, VtForm::SPEC);
+        check(eng.finish(hd, AuthList(), msg, {}, fo, sig, HardwareAuthToken(), vt) ==
+                  KmError::OK,
+              "so is the HAL's (big-endian, the level as sent)");
+        eng.begin(Purpose::SIGN, key, signParams(Digest::SHA_2_256), out, hd,
+                  token(0, pw, clock));
+        vt.challenge = hd;
+        vt.mac.assign(32, 0x42);
+        check(eng.finish(hd, AuthList(), msg, {}, fo, sig, HardwareAuthToken(), vt) ==
+                  KmError::KEY_USER_NOT_AUTHENTICATED,
+              "a verification token with a bad MAC: refused");
+    }
+
+    printf("-- stage 5: a per-operation key --\n");
+    {
+        AuthList r = aesRequest(128, false);
+        r.remove(Tag::NO_AUTH_REQUIRED);
+        r.params.emplace_back(Tag::USER_SECURE_ID, sid);
+        r.addEnum(Tag::USER_AUTH_TYPE, u(HwAuthType::ANY));
+        Bytes ak;
+        check(eng.generateKey(r, ak, kc) == KmError::OK, "AES-128, USER_SECURE_ID, no timeout");
+        AuthList p = aesParams(BlockMode::CBC, Padding::PKCS7);
+        AuthList out, fo;
+        uint64_t hd = 0;
+        Bytes o;
+        check(eng.begin(Purpose::ENCRYPT, ak, p, out, hd) == KmError::OK,
+              "begin needs no token: it is due on update and finish");
+        check(eng.finish(hd, AuthList(), msg, {}, fo, o) == KmError::KEY_USER_NOT_AUTHENTICATED,
+              "finish without one: refused");
+        eng.begin(Purpose::ENCRYPT, ak, p, out, hd);
+        check(eng.finish(hd, AuthList(), msg, {}, fo, o, token(hd ^ 1, fp, 0)) ==
+                  KmError::KEY_USER_NOT_AUTHENTICATED,
+              "a token issued for another operation: refused");
+        eng.begin(Purpose::ENCRYPT, ak, p, out, hd);
+        uint32_t c = 0;
+        KmError e = eng.update(hd, AuthList(), msg, c, out, o, token(hd, fp, 0));
+        e = e == KmError::OK ? eng.finish(hd, AuthList(), {}, {}, fo, o, token(hd, fp, 0)) : e;
+        check(e == KmError::OK && o.size() == 48,
+              "a token whose challenge is the handle, on each call: accepted");
+    }
+
+    printf("-- stage 5: --accept-unsigned-auth-tokens --\n");
+    {
+        EngineOptions lax = strictOpts;
+        lax.acceptUnsignedAuthTokens = true;
+        Engine le(std::unique_ptr<TpmBackend>(makeToolsBackend(tcti)), lax);
+        Bytes lk;
+        KeyCharacteristics lkc;
+        check(le.generateKey(req, lk, lkc) == KmError::OK &&
+                  lkc.softwareEnforced.has(Tag::USER_SECURE_ID) &&
+                  !lkc.hardwareEnforced.has(Tag::USER_SECURE_ID) &&
+                  lkc.softwareEnforced.has(Tag::AUTH_TIMEOUT),
+              "the auth tags are reported at the KEYSTORE level, not STRONGBOX");
+        HardwareAuthToken z;
+        z.userId = sid;
+        z.authenticatorType = pw;
+        z.timestamp = clock - 1000;
+        z.mac.assign(32, 0);
+        AuthList out;
+        uint64_t hd = 0;
+        check(le.begin(Purpose::SIGN, lk, signParams(Digest::SHA_2_256), out, hd, z, &why) ==
+                  KmError::OK,
+              "an unsigned token opens it (no shared key needed)");
+        printf("         (%s)\n", why.c_str());
+        le.abort(hd);
+        z.timestamp = clock - 31000;
+        check(le.begin(Purpose::SIGN, lk, signParams(Digest::SHA_2_256), out, hd, z) ==
+                  KmError::KEY_USER_NOT_AUTHENTICATED,
+              "but the timeout still holds");
+        z.timestamp = clock;
+        z.mac[0] = 1;
+        check(le.begin(Purpose::SIGN, lk, signParams(Digest::SHA_2_256), out, hd, z) ==
+                  KmError::KEY_USER_NOT_AUTHENTICATED,
+              "and a MAC that is neither zero nor valid is still refused");
+    }
+}
+
 static int selftest(const std::string& tcti) {
     Engine eng(std::unique_ptr<TpmBackend>(makeToolsBackend(tcti)));
     printf("backend: %s\n", eng.backendDescription().c_str());
@@ -250,9 +453,9 @@ static int selftest(const std::string& tcti) {
         r.addEnum(Tag::EC_CURVE, u(EcCurve::P_384));
         check(eng.generateKey(r, b, k) == KmError::UNSUPPORTED_EC_CURVE,
               "EC P-384: UNSUPPORTED_EC_CURVE");
-        r = ecRequest(); r.params.emplace_back(Tag::USER_SECURE_ID, 42);
+        r = ecRequest(); r.addBool(Tag::TRUSTED_CONFIRMATION_REQUIRED);
         check(eng.generateKey(r, b, k) == KmError::UNSUPPORTED_TAG,
-              "auth-bound (USER_SECURE_ID): UNSUPPORTED_TAG until stage 5");
+              "TRUSTED_CONFIRMATION_REQUIRED: UNSUPPORTED_TAG");
         r = ecRequest(); r.addBool(Tag::ROLLBACK_RESISTANCE);
         check(eng.generateKey(r, b, k) == KmError::ROLLBACK_RESISTANCE_UNAVAILABLE,
               "ROLLBACK_RESISTANCE: ROLLBACK_RESISTANCE_UNAVAILABLE");
@@ -466,6 +669,8 @@ static int selftest(const std::string& tcti) {
         for (uint64_t h : hs) aborted = aborted && eng.abort(h) == KmError::OK;
         check(aborted && eng.operationCount() == 0, "abort frees them; nothing leaked");
     }
+
+    authSelftest(tcti);
 
     printf("\n%d passed, %d failed, %d skipped\n", g_pass, g_fail, g_skip);
     return g_fail == 0 ? 0 : 1;

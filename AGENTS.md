@@ -137,7 +137,10 @@ sudo waydroid shell -- sh -c "dumpsys media.camera | head -30"
 ```
 
 It prints a cosmetic `ERROR: [Errno 13] Permission denied: 1` after each command; output above
-that line is still valid.
+that line is still valid. It also appends `Use '--details-to-stdout' …` **on stdout, followed by the
+whole command line**, so a grep or `case` over its output can match the command's own text. Cut from
+`--details-to-stdout` on before matching anything ([docs/74](docs/74-keystore-stage5-auth.md),
+fault 3).
 
 ### Two constraints worth remembering
 
@@ -941,10 +944,20 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
     bench client runs as `container_runtime_t`. Each daemon build costs a logout, because keystore2
     binds once a session; `km-bench` against a second `strongbox-bench` instance tests a build over
     real binder without one. **This image's default keymaster is SOFTWARE-level**, so the StrongBox is
-    the only key store here whose keys are not files. Auth-bound keys are refused until stage 5 makes
-    `computeSharedHmac` real, which is also why the feature XML is **deliberately not deployed** — it
-    would invite apps to put exactly those keys here. Nothing is packaged; the hand deployment removes
-    itself at the next logout.
+    the only key store here whose keys are not files.
+    **Stage 5 works in Android, 2026-10-23 — [docs/74](docs/74-keystore-stage5-auth.md).** The
+    StrongBox now takes part in keystore2's shared-secret negotiation for real: two participants, with
+    H matching the TEE's, because this image's pre-shared key is AOSP's 32 zero bytes. A StrongBox key
+    bound to the lockscreen signed **1 s after the owner's real pattern unlock**, and refused both
+    before it and 18 s after. **This image's gatekeeper signs nothing**: every auth token carries a MAC
+    of 32 zero bytes. So the daemon runs `--accept-unsigned-auth-tokens` and reports the auth tags at
+    KEYSTORE level, rather than claim a binding it cannot verify. keystore2 is the real gate, and in
+    both refusals it was keystore2 that refused, before the StrongBox was asked. **Android here has the
+    owner's Pattern lock**, so `bin/keystore-auth-test.sh` uses the owner's unlock and never sets,
+    enters or clears the credential. The feature XML is still **not deployed**, and that is now a
+    policy question for the owner rather than a missing piece. Nothing is packaged.
+    [artifacts/keystore/hand-deploy.sh](artifacts/keystore/hand-deploy.sh) removes the hand deployment
+    at the next logout, and its boot guard removes it if a reboot comes first.
     See [docs/65-tpm-keystore.md](docs/65-tpm-keystore.md).
 11. **A fingerprint HAL fed by libfprint — Chipsailing on bigtab01, Goodix on vidiot01.** **Added
     2026-10-10 at the owner's request as two items; scoped the same day as one, nothing built.**

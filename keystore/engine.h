@@ -17,10 +17,19 @@
 // finish() produces the whole result. keymaster allows it, the framework copes
 // with it, and it is the only correct shape for GCM decryption, which must not
 // release plaintext before the tag has been checked.
+//
+// Stage 5 (docs/74) adds the shared HMAC key and auth-bound keys. A key with a
+// USER_SECURE_ID needs a HardwareAuthToken: at begin() if it also has an
+// AUTH_TIMEOUT, checked against this daemon's own CLOCK_BOOTTIME (the TEE's
+// clock, measured to the millisecond), and otherwise on every update() and
+// finish(), with the operation handle as its challenge. A VerificationToken
+// handed to an auth-bound operation is checked too.
 #ifndef WAYDROID_KEYSTORE_ENGINE_H
 #define WAYDROID_KEYSTORE_ENGINE_H
 
+#include "auth.h"
 #include "keystore.h"
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -46,6 +55,7 @@ enum class KmError : int {
     INCOMPATIBLE_DIGEST = -13,
     UNSUPPORTED_KEY_FORMAT = -17,
     INVALID_INPUT_LENGTH = -21,
+    KEY_USER_NOT_AUTHENTICATED = -26,
     INVALID_OPERATION_HANDLE = -28,
     VERIFICATION_FAILED = -30,
     TOO_MANY_OPERATIONS = -31,
@@ -71,8 +81,10 @@ enum class KmError : int {
 const char* kmErrorName(KmError e);
 
 // keymaster@4.0 KeyCharacteristics. A StrongBox puts what it enforces itself in
-// hardwareEnforced; km_compat maps that list to the STRONGBOX level and ignores
-// softwareEnforced, adding the keystore-enforced tags from the request itself.
+// hardwareEnforced, which km_compat reports at the STRONGBOX level; what it puts
+// in softwareEnforced km_compat reports at the KEYSTORE level -- keystore2's own
+// -- which is the honest place for a tag this engine checks but cannot back
+// (docs/74 corrects docs/73, which said softwareEnforced was ignored).
 struct KeyCharacteristics {
     AuthList softwareEnforced;
     AuthList hardwareEnforced;
@@ -81,9 +93,24 @@ struct KeyCharacteristics {
 constexpr size_t kMaxOperations = 16;
 constexpr size_t kMaxOperationBytes = 16u << 20;
 
+struct EngineOptions {
+    // Accept a HardwareAuthToken whose MAC is 32 zero bytes. This image's
+    // gatekeeper signs nothing (auth.h), so without this a password-bound key
+    // can never be used. With it, the auth tags are still enforced on every
+    // operation but reported at the KEYSTORE level rather than STRONGBOX: the
+    // tokens they rest on are ones anything could have written, and keystore2
+    // -- which decides which tokens reach us -- is what really gates them.
+    bool acceptUnsignedAuthTokens = false;
+    // The pre-shared key computeSharedHmac derives from.
+    Bytes keyAgreementKey = imageKeyAgreementKey();
+    // Milliseconds of CLOCK_BOOTTIME; a test replaces it.
+    std::function<uint64_t()> clockMs;
+};
+
 class Engine {
 public:
-    explicit Engine(std::unique_ptr<TpmBackend> backend);
+    explicit Engine(std::unique_ptr<TpmBackend> backend,
+                    EngineOptions options = EngineOptions());
     ~Engine();
 
     // Create the persistent primary if needed. Idempotent; every key operation
@@ -91,6 +118,15 @@ public:
     KmError init();
 
     std::string backendDescription() { return backend_->describe(); }
+
+    // This instance's share of the negotiation: a random seed and nonce, fixed
+    // for the life of the process as keymaster requires.
+    const HmacSharingParams& hmacSharingParameters() const { return mine_; }
+    // INVALID_ARGUMENT, leaving any earlier key in place, unless our own
+    // parameters are among `params`.
+    KmError computeSharedHmac(const std::vector<HmacSharingParams>& params,
+                              Bytes& sharingCheckOut);
+    bool hasSharedKey();
 
     KmError generateKey(const AuthList& request, Bytes& blobOut,
                         KeyCharacteristics& kc);
@@ -104,12 +140,23 @@ public:
     KmError exportKey(KeyFormat format, const Bytes& blob, const Bytes& clientId,
                       const Bytes& appData, Bytes& out);
 
+    // `why`, when given, says what was decided about authorization -- which
+    // token was accepted and how, or why none was -- and is left empty when the
+    // key is not auth-bound.
     KmError begin(Purpose purpose, const Bytes& blob, const AuthList& inParams,
-                  AuthList& outParams, uint64_t& handle);
+                  AuthList& outParams, uint64_t& handle,
+                  const HardwareAuthToken& authToken = HardwareAuthToken(),
+                  std::string* why = nullptr);
     KmError update(uint64_t handle, const AuthList& inParams, const Bytes& input,
-                   uint32_t& inputConsumed, AuthList& outParams, Bytes& output);
+                   uint32_t& inputConsumed, AuthList& outParams, Bytes& output,
+                   const HardwareAuthToken& authToken = HardwareAuthToken(),
+                   const VerificationToken& verificationToken = VerificationToken(),
+                   std::string* why = nullptr);
     KmError finish(uint64_t handle, const AuthList& inParams, const Bytes& input,
-                   const Bytes& signature, AuthList& outParams, Bytes& output);
+                   const Bytes& signature, AuthList& outParams, Bytes& output,
+                   const HardwareAuthToken& authToken = HardwareAuthToken(),
+                   const VerificationToken& verificationToken = VerificationToken(),
+                   std::string* why = nullptr);
     KmError abort(uint64_t handle);
 
     KmError getRandom(size_t n, Bytes& out);
@@ -123,20 +170,31 @@ private:
                  const Bytes* rawAes, Bytes& blobOut, KeyCharacteristics& kc);
     KmError parseBound(const Bytes& blob, const Bytes& clientId,
                        const Bytes& appData, KeyBlob& kb);
+    KmError authorize(const AuthList& key, const HardwareAuthToken& t,
+                      const uint64_t* challenge, std::string* why);
+    KmError checkVerificationToken(const VerificationToken& vt, uint64_t handle,
+                                   std::string* why);
+    KmError authorizeStep(Operation& op, uint64_t handle, const HardwareAuthToken& hat,
+                          const VerificationToken& vt, std::string* why);
     KmError absorb(Operation& op, const AuthList& inParams, const Bytes& input);
     KmError finishSign(Operation& op, Bytes& output);
     KmError finishAes(Operation& op, Bytes& output);
     KmError finishGcm(Operation& op, Bytes& output);
+    uint64_t nowMs() const;
 
     std::unique_ptr<TpmBackend> backend_;
+    EngineOptions opts_;
     std::mutex lock_;
     bool primaryReady_ = false;
     std::map<uint64_t, std::unique_ptr<Operation>> ops_;
+    HmacSharingParams mine_;
+    Bytes sharedKey_;   // H; empty until computeSharedHmac succeeds
 };
 
 // Split a key's stored list into what this engine enforces and the rest, minus
-// APPLICATION_ID/APPLICATION_DATA, which keymaster never discloses.
-KeyCharacteristics characteristicsOf(const AuthList& stored);
+// APPLICATION_ID/APPLICATION_DATA, which keymaster never discloses. The auth
+// tags count as enforced only when `authInHardware` (EngineOptions).
+KeyCharacteristics characteristicsOf(const AuthList& stored, bool authInHardware = true);
 
 } // namespace wks
 

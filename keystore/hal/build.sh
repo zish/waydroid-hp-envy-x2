@@ -75,11 +75,12 @@ CXXFLAGS=(
 )
 # shellcheck disable=SC2206
 CXXFLAGS+=($GLIB_CFLAGS)
+# shellcheck disable=SC2054  # -Wl, passes its argument after a comma, not a list
 LDFLAGS=( -L"$OUT/sysroot/lib" -Wl,--gc-sections -static-libstdc++ -static-libgcc )
 
 # service.cpp needs gbinder/glib; the engine TUs are plain C++17.
 SRCS=( "$here/service.cpp" "$here/../km_blob.cpp" "$here/../tools_backend.cpp"
-       "$here/../engine.cpp" "$here/../soft_crypto.cpp" )
+       "$here/../engine.cpp" "$here/../soft_crypto.cpp" "$here/../auth.cpp" )
 OBJS=()
 echo "== compiling"
 for s in "${SRCS[@]}"; do
@@ -100,7 +101,7 @@ ls -l "$OUT/waydroid-keystored"
 # instance of the daemon (see kmbench.cpp). Built alongside, never installed.
 g++ "${CXXFLAGS[@]}" -c "$here/kmbench.cpp" -o "$OUT/kmbench.o"
 # shellcheck disable=SC2206
-g++ "$OUT/kmbench.o" "$OUT/km_blob.o" "$OUT/soft_crypto.o" -o "$OUT/km-bench" \
+g++ "$OUT/kmbench.o" "$OUT/km_blob.o" "$OUT/soft_crypto.o" "$OUT/auth.o" -o "$OUT/km-bench" \
 	"${LDFLAGS[@]}" -lgbinder -lglibutil $GLIB_LIBS -lpthread
 echo "== built $OUT/km-bench"
 

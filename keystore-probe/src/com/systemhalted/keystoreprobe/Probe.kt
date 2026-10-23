@@ -8,6 +8,7 @@ import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
+import android.security.keystore.UserNotAuthenticatedException
 import android.util.Log
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
@@ -41,6 +42,13 @@ import javax.crypto.spec.IvParameterSpec
  *   fault is not ours.
  *
  * Every step is guarded, so one failure is reported and the rest still run.
+ *
+ * The `auth-*` modes (docs/74) are one phase each of an auth-bound key's life,
+ * driven from the host by bin/keystore-auth-test.sh, which sets a temporary PIN
+ * and produces the user authentications between them with `cmd lock_settings
+ * verify` -- the same gatekeeper token a lockscreen unlock produces. A StrongBox
+ * key and a TEE key of the same shape go through every phase together, so a
+ * difference between them is ours.
  */
 class Probe {
     companion object {
@@ -49,6 +57,10 @@ class Probe {
         private const val SB_GCM = "probe-sb-gcm"
         private const val SB_CBC = "probe-sb-cbc"
         private const val TEE_EC = "probe-tee-ec"
+        private const val SB_AUTH = "probe-sb-auth"
+        private const val TEE_AUTH = "probe-tee-auth"
+        /** Seconds a device-credential authentication unlocks the auth keys. */
+        const val AUTH_TIMEOUT_S = 15
     }
 
     private val out = StringBuilder()
@@ -118,10 +130,26 @@ class Probe {
 
     private fun message(n: Int) = ByteArray(n) { (it * 31 + 7).toByte() }
 
-    fun run(): String {
-        line("Keystore Probe")
+    fun run(mode: String = ""): String {
+        line("Keystore Probe" + if (mode.isEmpty()) "" else " -- $mode")
         line("  ${Build.FINGERPRINT}")
         line("  SDK ${Build.VERSION.SDK_INT}")
+        when (mode) {
+            "" -> {}
+            "auth-gen" -> authGen()
+            "auth-fresh" -> authUse(expectUnlocked = true)
+            "auth-stale" -> authUse(expectUnlocked = false)
+            "auth-clean" -> step("delete the auth keys") {
+                for (a in listOf(SB_AUTH, TEE_AUTH)) ks.deleteEntry(a)
+                check(listOf(SB_AUTH, TEE_AUTH).none { ks.containsAlias(it) }, "keys deleted")
+            }
+            else -> line("  [FAIL] unknown mode $mode").also { fail++ }
+        }
+        if (mode.isNotEmpty()) {
+            line("")
+            line("$pass passed, $fail failed")
+            return out.toString()
+        }
 
         for (a in listOf(SB_EC, SB_GCM, SB_CBC, TEE_EC)) {
             try { ks.deleteEntry(a) } catch (_: Throwable) {}
@@ -154,6 +182,85 @@ class Probe {
         line("")
         line("$pass passed, $fail failed")
         return out.toString()
+    }
+
+    // --- auth-bound keys (docs/74) -------------------------------------------
+
+    private fun authGen() {
+        for (a in listOf(SB_AUTH, TEE_AUTH)) {
+            try { ks.deleteEntry(a) } catch (_: Throwable) {}
+        }
+        for ((alias, strongBox) in listOf(TEE_AUTH to false, SB_AUTH to true)) {
+            line("")
+            line("-- ${if (strongBox) "StrongBox" else "control, TEE"}: EC P-256, " +
+                "device credential, ${AUTH_TIMEOUT_S}s --")
+            step("generate") {
+                val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setUserAuthenticationRequired(true)
+                    .setUserAuthenticationParameters(AUTH_TIMEOUT_S,
+                        KeyProperties.AUTH_DEVICE_CREDENTIAL)
+                    .setIsStrongBoxBacked(strongBox)
+                    .build()
+                val kpg = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC,
+                    "AndroidKeyStore")
+                kpg.initialize(spec)
+                val kp = timed("generateKeyPair") { kpg.generateKeyPair() }
+                val info = KeyFactory.getInstance(kp.private.algorithm, "AndroidKeyStore")
+                    .getKeySpec(kp.private, KeyInfo::class.java)
+                if (strongBox) {
+                    check(info.securityLevel == KeyProperties.SECURITY_LEVEL_STRONGBOX,
+                        "KeyInfo security level is STRONGBOX", "got ${levelName(info.securityLevel)}")
+                } else {
+                    line("  [info] control key security level: ${levelName(info.securityLevel)}")
+                }
+                check(info.isUserAuthenticationRequired &&
+                    info.userAuthenticationValidityDurationSeconds == AUTH_TIMEOUT_S,
+                    "KeyInfo: user authentication required, ${AUTH_TIMEOUT_S}s")
+                // Who enforces it, as the keystore reports it. Not asserted: it is
+                // the daemon's mode, chosen at deployment (docs/74).
+                line("  [info] isUserAuthenticationRequirementEnforcedBySecureHardware: " +
+                    "${info.isUserAuthenticationRequirementEnforcedBySecureHardware}")
+            }
+        }
+        // The host waited out the timeout after setting the PIN, so nothing has
+        // authenticated recently: both keys must refuse.
+        authUse(expectUnlocked = false)
+    }
+
+    /** Sign with both auth keys; succeed only within the timeout of an unlock. */
+    private fun authUse(expectUnlocked: Boolean) {
+        for ((alias, strongBox) in listOf(TEE_AUTH to false, SB_AUTH to true)) {
+            val who = if (strongBox) "StrongBox" else "TEE control"
+            step("$who: sign") {
+                val entry = ks.getEntry(alias, null) as KeyStore.PrivateKeyEntry
+                val msg = message(500)
+                val sig = try {
+                    Signature.getInstance("SHA256withECDSA").run {
+                        initSign(entry.privateKey)
+                        update(msg)
+                        sign()
+                    }
+                } catch (e: UserNotAuthenticatedException) {
+                    null
+                }
+                if (!expectUnlocked) {
+                    check(sig == null, "$who: no recent unlock, so UserNotAuthenticatedException")
+                    return@step
+                }
+                check(sig != null, "$who: just unlocked, so it signs")
+                if (sig != null) {
+                    val pub = KeyFactory.getInstance("EC")
+                        .generatePublic(X509EncodedKeySpec(entry.certificate.publicKey.encoded))
+                    val ok = Signature.getInstance("SHA256withECDSA").run {
+                        initVerify(pub)
+                        update(msg)
+                        verify(sig)
+                    }
+                    check(ok, "$who: and the signature verifies in software")
+                }
+            }
+        }
     }
 
     private fun ecKey(alias: String, strongBox: Boolean) {

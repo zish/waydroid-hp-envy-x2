@@ -22,11 +22,13 @@
  */
 #include "km_parcel.h"
 
+#include <ctype.h>
 #include <glib.h>
 #include <gutil_log.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include <time.h>
 #include <unistd.h>
 
 #define KM_IFACE "android.hardware.keymaster@4.0::IKeymasterDevice"
@@ -96,30 +98,77 @@ hw_params(GBinderWriter* w, const AuthList& a)
     }
 }
 
-/* HardwareAuthToken: 56 bytes, mac at offset 40. Always empty here. */
+static const HardwareAuthToken kNoAuthToken;
+static const VerificationToken kNoVerificationToken;
+
+/* HardwareAuthToken: 56 bytes, mac at offset 40; empty unless one is given. */
 static void
-hw_auth_token(GBinderWriter* w)
+hw_auth_token(GBinderWriter* w, const HardwareAuthToken& t = kNoAuthToken)
 {
-    guint8* tok = (guint8*) gbinder_writer_malloc0(w, 56);
+    km_hardware_auth_token* tok = gbinder_writer_new0(w, km_hardware_auth_token);
+    void* mac = t.mac.empty() ? NULL : gbinder_writer_memdup(w, t.mac.data(), t.mac.size());
     GBinderParent parent;
 
-    parent.index = gbinder_writer_append_buffer_object(w, tok, 56);
-    parent.offset = 40;
-    hw_child(w, NULL, 0, &parent);
+    tok->challenge = t.challenge;
+    tok->userId = t.userId;
+    tok->authenticatorId = t.authenticatorId;
+    tok->authenticatorType = t.authenticatorType;
+    tok->timestamp = t.timestamp;
+    km_set_vec(&tok->mac, mac, t.mac.size());
+    parent.index = gbinder_writer_append_buffer_object(w, tok, sizeof(*tok));
+    parent.offset = G_STRUCT_OFFSET(km_hardware_auth_token, mac);
+    hw_child(w, mac, t.mac.size(), &parent);
 }
 
-/* VerificationToken: 56 bytes, parametersVerified at 16, mac at 40. */
+/* VerificationToken: 56 bytes, parametersVerified at 16 (always empty here),
+ * mac at 40. */
 static void
-hw_verification_token(GBinderWriter* w)
+hw_verification_token(GBinderWriter* w, const VerificationToken& t = kNoVerificationToken)
 {
     km_verification_token* tok = gbinder_writer_new0(w, km_verification_token);
+    void* mac = t.mac.empty() ? NULL : gbinder_writer_memdup(w, t.mac.data(), t.mac.size());
     GBinderParent parent;
 
+    tok->challenge = t.challenge;
+    tok->timestamp = t.timestamp;
+    tok->securityLevel = t.securityLevel;
+    km_set_vec(&tok->parametersVerified, NULL, 0);
+    km_set_vec(&tok->mac, mac, t.mac.size());
     parent.index = gbinder_writer_append_buffer_object(w, tok, sizeof(*tok));
     parent.offset = G_STRUCT_OFFSET(km_verification_token, parametersVerified);
     hw_child(w, NULL, 0, &parent);
     parent.offset = G_STRUCT_OFFSET(km_verification_token, mac);
-    hw_child(w, NULL, 0, &parent);
+    hw_child(w, mac, t.mac.size(), &parent);
+}
+
+/* vec<HmacSharingParameters>: the vector, its array, then each seed. */
+static void
+hw_hmac_params_vec(GBinderWriter* w, const std::vector<HmacSharingParams>& ps)
+{
+    GBinderHidlVec* v = gbinder_writer_new0(w, GBinderHidlVec);
+    km_hmac_sharing_parameters* arr = ps.empty() ? NULL : (km_hmac_sharing_parameters*)
+        gbinder_writer_malloc0(w, ps.size() * sizeof(*arr));
+    GBinderParent parent, child;
+
+    for (gsize i = 0; i < ps.size(); i++) {
+        void* seed = ps[i].seed.empty() ? NULL :
+            gbinder_writer_memdup(w, ps[i].seed.data(), ps[i].seed.size());
+        km_set_vec(&arr[i].seed, seed, ps[i].seed.size());
+        memcpy(arr[i].nonce, ps[i].nonce.data(), sizeof(arr[i].nonce));
+    }
+    km_set_vec(v, arr, ps.size());
+    parent.index = gbinder_writer_append_buffer_object(w, v, sizeof(*v));
+    parent.offset = GBINDER_HIDL_VEC_BUFFER_OFFSET;
+    if (!arr) {
+        hw_child(w, NULL, 0, &parent);
+        return;
+    }
+    child.index = gbinder_writer_append_buffer_object_with_parent(w, arr,
+        ps.size() * sizeof(*arr), &parent);
+    for (gsize i = 0; i < ps.size(); i++) {
+        child.offset = i * sizeof(*arr) + G_STRUCT_OFFSET(km_hmac_sharing_parameters, seed);
+        hw_child(w, arr[i].seed.data.ptr, arr[i].seed.count, &child);
+    }
 }
 
 /* ------------------------------------------------------------ transactions */
@@ -248,8 +297,56 @@ characteristics(Bench& b, const Bytes& blob, KeyCharacteristics& kc)
 }
 
 static KmError
+get_hmac_params(Bench& b, HmacSharingParams& out)
+{
+    GBinderWriter w;
+    GBinderReader rd;
+    KmError e;
+    GBinderLocalRequest* req = new_req(b, &w);
+    GBinderRemoteReply* r = call(b, KM_GET_HMAC_SHARING_PARAMETERS, req, &rd, &e);
+    if (!r) return KmError::UNKNOWN_ERROR;
+    bool ok = km_read_hmac_params(&rd, out);
+    gbinder_remote_reply_unref(r);
+    return ok ? e : KmError::UNKNOWN_ERROR;
+}
+
+static KmError
+compute_shared_hmac(Bench& b, const std::vector<HmacSharingParams>& ps, Bytes& check)
+{
+    GBinderWriter w;
+    GBinderReader rd;
+    KmError e;
+    GBinderLocalRequest* req = new_req(b, &w);
+    hw_hmac_params_vec(&w, ps);
+    GBinderRemoteReply* r = call(b, KM_COMPUTE_SHARED_HMAC, req, &rd, &e);
+    if (!r) return KmError::UNKNOWN_ERROR;
+    bool ok = km_read_bytes(&rd, check);
+    gbinder_remote_reply_unref(r);
+    return ok ? e : KmError::UNKNOWN_ERROR;
+}
+
+/* verifyAuthorization(challenge, {}, empty HardwareAuthToken): exactly what
+ * km_compat's SecureClock asks the TEE for on every StrongBox operation. */
+static KmError
+verify_authorization(Bench& b, guint64 challenge, VerificationToken& vt)
+{
+    GBinderWriter w;
+    GBinderReader rd;
+    KmError e;
+    GBinderLocalRequest* req = new_req(b, &w);
+    gbinder_writer_append_int64(&w, challenge);
+    hw_params(&w, AuthList());
+    hw_auth_token(&w);
+    GBinderRemoteReply* r = call(b, KM_VERIFY_AUTHORIZATION, req, &rd, &e);
+    if (!r) return KmError::UNKNOWN_ERROR;
+    bool ok = km_read_verification_token(&rd, vt);
+    gbinder_remote_reply_unref(r);
+    return ok ? e : KmError::UNKNOWN_ERROR;
+}
+
+static KmError
 begin(Bench& b, Purpose p, const Bytes& blob, const AuthList& in, AuthList& out,
-      guint64& handle)
+      guint64& handle, const HardwareAuthToken& hat = kNoAuthToken)
 {
     GBinderWriter w;
     GBinderReader rd;
@@ -258,7 +355,7 @@ begin(Bench& b, Purpose p, const Bytes& blob, const AuthList& in, AuthList& out,
     gbinder_writer_append_int32(&w, static_cast<gint32>(p));
     hw_bytes(&w, blob);
     hw_params(&w, in);
-    hw_auth_token(&w);
+    hw_auth_token(&w, hat);
     GBinderRemoteReply* r = call(b, KM_BEGIN, req, &rd, &e);
     if (!r) return KmError::UNKNOWN_ERROR;
     bool ok = km_read_params(&rd, out) && gbinder_reader_read_uint64(&rd, &handle);
@@ -268,7 +365,8 @@ begin(Bench& b, Purpose p, const Bytes& blob, const AuthList& in, AuthList& out,
 
 static KmError
 update(Bench& b, guint64 handle, const AuthList& in, const Bytes& input,
-       guint32& consumed, Bytes& output)
+       guint32& consumed, Bytes& output, const HardwareAuthToken& hat = kNoAuthToken,
+       const VerificationToken& vt = kNoVerificationToken)
 {
     GBinderWriter w;
     GBinderReader rd;
@@ -278,8 +376,8 @@ update(Bench& b, guint64 handle, const AuthList& in, const Bytes& input,
     gbinder_writer_append_int64(&w, handle);
     hw_params(&w, in);
     hw_bytes(&w, input);
-    hw_auth_token(&w);
-    hw_verification_token(&w);
+    hw_auth_token(&w, hat);
+    hw_verification_token(&w, vt);
     GBinderRemoteReply* r = call(b, KM_UPDATE, req, &rd, &e);
     if (!r) return KmError::UNKNOWN_ERROR;
     bool ok = gbinder_reader_read_uint32(&rd, &consumed) && km_read_params(&rd, out) &&
@@ -289,7 +387,9 @@ update(Bench& b, guint64 handle, const AuthList& in, const Bytes& input,
 }
 
 static KmError
-finish(Bench& b, guint64 handle, const AuthList& in, const Bytes& input, Bytes& output)
+finish(Bench& b, guint64 handle, const AuthList& in, const Bytes& input, Bytes& output,
+       const HardwareAuthToken& hat = kNoAuthToken,
+       const VerificationToken& vt = kNoVerificationToken)
 {
     GBinderWriter w;
     GBinderReader rd;
@@ -300,8 +400,8 @@ finish(Bench& b, guint64 handle, const AuthList& in, const Bytes& input, Bytes& 
     hw_params(&w, in);
     hw_bytes(&w, input);
     hw_bytes(&w, Bytes());          /* signature */
-    hw_auth_token(&w);
-    hw_verification_token(&w);
+    hw_auth_token(&w, hat);
+    hw_verification_token(&w, vt);
     GBinderRemoteReply* r = call(b, KM_FINISH, req, &rd, &e);
     if (!r) return KmError::UNKNOWN_ERROR;
     bool ok = km_read_params(&rd, out) && km_read_bytes(&rd, output);
@@ -441,14 +541,247 @@ run(Bench& b)
           "abort of an unknown handle: INVALID_OPERATION_HANDLE");
 }
 
+static guint64 boottime_ms();
+static std::string hexs(const Bytes& b, size_t n = 8);
+
+/* The sharing check by OpenSSL alone -- KBKDF in counter mode with AES-256-CMAC
+ * is keymaster's CKDF, and `openssl mac HMAC` the check -- so the daemon's answer
+ * over binder is judged by code it shares nothing with. Empty if no openssl. */
+static Bytes
+openssl_sharing_check(const std::vector<HmacSharingParams>& ps)
+{
+    Bytes ctx;
+    for (const auto& p : ps) {
+        ctx.insert(ctx.end(), p.seed.begin(), p.seed.end());
+        ctx.insert(ctx.end(), p.nonce.begin(), p.nonce.end());
+    }
+    std::string cmd = "openssl kdf -binary -keylen 32 -kdfopt mac:CMAC "
+        "-kdfopt cipher:AES-256-CBC -kdfopt hexkey:" + std::string(64, '0') +
+        " -kdfopt salt:KeymasterSharedMac -kdfopt hexinfo:" + hexs(ctx, ctx.size()) +
+        " KBKDF 2>/dev/null | od -An -tx1 | tr -d ' \\n'";
+    FILE* f = popen(cmd.c_str(), "r");
+    char h[80] = "";
+    if (!f) return {};
+    if (!fgets(h, sizeof(h), f)) h[0] = 0;
+    pclose(f);
+    if (strlen(h) != 64) return {};
+    cmd = std::string("printf 'Keymaster HMAC Verification' | openssl mac -digest SHA256 "
+        "-macopt hexkey:") + h + " HMAC 2>/dev/null";
+    f = popen(cmd.c_str(), "r");
+    char out[80] = "";
+    if (!f) return {};
+    if (!fgets(out, sizeof(out), f)) out[0] = 0;
+    pclose(f);
+    Bytes r;
+    for (size_t i = 0; i + 1 < strlen(out) && isxdigit((unsigned char) out[i]); i += 2) {
+        unsigned v;
+        sscanf(out + i, "%2x", &v);
+        r.push_back((guint8) v);
+    }
+    return r.size() == 32 ? r : Bytes();
+}
+
+/* Stage 5 over binder: the negotiation, then which token opens which key. The
+ * bench daemon's mode is read off its answer rather than assumed -- a daemon
+ * that reports the auth tags at the KEYSTORE level must be one that accepts an
+ * unsigned token, and one that reports them at STRONGBOX must not. */
+static void
+run_auth(Bench& b)
+{
+    printf("-- stage 5: the shared-secret negotiation --\n");
+    HmacSharingParams mine;
+    check(get_hmac_params(b, mine) == KmError::OK && mine.nonce.size() == 32,
+          "getHmacSharingParameters");
+    HmacSharingParams other{Bytes(), Bytes(32)};   /* a TEE: empty seed */
+    if (getentropy(other.nonce.data(), other.nonce.size())) other.nonce.assign(32, 0x3c);
+    std::vector<HmacSharingParams> all{other, mine};   /* keystore2's order */
+    Bytes chk, ref = openssl_sharing_check(all);
+    KmError e = compute_shared_hmac(b, all, chk);
+    if (ref.empty()) {
+        check(e == KmError::OK &&
+              chk == sharingCheck(deriveSharedHmacKey(imageKeyAgreementKey(), all)),
+              "computeSharedHmac (no openssl: checked against our own CKDF only)");
+    } else {
+        check(e == KmError::OK && chk == ref,
+              "computeSharedHmac over binder = OpenSSL KBKDF + HMAC");
+    }
+    Bytes chk2;
+    check(compute_shared_hmac(b, {other}, chk2) == KmError::INVALID_ARGUMENT,
+          "without our own parameters: INVALID_ARGUMENT");
+    const Bytes h = deriveSharedHmacKey(imageKeyAgreementKey(), all);
+
+    const guint64 sid = 0x0123456789abcdefull;
+    auto token = [&](guint64 challenge, guint32 type, guint64 ts) {
+        HardwareAuthToken t;
+        t.challenge = challenge;
+        t.userId = sid;
+        t.authenticatorType = type;
+        t.timestamp = ts;
+        t.mac = authTokenMac(h, t);
+        return t;
+    };
+    const guint32 pw = u(HwAuthType::PASSWORD);
+
+    printf("-- stage 5: an EC key bound to a password, 60 s --\n");
+    AuthList ec;
+    ec.addEnum(Tag::ALGORITHM, u(Algorithm::EC));
+    ec.addUint(Tag::KEY_SIZE, 256);
+    ec.addEnum(Tag::EC_CURVE, u(EcCurve::P_256));
+    ec.addEnum(Tag::PURPOSE, u(Purpose::SIGN));
+    ec.addEnum(Tag::DIGEST, u(Digest::SHA_2_256));
+    ec.params.emplace_back(Tag::USER_SECURE_ID, sid);
+    ec.addEnum(Tag::USER_AUTH_TYPE, pw);
+    ec.addUint(Tag::AUTH_TIMEOUT, 60);
+    Bytes blob, spki;
+    KeyCharacteristics kc;
+    check(generate(b, ec, blob, kc) == KmError::OK, "generateKey with USER_SECURE_ID");
+    const bool hw = kc.hardwareEnforced.has(Tag::USER_SECURE_ID);
+    const bool sw = kc.softwareEnforced.has(Tag::USER_SECURE_ID);
+    check(hw != sw, hw ? "auth tags at STRONGBOX: this daemon wants signed tokens"
+                       : "auth tags at KEYSTORE: this daemon takes unsigned tokens");
+    export_x509(b, blob, spki);
+
+    AuthList sp, out;
+    sp.addEnum(Tag::DIGEST, u(Digest::SHA_2_256));
+    guint64 hd = 0;
+    check(begin(b, Purpose::SIGN, blob, sp, out, hd) == KmError::KEY_USER_NOT_AUTHENTICATED,
+          "begin with an empty token: KEY_USER_NOT_AUTHENTICATED");
+    e = begin(b, Purpose::SIGN, blob, sp, out, hd, token(0, pw, boottime_ms() - 2000));
+    check(e == KmError::OK, "a signed token 2 s old, over binder: begin OK");
+    VerificationToken vt;
+    vt.challenge = hd;
+    vt.timestamp = boottime_ms();
+    vt.securityLevel = 1;
+    vt.mac = verificationTokenMac(h, vt, VtForm::AOSP_SOFTWARE);
+    Bytes msg = str("signed after a password, as keystore2 would ask"), sig;
+    e = e == KmError::OK ? finish(b, hd, AuthList(), msg, sig, kNoAuthToken, vt) : e;
+    int v = e == KmError::OK ? openssl_verify(spki, msg, sig) : 0;
+    check(e == KmError::OK && v != 0,
+          "finish with a TEE-form verification token; openssl verifies the signature");
+
+    HardwareAuthToken zero = token(0, pw, boottime_ms());
+    zero.mac.assign(32, 0);
+    e = begin(b, Purpose::SIGN, blob, sp, out, hd, zero);
+    if (e == KmError::OK) abort_op(b, hd);
+    check(sw ? e == KmError::OK : e == KmError::KEY_USER_NOT_AUTHENTICATED,
+          sw ? "an unsigned token (the gatekeeper's): accepted, as reported"
+             : "an unsigned token (the gatekeeper's): refused, as reported");
+    HardwareAuthToken other_user = token(0, pw, boottime_ms());
+    other_user.userId = ~sid;
+    other_user.mac = authTokenMac(h, other_user);
+    check(begin(b, Purpose::SIGN, blob, sp, out, hd, other_user) ==
+              KmError::KEY_USER_NOT_AUTHENTICATED,
+          "a signed token for another user: refused");
+    check(begin(b, Purpose::SIGN, blob, sp, out, hd, token(0, pw, boottime_ms() - 61000)) ==
+              KmError::KEY_USER_NOT_AUTHENTICATED,
+          "a signed token 61 s old: refused");
+
+    printf("-- stage 5: a per-operation AES key --\n");
+    AuthList aes;
+    aes.addEnum(Tag::ALGORITHM, u(Algorithm::AES));
+    aes.addUint(Tag::KEY_SIZE, 128);
+    aes.addEnum(Tag::BLOCK_MODE, u(BlockMode::CBC));
+    aes.addEnum(Tag::PADDING, u(Padding::PKCS7));
+    aes.addEnum(Tag::PURPOSE, u(Purpose::ENCRYPT));
+    aes.params.emplace_back(Tag::USER_SECURE_ID, sid);
+    aes.addEnum(Tag::USER_AUTH_TYPE, pw);
+    Bytes ab;
+    check(generate(b, aes, ab, kc) == KmError::OK, "generateKey, no AUTH_TIMEOUT");
+    AuthList cp;
+    cp.addEnum(Tag::BLOCK_MODE, u(BlockMode::CBC));
+    cp.addEnum(Tag::PADDING, u(Padding::PKCS7));
+    Bytes o, ct;
+    guint32 consumed = 0;
+    e = begin(b, Purpose::ENCRYPT, ab, cp, out, hd);
+    check(e == KmError::OK, "begin with no token");
+    e = e == KmError::OK ? update(b, hd, AuthList(), msg, consumed, o, token(hd, pw, 0)) : e;
+    check(e == KmError::OK, "update with a token whose challenge is the handle");
+    check(finish(b, hd, AuthList(), Bytes(), ct, token(hd + 1, pw, 0)) ==
+              KmError::KEY_USER_NOT_AUTHENTICATED,
+          "finish with a token for another operation: refused");
+}
+
+static guint64
+boottime_ms()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    return guint64(ts.tv_sec) * 1000 + guint64(ts.tv_nsec) / 1000000;
+}
+
+static std::string
+hexs(const Bytes& b, size_t n)
+{
+    std::string s;
+    char x[3];
+    for (size_t i = 0; i < b.size() && i < n; i++) {
+        snprintf(x, sizeof(x), "%02x", b[i]);
+        s += x;
+    }
+    return s;
+}
+
+/* --tee-probe: the image's own TEE keymaster, read-only. getHmacSharingParameters
+ * returns the per-boot values it already gave keystore2, and verifyAuthorization
+ * mints a token from its existing key -- neither changes its state, which is why
+ * this is safe against a live session where computeSharedHmac would not be. With
+ * no StrongBox declared, keystore2 negotiated with the TEE alone, so if K really
+ * is 32 zero bytes, H = CKDF(K, label, seed || nonce) and the token's MAC
+ * verifies under it. That settles K, the KDF and the token format against the
+ * binary that will be the other party, before any of it is deployed. */
+static void
+tee_probe(Bench& b)
+{
+    printf("-- the TEE keymaster's shared secret (read-only) --\n");
+    HmacSharingParams tee;
+    KmError e = get_hmac_params(b, tee);
+    check(e == KmError::OK && tee.nonce.size() == kSharingNonceLength,
+          "getHmacSharingParameters");
+    printf("    seed %zu bytes, nonce %s...\n", tee.seed.size(), hexs(tee.nonce).c_str());
+    Bytes h = deriveSharedHmacKey(imageKeyAgreementKey(), {tee});
+
+    guint64 challenge = 0;
+    if (getentropy(&challenge, sizeof(challenge))) challenge = 0x5eed;
+    VerificationToken vt;
+    guint64 before = boottime_ms();
+    e = verify_authorization(b, challenge, vt);
+    guint64 after = boottime_ms();
+    check(e == KmError::OK && vt.challenge == challenge && vt.mac.size() == kAuthMacLength,
+          "verifyAuthorization mints a token for our challenge");
+    printf("    token: level %u, timestamp %llu ms; host CLOCK_BOOTTIME %llu..%llu ms\n",
+           vt.securityLevel, (unsigned long long) vt.timestamp,
+           (unsigned long long) before, (unsigned long long) after);
+    check(vt.timestamp >= before && vt.timestamp <= after,
+          "the TEE's clock is the host's CLOCK_BOOTTIME (no time namespace)");
+
+    /* Every combination, for the record; only two are accepted by the daemon. */
+    struct { const char* what; VtForm f; guint32 level; } forms[] = {
+        { "HAL form, big-endian, level as sent", VtForm::SPEC, vt.securityLevel },
+        { "HAL form, big-endian, level TRUSTED_ENVIRONMENT", VtForm::SPEC, 1 },
+        { "AOSP software form, machine order, level SOFTWARE", VtForm::AOSP_SOFTWARE, 0 },
+    };
+    bool any = false;
+    for (const auto& f : forms) {
+        VerificationToken t = vt;
+        t.securityLevel = f.level;
+        bool match = verificationTokenMac(h, t, f.f) == vt.mac;
+        printf("    %-52s %s\n", f.what, match ? "MATCHES" : "no");
+        any = any || match;
+    }
+    check(any, "its MAC verifies under H = CKDF(0^256, KeymasterSharedMac, seed||nonce)");
+    printf("    sharing check this TEE gave keystore2: %s...\n", hexs(sharingCheck(h)).c_str());
+}
+
 int main(int argc, char** argv)
 {
     const char* device = "/dev/hwbinder";
     const char* name = "strongbox-bench";
+    bool teeProbe = false;
 
     gutil_log_set_type(GLOG_TYPE_STDERR, "km-bench");
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
+        else if (!strcmp(argv[i], "--tee-probe")) { teeProbe = true; name = "default"; }
         else device = argv[i];
     }
     GBinderServiceManager* sm = gbinder_servicemanager_new2(device, "hidl", "hidl");
@@ -461,7 +794,12 @@ int main(int argc, char** argv)
     Bench b;
     b.client = gbinder_client_new(remote, KM_IFACE);
     printf("km-bench against %s\n", fq.c_str());
-    run(b);
+    if (teeProbe) {
+        tee_probe(b);
+    } else {
+        run(b);
+        run_auth(b);
+    }
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     gbinder_client_unref(b.client);
     gbinder_servicemanager_unref(sm);

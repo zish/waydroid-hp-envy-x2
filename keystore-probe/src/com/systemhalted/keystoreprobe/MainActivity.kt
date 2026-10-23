@@ -20,6 +20,11 @@ import java.io.File
  * transaction to a host daemon that execs tpm2-tools against swtpm, so a key
  * generation takes on the order of a second, and none of that belongs on the main
  * looper.
+ *
+ * `am start -n <pkg>/.MainActivity --es mode auth-gen` (and auth-fresh,
+ * auth-stale, auth-clean) runs one phase of the auth-bound key test instead, and
+ * saves it as keystore-probe-<mode>.txt. The host force-stops the app between
+ * phases, so each launch is a fresh onCreate.
  */
 class MainActivity : Activity() {
 
@@ -35,16 +40,17 @@ class MainActivity : Activity() {
         }
         setContentView(ScrollView(this).apply { addView(tv) })
 
+        val mode = intent?.getStringExtra("mode") ?: ""
         Thread({
             val report = try {
-                Probe().run()
+                Probe().run(mode)
             } catch (t: Throwable) {
                 // The probe guards each step itself, so reaching here means
                 // something outside those steps broke. Still a result; still saved.
                 Log.e(Probe.TAG, "probe aborted", t)
                 "Keystore Probe aborted: ${t.javaClass.name}: ${t.message}\n"
             }
-            save(report)
+            save(report, if (mode.isEmpty()) "keystore-probe.txt" else "keystore-probe-$mode.txt")
             runOnUiThread { tv.text = report }
         }, "keystore-probe-main").start()
     }
@@ -54,11 +60,14 @@ class MainActivity : Activity() {
      * `<waydroid data>/media/0/Android/data/<pkg>/files/reports` on the host -- the
      * same route the other probes use, so `build.sh --pull` is the same three lines.
      */
-    private fun save(report: String) {
+    private fun save(report: String, name: String) {
         try {
             val dir = getExternalFilesDir("reports") ?: return
             dir.mkdirs()
-            File(dir, "keystore-probe.txt").writeText(report)
+            // Write then rename, so a host polling for the file never reads half.
+            val tmp = File(dir, "$name.tmp")
+            tmp.writeText(report)
+            tmp.renameTo(File(dir, name))
         } catch (t: Throwable) {
             Log.w(Probe.TAG, "could not save report: $t")
         }

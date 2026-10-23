@@ -11,8 +11,9 @@
 //
 // Scope: EC P-256 signing keys and AES-128/256 cipher keys (ECB, CBC, CTR, GCM),
 // generated in the TPM or imported raw (AES), driven through keymaster's
-// begin/update/finish operation model with tag enforcement on every call. RSA,
-// HMAC, auth-bound keys and computeSharedHmac are later stages.
+// begin/update/finish operation model with tag enforcement on every call, and
+// since stage 5 bound to a user authentication if asked (auth.h, docs/74). RSA
+// and HMAC keys are later stages.
 #ifndef WAYDROID_KEYSTORE_H
 #define WAYDROID_KEYSTORE_H
 

@@ -7,12 +7,18 @@
  * Stage 3a made keystore2 bind it as STRONGBOX. Stage 4 serves the key
  * operations: generateKey, importKey (raw AES), getKeyCharacteristics,
  * exportKey (EC, X.509), and begin/update/finish/abort for EC P-256 signing and
- * AES ECB/CBC/CTR/GCM. This file is marshalling only -- every decision about a
- * key is the engine's, and is exercised by `keystore-engine selftest` without
- * binder. Still not served, and answered with a well-formed UNIMPLEMENTED:
- * attestKey (a non-goal, docs/65), upgradeKey, importWrappedKey and
- * verifyAuthorization. computeSharedHmac still returns an empty check, which
- * keystore2 tolerates (docs/73); auth-bound keys are refused until it is real.
+ * AES ECB/CBC/CTR/GCM. Stage 5 (docs/74) joins the shared-secret negotiation
+ * for real and serves auth-bound keys: computeSharedHmac derives the key the
+ * TEE derives, and the HardwareAuthToken and VerificationToken that arrive with
+ * begin/update/finish are read and handed to the engine. This file is
+ * marshalling only -- every decision about a key is the engine's, and is
+ * exercised by `keystore-engine selftest` without binder. Still not served, and
+ * answered with a well-formed UNIMPLEMENTED: attestKey (a non-goal, docs/65),
+ * upgradeKey, importWrappedKey and verifyAuthorization (a TEE's job).
+ *
+ * --accept-unsigned-auth-tokens is for this image: its gatekeeper writes 32
+ * zero bytes where a token's MAC belongs (docs/74), so without the flag no
+ * password-bound key can ever be used. engine.h says what it costs.
  *
  * Launch model: started by hand for now, as root and unconfined_t, before the
  * session -- it waits for the container's hwservicemanager and registers the
@@ -22,13 +28,11 @@
 #include "km_parcel.h"
 
 #include <algorithm>
-#include <errno.h>
 #include <gio/gio.h>
 #include <string>
 #include <glib-unix.h>
 #include <gutil_log.h>
 #include <string.h>
-#include <sys/random.h>
 #include <unistd.h>
 
 using namespace wks;
@@ -56,11 +60,6 @@ typedef struct app {
     int ret;
     const char* name;
     Engine* engine;
-    /* Per-boot shared-secret material. Stable for the life of the process, as
-     * the spec requires (the nonce must not change between
-     * getHmacSharingParameters and computeSharedHmac). */
-    uint8_t seed[32];
-    uint8_t nonce[32];
     guint sessionWatch;
     guint sessionWatchMs;
 } App;
@@ -120,6 +119,8 @@ km_describe(
         case Tag::NO_AUTH_REQUIRED: name = "NO_AUTH_REQUIRED"; break;
         case Tag::CALLER_NONCE: name = "CALLER_NONCE"; break;
         case Tag::USER_SECURE_ID: name = "USER_SECURE_ID"; break;
+        case Tag::USER_AUTH_TYPE: name = "USER_AUTH_TYPE"; break;
+        case Tag::AUTH_TIMEOUT: name = "AUTH_TIMEOUT"; break;
         case Tag::APPLICATION_ID: name = "APPLICATION_ID"; break;
         case Tag::ORIGIN: name = "ORIGIN"; break;
         default: break;
@@ -135,6 +136,22 @@ km_describe(
     }
     if (!out.empty()) out.pop_back();
     return out;
+}
+
+/* A token for the log: present or not, and whether its MAC is all zeros --
+ * which is what this image's gatekeeper sends (docs/74). Never the MAC itself. */
+static std::string
+km_describe_token(
+    const HardwareAuthToken& t)
+{
+    char buf[96];
+    gboolean zero = TRUE;
+
+    if (!t.present()) return "no token";
+    for (guint8 b : t.mac) zero = zero && !b;
+    snprintf(buf, sizeof(buf), "token type=%u, %zu-byte MAC%s", t.authenticatorType,
+        t.mac.size(), zero ? " of zeros" : "");
+    return buf;
 }
 
 /* Every reply starts with the HIDL status and, for this interface, an
@@ -197,24 +214,37 @@ app_reply(
         GINFO("getHardwareInfo -> STRONGBOX WaydroidTpmKeymaster");
         break;
 
-    case KM_GET_HMAC_SHARING_PARAMETERS:
-        /* generates (ErrorCode, HmacSharingParameters). A per-boot seed and
-         * nonce; a correct shared secret waits on the pre-shared key the TEE
-         * keymaster and gatekeeper use (stage 5). */
-        reply = km_reply_new(obj, status, &writer, KmError::OK);
-        km_append_hmac_params(&writer, app->seed, sizeof(app->seed), app->nonce);
-        GINFO("getHmacSharingParameters -> OK (provisional seed/nonce)");
-        break;
+    case KM_GET_HMAC_SHARING_PARAMETERS: {
+        /* generates (ErrorCode, HmacSharingParameters). The engine's per-process
+         * seed and nonce. */
+        const HmacSharingParams& p = eng->hmacSharingParameters();
 
-    case KM_COMPUTE_SHARED_HMAC:
-        /* generates (ErrorCode, vec<uint8_t> sharingCheck). An empty check is a
-         * deliberate mismatch: keystore2 logs it and carries on (docs/73), and
-         * auth-bound keys -- the only thing a real shared secret is for here --
-         * are refused at generation until stage 5 computes it. */
         reply = km_reply_new(obj, status, &writer, KmError::OK);
-        gbinder_writer_append_hidl_vec(&writer, NULL, 0, 1);
-        GINFO("computeSharedHmac -> OK with an empty check (stage 5 makes it real)");
+        km_append_hmac_params(&writer, p.seed.data(), p.seed.size(), p.nonce.data());
+        GINFO("getHmacSharingParameters -> OK");
         break;
+    }
+
+    case KM_COMPUTE_SHARED_HMAC: {
+        /* (vec<HmacSharingParameters>) generates (ErrorCode, vec<uint8_t>
+         * sharingCheck). The same derivation as the TEE's, so keystore2 finds
+         * the checks equal; docs/74 measured the TEE's against this one. */
+        std::vector<HmacSharingParams> params;
+        Bytes check;
+        KmError e = km_read_hmac_params_vec(&reader, params) ?
+            eng->computeSharedHmac(params, check) : KmError::INVALID_ARGUMENT;
+        char head[12] = "";
+
+        reply = km_reply_new(obj, status, &writer, e);
+        km_append_bytes(&writer, check);
+        if (check.size() >= 4) {
+            snprintf(head, sizeof(head), "%02x%02x%02x%02x", check[0], check[1],
+                check[2], check[3]);
+        }
+        GINFO("computeSharedHmac over %zu participants -> %s, check %s...",
+            params.size(), kmErrorName(e), head);
+        break;
+    }
 
     case KM_ADD_RNG_ENTROPY:
         /* generates (ErrorCode). Harmless to accept; the TPM has its own RNG. */
@@ -350,11 +380,14 @@ app_reply(
         guint32 purpose = 0;
         Bytes blob;
         AuthList in, out;
+        HardwareAuthToken hat;
         guint64 handle = 0;
+        std::string why;
         KmError e = (gbinder_reader_read_uint32(&reader, &purpose) &&
-            km_read_bytes(&reader, blob) && km_read_params(&reader, in)) ?
-            eng->begin(static_cast<Purpose>(purpose), blob, in, out, handle) :
-            KmError::INVALID_ARGUMENT;
+            km_read_bytes(&reader, blob) && km_read_params(&reader, in) &&
+            km_read_auth_token(&reader, hat)) ?
+            eng->begin(static_cast<Purpose>(purpose), blob, in, out, handle, hat,
+                &why) : KmError::INVALID_ARGUMENT;
 
         reply = km_reply_new(obj, status, &writer, e);
         km_append_params(&writer, out);
@@ -362,6 +395,10 @@ app_reply(
         GINFO("begin purpose=%u {%s} -> %s, op %016llx (%zu open)", purpose,
             km_describe(in).c_str(), kmErrorName(e), (unsigned long long) handle,
             eng->operationCount());
+        if (!why.empty() || hat.present()) {
+            GINFO("  auth: %s; %s", km_describe_token(hat).c_str(),
+                why.empty() ? "not an auth-bound key" : why.c_str());
+        }
         break;
     }
 
@@ -373,10 +410,15 @@ app_reply(
         guint64 handle = 0;
         AuthList in, out;
         Bytes input, output;
+        HardwareAuthToken hat;
+        VerificationToken vt;
         uint32_t consumed = 0;
+        std::string why;
         KmError e = (gbinder_reader_read_uint64(&reader, &handle) &&
-            km_read_params(&reader, in) && km_read_bytes(&reader, input)) ?
-            eng->update(handle, in, input, consumed, out, output) :
+            km_read_params(&reader, in) && km_read_bytes(&reader, input) &&
+            km_read_auth_token(&reader, hat) &&
+            km_read_verification_token(&reader, vt)) ?
+            eng->update(handle, in, input, consumed, out, output, hat, vt, &why) :
             KmError::INVALID_ARGUMENT;
 
         reply = km_reply_new(obj, status, &writer, e);
@@ -389,6 +431,10 @@ app_reply(
             GINFO("update op %016llx -> %s", (unsigned long long) handle,
                 kmErrorName(e));
         }
+        if (!why.empty()) {
+            GINFO("  auth: %s%s; %s", km_describe_token(hat).c_str(),
+                vt.present() ? ", verification token" : "", why.c_str());
+        }
         break;
     }
 
@@ -399,10 +445,15 @@ app_reply(
         guint64 handle = 0;
         AuthList in, out;
         Bytes input, signature, output;
+        HardwareAuthToken hat;
+        VerificationToken vt;
+        std::string why;
         KmError e = (gbinder_reader_read_uint64(&reader, &handle) &&
             km_read_params(&reader, in) && km_read_bytes(&reader, input) &&
-            km_read_bytes(&reader, signature)) ?
-            eng->finish(handle, in, input, signature, out, output) :
+            km_read_bytes(&reader, signature) &&
+            km_read_auth_token(&reader, hat) &&
+            km_read_verification_token(&reader, vt)) ?
+            eng->finish(handle, in, input, signature, out, output, hat, vt, &why) :
             KmError::INVALID_ARGUMENT;
 
         reply = km_reply_new(obj, status, &writer, e);
@@ -410,6 +461,10 @@ app_reply(
         km_append_bytes(&writer, output);
         GINFO("finish op %016llx +%zu -> %s, %zu bytes out", (unsigned long long)
             handle, input.size(), kmErrorName(e), output.size());
+        if (!why.empty()) {
+            GINFO("  auth: %s%s; %s", km_describe_token(hat).c_str(),
+                vt.present() ? ", verification token" : "", why.c_str());
+        }
         break;
     }
 
@@ -540,7 +595,7 @@ app_run(App* app)
     app->loop = g_main_loop_new(NULL, TRUE);
     gbinder_servicemanager_add_service(app->sm, app->name, app->obj,
         app_add_service_done, app);
-    GINFO("waydroid-keystored ready (stage 4: key operations).");
+    GINFO("waydroid-keystored ready (stage 5: shared secret and auth-bound keys).");
     g_main_loop_run(app->loop);
 
     if (sigtrm) g_source_remove(sigtrm);
@@ -556,6 +611,7 @@ int main(int argc, char* argv[])
     const char* device = DEFAULT_DEVICE;
     const char* name = DEFAULT_NAME;
     const char* tcti = "swtpm:path=/run/swtpm-waydroid/sock";
+    EngineOptions opts;
     App app;
 
     gutil_log_timestamp = TRUE;   /* to line up with keystore2's log */
@@ -567,14 +623,18 @@ int main(int argc, char* argv[])
             name = argv[++i];
         } else if (!g_strcmp0(argv[i], "--tcti") && i + 1 < argc) {
             tcti = argv[++i];
+        } else if (!g_strcmp0(argv[i], "--accept-unsigned-auth-tokens")) {
+            opts.acceptUnsignedAuthTokens = true;
         } else if (!g_strcmp0(argv[i], "--verbose") || !g_strcmp0(argv[i], "-v")) {
             gutil_log_default.level = GLOG_LEVEL_VERBOSE;
         } else if (!g_strcmp0(argv[i], "--help") || !g_strcmp0(argv[i], "-h")) {
-            printf("usage: %s [--name INSTANCE] [--tcti TCTI] [--verbose] "
-                   "[BINDER_DEVICE]\n"
+            printf("usage: %s [--name INSTANCE] [--tcti TCTI] "
+                   "[--accept-unsigned-auth-tokens] [--verbose] [BINDER_DEVICE]\n"
                    "  Serves %s/%s on BINDER_DEVICE (default %s),\n"
                    "  backed by the TPM behind TCTI (default the waydroid-swtpm\n"
-                   "  socket).\n",
+                   "  socket). --accept-unsigned-auth-tokens lets a HardwareAuthToken\n"
+                   "  with an all-zero MAC through, and reports the auth tags at the\n"
+                   "  KEYSTORE level (docs/74).\n",
                    argv[0], KM_IFACE, DEFAULT_NAME, DEFAULT_DEVICE);
             return RET_OK;
         } else {
@@ -585,14 +645,18 @@ int main(int argc, char* argv[])
     memset(&app, 0, sizeof(app));
     app.ret = RET_ERR;
     app.name = name;
-    /* Per-boot seed and nonce from the host CSPRNG. Binding must not depend on
-     * the TPM, so neither does this. */
-    if (getentropy(app.seed, sizeof(app.seed)) ||
-        getentropy(app.nonce, sizeof(app.nonce))) {
-        GERR("getentropy failed: %s", strerror(errno));
+    /* The engine draws the per-process seed and nonce from the host CSPRNG:
+     * binding must not depend on the TPM, so neither does the negotiation. */
+    app.engine = new Engine(std::unique_ptr<TpmBackend>(makeToolsBackend(tcti)),
+        opts);
+    if (app.engine->hmacSharingParameters().nonce.empty()) {
+        GERR("getentropy failed: no shared-secret nonce");
+        delete app.engine;
         return RET_ERR;
     }
-    app.engine = new Engine(std::unique_ptr<TpmBackend>(makeToolsBackend(tcti)));
+    GINFO("auth tokens: %s", opts.acceptUnsignedAuthTokens ?
+        "signed or unsigned (--accept-unsigned-auth-tokens); auth tags at KEYSTORE level" :
+        "signed with the shared key only; auth tags at STRONGBOX level");
     /* Say now, not at the first key request, whether the TPM answers. Not
      * fatal: the engine retries on every key operation, and a strongbox that
      * binds and then fails key generation is still better diagnosed than one

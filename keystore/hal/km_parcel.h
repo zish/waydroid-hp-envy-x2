@@ -8,6 +8,7 @@
 #define WAYDROID_KM_PARCEL_H
 
 #include "km_hidl_types.h"
+#include "../auth.h"
 #include "../engine.h"
 
 #include <gbinder.h>
@@ -193,6 +194,137 @@ km_read_bytes(
         return false;
     }
     if (count) out.assign(d, d + count);
+    return true;
+}
+
+/* A struct passed by value: one buffer object of exactly its size. It points at
+ * the sender's own copy, so it is never null and always registered. */
+static inline bool
+km_read_struct(
+    GBinderReader* r,
+    void* out,
+    gsize size)
+{
+    const guint8* s;
+    gsize n;
+
+    if (!km_read_child(r, &s, &n) || !s || n != size) {
+        return false;
+    }
+    memcpy(out, s, size);
+    return true;
+}
+
+/* One vec<uint8_t> embedded in a struct already read: its data child. */
+static inline bool
+km_read_embedded_bytes(
+    GBinderReader* r,
+    const GBinderHidlVec* v,
+    Bytes& out)
+{
+    const guint8* d;
+    gsize n;
+
+    out.clear();
+    if (!km_read_child(r, &d, &n) || n != v->count) {
+        return false;
+    }
+    if (n) out.assign(d, d + n);
+    return true;
+}
+
+static inline bool
+km_read_auth_token(
+    GBinderReader* r,
+    HardwareAuthToken& t)
+{
+    km_hardware_auth_token w;
+
+    if (!km_read_struct(r, &w, sizeof(w)) ||
+        !km_read_embedded_bytes(r, &w.mac, t.mac)) {
+        return false;
+    }
+    t.challenge = w.challenge;
+    t.userId = w.userId;
+    t.authenticatorId = w.authenticatorId;
+    t.authenticatorType = w.authenticatorType;
+    t.timestamp = w.timestamp;
+    return true;
+}
+
+/* VerificationToken: the struct, parametersVerified's data and each element's
+ * blob, then mac. The parameters are only counted -- nothing sends any, and a
+ * token that carries them is one we cannot MAC (auth.h). */
+static inline bool
+km_read_verification_token(
+    GBinderReader* r,
+    VerificationToken& t)
+{
+    km_verification_token w;
+    const guint8* d;
+    gsize n;
+
+    if (!km_read_struct(r, &w, sizeof(w)) || !km_read_child(r, &d, &n) ||
+        n != w.parametersVerified.count * sizeof(km_key_parameter)) {
+        return false;
+    }
+    for (guint i = 0; i < w.parametersVerified.count; i++) {
+        const guint8* blob;
+        gsize bn;
+        if (!km_read_child(r, &blob, &bn)) return false;
+    }
+    if (!km_read_embedded_bytes(r, &w.mac, t.mac)) {
+        return false;
+    }
+    t.challenge = w.challenge;
+    t.timestamp = w.timestamp;
+    t.securityLevel = w.securityLevel;
+    t.parametersVerified = w.parametersVerified.count != 0;
+    return true;
+}
+
+/* HmacSharingParameters returned by value (getHmacSharingParameters' reply). */
+static inline bool
+km_read_hmac_params(
+    GBinderReader* r,
+    HmacSharingParams& p)
+{
+    km_hmac_sharing_parameters w;
+
+    if (!km_read_struct(r, &w, sizeof(w)) ||
+        !km_read_embedded_bytes(r, &w.seed, p.seed)) {
+        return false;
+    }
+    p.nonce.assign(w.nonce, w.nonce + sizeof(w.nonce));
+    return true;
+}
+
+/* vec<HmacSharingParameters> (computeSharedHmac's argument): the vector, then
+ * each element's seed. The TEE's seed is empty, so its child is one of
+ * libhwbinder's unregistered ones. */
+static inline bool
+km_read_hmac_params_vec(
+    GBinderReader* r,
+    std::vector<HmacSharingParams>& out)
+{
+    const guint8* raw;
+    gsize count = 0;
+
+    out.clear();
+    if (!km_read_vec(r, sizeof(km_hmac_sharing_parameters), &raw, &count)) {
+        return false;
+    }
+    for (gsize i = 0; i < count; i++) {
+        km_hmac_sharing_parameters w;
+        HmacSharingParams p;
+
+        memcpy(&w, raw + i * sizeof(w), sizeof(w));
+        if (!km_read_embedded_bytes(r, &w.seed, p.seed)) {
+            return false;
+        }
+        p.nonce.assign(w.nonce, w.nonce + sizeof(w.nonce));
+        out.push_back(std::move(p));
+    }
     return true;
 }
 
