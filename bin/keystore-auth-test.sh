@@ -5,8 +5,9 @@
 #     bin/keystore-auth-test.sh
 #
 # Runs from the dev box. Needs, on bigtab01:
-#   - the stage-5 strongbox serving the running session
-#     (artifacts/keystore/hand-deploy.sh, then a logout and login);
+#   - the stage-5 strongbox serving the running session: waydroid-ext-keystored
+#     and waydroid-ext-strongbox installed (docs/75), or
+#     artifacts/keystore/hand-deploy.sh, then a logout and login;
 #   - Keystore Probe with the auth modes (keystore-probe/build.sh --install);
 #   - Android unlocked once since boot, or the probe cannot run at all (docs/73).
 #
@@ -159,8 +160,17 @@ echo "== auth-clean"
 phase auth-clean
 
 echo "== the daemon: this session's negotiation, and its auth decisions during the run"
-ssh "$HOST" "sudo grep -E 'computeSharedHmac|auth tokens:' /var/tmp/waydroid-keystored.log | tail -2
-	sudo awk -v t='$since' 'substr(\$0, 1, 19) >= t' /var/tmp/waydroid-keystored.log |
+# The packaged daemon logs to its unit's journal; a hand-deployed one to
+# hand-deploy.sh's file, which outlives it -- so read the journal whenever the
+# unit exists, or this prints another session's lines as if they were this
+# run's. Its messages carry the same leading timestamp either way.
+ssh "$HOST" "if systemctl cat waydroid-keystored.service >/dev/null 2>&1; then
+		kslog() { sudo journalctl -b -u waydroid-keystored -o cat --no-pager; }
+	else
+		kslog() { sudo cat /var/tmp/waydroid-keystored.log; }
+	fi
+	kslog | grep -E 'computeSharedHmac|auth tokens:' | tail -2
+	kslog | awk -v t='$since' 'substr(\$0, 1, 19) >= t' |
 	grep -E 'auth:|USER_SECURE_ID' | tail -30" </dev/null
 
 [ $fail = 0 ] && echo "== all phases passed" || echo "== FAILED (reports in $OUT)"
