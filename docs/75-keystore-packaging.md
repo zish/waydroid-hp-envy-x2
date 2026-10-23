@@ -1,9 +1,10 @@
 # 75 — the keystore, packaged: `waydroid-ext-keystored`, `waydroid-ext-strongbox`, and overlay-sync 1.2.0
 
-**Date:** 2026-10-23 (bigtab01's clock). **Status: built and tested offline; not yet installed on
-bigtab01.** The stage-5 StrongBox from [74](74-keystore-stage5-auth.md) becomes two packages, and
-the reconciler that every overlay component depends on learns one new kind of edit. The section
-*Not yet verified* lists what only bigtab01 can show.
+**Date:** 2026-10-23 (bigtab01's clock). **Status: installed on bigtab01 the same evening and
+verified through a real boot and a real session; the auth test passed 32/32 against the packaged
+daemon** (*Deployed on bigtab01*, below). The stage-5 StrongBox from [74](74-keystore-stage5-auth.md)
+becomes two packages, and the reconciler that every overlay component depends on learns one new kind
+of edit.
 
 | Package | Kind | What it ships |
 |---|---|---|
@@ -144,10 +145,9 @@ built with `printf` and hashed separately, so the code is never judged against i
 
 ## Not yet verified
 
-- **Anything on bigtab01.** In particular: that the unit starts the daemon as `unconfined_t`; that
-  `/dev/binderfs/hwbinder` behaves as `/dev/hwbinder` did; that the gate opens before keystore2 needs
-  the StrongBox (read the daemon's `Added` line against keystore2's `computeSharedHmac` in the first
-  session); and that the journal is quiet at the greeter.
+What only bigtab01 could show has now been shown there (*Deployed on bigtab01*, below). Two items
+remain:
+
 - **The source arm on Fedora.** The dev box is Debian and cannot install `libgbinder-devel`, so CI's
   `rpm` job is the first real source build. The `--rpm` path has been exercised here only against
   stand-in `.pc` files.
@@ -175,22 +175,71 @@ word "secure element" suggests.
   `TRUSTED_CONFIRMATION_REQUIRED` is refused. Identity Credential (mobile driving licences) and
   Weaver are separate HALs this does not provide.
 
-## Deploying it on bigtab01
+## Deployed on bigtab01 — 2026-10-23
 
-Not done. It needs the owner, for sudo and for a logout or reboot.
+Installed the same evening in the order planned, with the owner at the machine for sudo, the logout,
+the LUKS passphrase and the unlock. Times are bigtab01's (EDT).
 
-1. **Let the hand deployment end first.** It removes its manifest, binary and guard unit at the next
-   logout. Installing over it would leave two copies of the daemon registering the same name.
-2. **One rpm-ostree transaction:** replace the layered `waydroid-ext-overlay-sync` with 1.2.0
-   (uninstall and install together, the [60](60-wifi-nl80211.md) rule for a layered local package),
-   and add `waydroid-ext-keystored` and `waydroid-ext-strongbox`. bigtab01 runs overlay-sync
-   **1.1.0**, not 1.1.1, which was a lint-only release that never went there. Every runtime
-   dependency is already installed (`tpm2-tools` 5.7, `libgbinder` 1.1.47, `e2fsprogs`), so the
-   transaction needs no repository. Then reboot, or `--apply-live`. An
-   apply-live is not an install until a reboot follows ([71](71-swtpm-host.md)); `mdns` was lost
-   that way.
-3. **Before the first session:** `waydroid-overlay-sync --verify` must report the manifest
-   `derived`/matching; `systemctl status waydroid-keystored` must show the gate's `no waydroid session
-   yet` line, and the kernel log no binder pings.
-4. **The first session:** `bin/keystore-auth-test.sh`, which needs the owner to unlock once when the
-   screen re-locks.
+1. **The hand deployment ended first.** The owner logged out at 18:32:09, and
+   [hand-deploy.sh](../artifacts/keystore/hand-deploy.sh) removed its manifest, its
+   `/usr/local/bin` daemon and its boot guard, then exited. Installing over it would have left two
+   daemons registering one name. The order mattered for a second reason, found while checking: the
+   guard and `waydroid-overlay-sync.service` are both `Before=waydroid-container.service` and
+   `After=local-fs.target`, ordered against nothing else. So had a reboot come first, the guard's
+   `rm` could have deleted the manifest the package had just derived.
+2. **One transaction**, from `/var/tmp/keystore-rpms/`:
+   `rpm-ostree uninstall waydroid-ext-overlay-sync --install` the three RPMs (the
+   [60](60-wifi-nl80211.md) rule for replacing a layered local package). bigtab01 was on
+   overlay-sync **1.1.0**; 1.1.1 was a lint-only release that never went there. `db diff` showed
+   exactly overlay-sync 1.1.0 → 1.2.0 and the two additions; the base commit did not move
+   (`67054bd…`, 44.20261016.0), and nothing in `/etc/systemd/system` or `/usr/local/bin` shadows
+   either package. Rebooted at 18:40:30 into `0672d3b2…`, not `--apply-live`, which is not an
+   install until a reboot follows ([71](71-swtpm-host.md)). The previous deployment, `9394b8cc…`,
+   is the rollback: booted from GRUB, its overlay-sync 1.1.0 removes the manifest because its
+   component is gone. That removal path exists and is unexercised for this file.
+
+At the greeter, before anyone logged in:
+
+| Check | Result |
+|---|---|
+| the daemon's domain | `system_u:unconfined_r:unconfined_t:s0`, from `/usr/lib/systemd/system/waydroid-keystored.service` |
+| the gate | `no waydroid session yet; waiting for one before probing binder`, 18:41:20 |
+| `waydroid-overlay-sync --verify` | exit 0. The derived manifest hashes `3f2a8b70…`, the row's result, and the image's stock manifest `0695403b…`, the row's stock hash |
+| kernel log, boot to login (about 9½ minutes) | two lines matching `binder`, both systemd mounting binderfs. **No pings** |
+
+The first session, the owner logging in at about 18:50:
+
+| | |
+|---|---|
+| the gate opens | 18:50:57.227 (`waiting for the container's hwservicemanager on /dev/binderfs/hwbinder`) |
+| `Added "android.hardware.keymaster@4.0::IKeymasterDevice/strongbox"` | 18:50:57.231 |
+| keystore2 binds | 18:50:57.291 `getHardwareInfo -> STRONGBOX`; 18:50:57.293 `computeSharedHmac over 2 participants -> OK` |
+| kernel lines matching `binder` in the session's first minute | 18, none from the daemon (pid 900): four failed pings from `waydroid-sensord` (pid 3058) in the 300 ms before hwservicemanager existed, eight lines; five of init's gralloc `exec`, which names `/dev/host_hwbinder`; one `-22` ioctl from `system_server`; four `RLIMIT_NICE not set` from pid 3144, since exited ([40](40-binder-nice.md)) |
+| [bin/keystore-auth-test.sh](../bin/keystore-auth-test.sh) | **32/32**: the stage-4 suite 20/20, auth-gen 5/5, auth-fresh 4/4 (started at the unlock, 19:47:34), auth-stale 2/2, auth-clean 1/1 |
+| the auth decision, from the unit's journal | 19:47:35, token type 1, MAC of zeros, **977 ms old of 15 000 allowed**, accepted by `--accept-unsigned-auth-tokens`; the TEE's verification token valid |
+
+So `unconfined_t` under systemd, `/dev/binderfs/hwbinder`, a quiet greeter and the gate's timing
+against keystore2 all hold. The gate opened 64 ms before keystore2 asked for the StrongBox.
+
+Two findings.
+
+- **The daemon checks the TPM before swtpm listens.** `After=waydroid-swtpm.service` waits for
+  swtpm's *start*, and that unit is `Type=simple`, so started means forked. The daemon's first
+  `createprimary` ran at 18:41:18.96 and could not connect to `/run/swtpm-waydroid/sock`. The
+  wrapper logged its first line at 18:41:19.13. The daemon logged `TPM not ready … key operations
+  will fail until it is` and went on to the gate. That is the runtime guarantee under *A correction
+  first*, exercised by accident on the first boot: the daemon registered regardless, and
+  `Engine::ensurePrimary()` latches only success. So the first key operation, at 19:45:51, found
+  the persistent primary with no further message. The cost is one false alarm in every boot's
+  journal. **Not fixed.** It needs a `keystored` 1.0.1 and a reboot to deploy. The fix belongs in the
+  daemon, which can check the TPM after the gate instead of before it: by the time a session
+  exists, swtpm has been listening for as long as the greeter was up.
+- **The auth test printed another session's daemon lines.** Its last section read
+  `/var/tmp/waydroid-keystored.log`, hand-deploy.sh's file, which outlives the hand deployment, so
+  this run printed the 12:29 daemon's start and its 14:35 negotiation as if they were its own. It now reads the unit's
+  journal whenever `waydroid-keystored.service` exists. The messages carry the same leading
+  timestamp, so the `since` filter is unchanged. Rerun against this session, it prints 18:50:57's
+  negotiation and 19:47:35's decision.
+
+**Open question 4 is no closer.** This boot declared a StrongBox and served it. The case that question
+is about, declared with nothing serving it, is still unbooted, and it stays optional.

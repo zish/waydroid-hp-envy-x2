@@ -465,8 +465,10 @@ are release-time work. Everything else rpmlint said is filtered with a written r
 
 ## The keystore pair, and the keystone's insertion edit — 2026-10-23
 
-Two new modifications and a keystone bump, all built on the dev box and none yet installed
-anywhere. [docs/75](../docs/75-keystore-packaging.md) is the record.
+Two new modifications and a keystone bump, all built on the dev box and **installed on bigtab01 the
+same evening** in one transaction (`uninstall waydroid-ext-overlay-sync` plus three `--install`s),
+booted and verified: the auth test passed 32/32 against the packaged daemon.
+[docs/75](../docs/75-keystore-packaging.md) is the record.
 
 - **`keystored`** — `waydroid-keystored`, its unit (enabled, `unconfined_t`, `PrivateTmp`) and
   `/etc/waydroid-keystored.conf` (`%config(noreplace)`, shipping `--accept-unsigned-auth-tokens`).

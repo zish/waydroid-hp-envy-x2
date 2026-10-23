@@ -956,9 +956,10 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
     owner's Pattern lock**, so `bin/keystore-auth-test.sh` uses the owner's unlock and never sets,
     enters or clears the credential. The feature XML is still **not deployed**, and that is now a
     policy question for the owner rather than a missing piece.
-    [artifacts/keystore/hand-deploy.sh](artifacts/keystore/hand-deploy.sh) removes the hand deployment
-    at the next logout, and its boot guard removes it if a reboot comes first.
-    **Packaged 2026-10-23, not yet installed — [docs/75](docs/75-keystore-packaging.md):**
+    [artifacts/keystore/hand-deploy.sh](artifacts/keystore/hand-deploy.sh) was the way to put a build
+    in front of keystore2 before the packages; it refuses on a host that has them, where a drop-in on
+    the unit does the same job between sessions.
+    **Packaged and installed on bigtab01 2026-10-23 — [docs/75](docs/75-keystore-packaging.md):**
     `waydroid-ext-keystored` (the daemon as a unit from boot, wifid's shape) and
     `waydroid-ext-strongbox` (the manifest as a derive row, hard-requiring the daemon), on
     `waydroid-ext-overlay-sync` 1.2.0, whose derive rows can now **insert** bytes. Two findings
@@ -967,6 +968,12 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
     `GetSession` first. And **open question 4 is still open**: docs/73's "answered safe" came from a
     boot with the strongbox *undeclared*, so a declared strongbox with nothing serving it has never
     been booted, and the packages are shaped to keep it unreachable.
+    **Installed the same evening and verified through a real boot**: the packaged daemon runs as
+    `unconfined_t`, was silent at the greeter, registered 64 ms before keystore2 asked for it, and the
+    auth test passed **32/32** against it. One defect, unfixed: the unit's `After=waydroid-swtpm`
+    waits only for a `Type=simple` fork, so the daemon's boot-time TPM check runs before swtpm
+    listens and logs a false `TPM not ready`. It is harmless, because the engine retries on every
+    key operation; the fix is `keystored` 1.0.1, checking after the session gate instead.
     See [docs/65-tpm-keystore.md](docs/65-tpm-keystore.md).
 11. **A fingerprint HAL fed by libfprint — Chipsailing on bigtab01, Goodix on vidiot01.** **Added
     2026-10-10 at the owner's request as two items; scoped the same day as one, nothing built.**
@@ -1395,8 +1402,9 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   `packaging/gen-spec.sh --list` rather than from prose — it marks the unshipped ones and cannot
   go stale. **28 `.mod` files as of 2026-10-19, 27 shipped; 26 of them installed on bigtab01**,
   counted from that day's `rpm-ostree status` rather than carried forward. **30 as of 2026-10-23**:
-  `keystored` and `strongbox` were added, built and install-tested on the dev box, and are not
-  installed anywhere yet ([docs/75](docs/75-keystore-packaging.md)). The one shipped and not
+  `keystored` and `strongbox` were added, built, install-tested on the dev box, and installed on
+  bigtab01 the same evening, which makes **28 installed there**, counted from that evening's
+  `rpm-ostree status` ([docs/75](docs/75-keystore-packaging.md)). The one shipped and not
   installed is `binder-policy`, built and tested but not installed anywhere. **`mdns` was found
   missing the same day although this file said it was installed**: its package, reconciler and
   unit were absent while the avahi config it manages stayed in force. It had been lost with its
