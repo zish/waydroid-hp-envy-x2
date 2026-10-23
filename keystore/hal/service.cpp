@@ -20,10 +20,14 @@
  * zero bytes where a token's MAC belongs (docs/74), so without the flag no
  * password-bound key can ever be used. engine.h says what it costs.
  *
- * Launch model: started by hand for now, as root and unconfined_t, before the
- * session -- it waits for the container's hwservicemanager and registers the
- * moment it appears, which is how it wins the race against keystore2's boot-time
- * probe. A packaged launch has to keep that property; docs/73.
+ * Launch model: waydroid-keystored.service (artifacts/keystore), from boot, as
+ * root and unconfined_t. It waits for a waydroid session without touching
+ * binder (app_wait_for_session), then for the session's hwservicemanager, and
+ * registers the moment that appears. When the session ends it exits and systemd
+ * starts it again for the next one, so every session meets a new party with a
+ * fresh seed and nonce -- keystore2 negotiates once a session, so a daemon
+ * carried over from the last one would be a stranger anyway. A hand start
+ * (artifacts/keystore/hand-deploy.sh) behaves the same. docs/73, docs/75.
  */
 #include "km_parcel.h"
 
@@ -491,32 +495,98 @@ app_reply(
 
 /* ------------------------------------------------------- session-watch (docs/70) */
 
+/* What id.waydro.Container's GetSession says: 1 a session exists, 0 none, -1 no
+ * answer -- no container manager, or a waydroid without the method. It answers
+ * an empty a{ss} until container_manager.do_start() has started the container
+ * and assigned args.session (docs/69), and costs no binder traffic at all. */
+static int
+app_query_session(GDBusConnection* bus, gint timeoutMs)
+{
+    GError* err = NULL;
+    GVariant* res = g_dbus_connection_call_sync(bus, "id.waydro.Container",
+        "/ContainerManager", "id.waydro.ContainerManager", "GetSession",
+        NULL, G_VARIANT_TYPE("(a{ss})"), G_DBUS_CALL_FLAGS_NONE, timeoutMs,
+        NULL, &err);
+    if (!res) {
+        GDEBUG("GetSession: %s", err ? err->message : "?");
+        g_clear_error(&err);
+        return -1;
+    }
+    GVariant* dict = g_variant_get_child_value(res, 0);
+    int present = g_variant_n_children(dict) > 0;
+    g_variant_unref(dict);
+    g_variant_unref(res);
+    return present;
+}
+
+/* For the watch after a service-manager death: only an answer of "no session"
+ * means gone. No answer is not evidence, so it keeps the daemon up. */
 static gboolean
 app_session_present(void)
 {
     GError* err = NULL;
     GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
-    GVariant* res;
-    gboolean present = TRUE;
 
     if (!bus) {
         g_clear_error(&err);
         return TRUE;
     }
-    res = g_dbus_connection_call_sync(bus, "id.waydro.Container",
-        "/ContainerManager", "id.waydro.ContainerManager", "GetSession",
-        NULL, G_VARIANT_TYPE("(a{ss})"), G_DBUS_CALL_FLAGS_NONE, 2000,
-        NULL, &err);
-    if (res) {
-        GVariant* dict = g_variant_get_child_value(res, 0);
-        present = g_variant_n_children(dict) > 0;
-        g_variant_unref(dict);
-        g_variant_unref(res);
-    } else {
+    int s = app_query_session(bus, 2000);
+    g_object_unref(bus);
+    return s != 0;
+}
+
+/* Wait for waydroid to have a session before touching binder -- docs/69, and
+ * wifi/service.cpp's app_wait_for_session(), which this follows.
+ *
+ * gbinder_servicemanager_wait() pings handle 0 once a second, and every ping
+ * that lands while no hwservicemanager exists costs the kernel log two lines.
+ * Measured on bigtab01 on 2026-10-23, before this gate existed: the hand-started
+ * daemon waited 2 h 6 min with nobody logged in and wrote 7,551 "cannot find
+ * target node" pairs, all of them its own. A unit that runs from boot would do
+ * that for as long as the machine sits at the greeter.
+ *
+ * Registering a second or so later than an ungated wait is safe here, more so
+ * than for Wi-Fi: keystore2 only engages a strongbox the VINTF manifest
+ * declares, and it retries a declared one -- which is how it already won the
+ * race against hwservicemanager's failed lazy start in stage 3a (docs/73).
+ *
+ * The gate is given up only if GetSession never answers at all within 60 s, so
+ * a waydroid without the method still gets a working daemon. Once it has
+ * answered, a later failure means the container manager went away, and no
+ * hwservicemanager can appear without it, so keep waiting. Called before
+ * gbinder_servicemanager_new2(), so nothing exists that could poll binder. */
+#define SESSION_GATE_GIVEUP_SEC (60)
+
+static void
+app_wait_for_session(void)
+{
+    GError* err = NULL;
+    GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
+    gboolean answered = FALSE;
+
+    if (!bus) {
+        GWARN("no system bus (%s); probing binder unguarded",
+              err ? err->message : "?");
         g_clear_error(&err);
+        return;
+    }
+    for (int i = 0; ; i++) {
+        int s = app_query_session(bus, 5000);
+        if (s > 0) break;
+        if (s == 0) answered = TRUE;
+        if (!answered && i >= SESSION_GATE_GIVEUP_SEC) {
+            GWARN("id.waydro.Container has not answered GetSession in %d s; "
+                  "probing binder unguarded", SESSION_GATE_GIVEUP_SEC);
+            break;
+        }
+        if (!i) {
+            GINFO("no waydroid session yet; waiting for one before probing "
+                  "binder");
+        }
+        sleep(1);
     }
     g_object_unref(bus);
-    return present;
 }
 
 static gboolean
@@ -671,7 +741,14 @@ int main(int argc, char* argv[])
         }
     }
 
+    app_wait_for_session();
     app.sm = gbinder_servicemanager_new2(device, "hidl", "hidl");
+    if (!app.sm) {
+        GERR("cannot open %s", device);
+        delete app.engine;
+        return RET_ERR;
+    }
+    GINFO("waiting for the container's hwservicemanager on %s", device);
     if (gbinder_servicemanager_wait(app.sm, -1)) {
         app.obj = gbinder_servicemanager_new_local_object(app.sm, KM_IFACE,
             app_reply, &app);
