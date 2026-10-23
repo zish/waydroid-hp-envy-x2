@@ -6,13 +6,20 @@
 #
 # This is the reproducible form of the stage-1 verification in docs/73, and the
 # shape a future CI %check / tests/ hook would take. It needs swtpm and
-# tpm2-tools on PATH (the waydroid-ext-swtpm deps).
+# tpm2-tools on PATH (the waydroid-ext-swtpm deps), and openssl for the checks
+# that verify signatures independently; without it those are SKIPPED.
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-bin=${KEYSTORE_ENGINE:-"$here/../build/keystore-engine"}
-
-[ -x "$bin" ] || sh "$here/build.sh" "$bin"
+# KEYSTORE_ENGINE names a prebuilt binary -- how it runs on bigtab01, which has
+# no compiler. Otherwise rebuild every time: a stale binary passing is worse
+# than a slow run.
+if [ -n "${KEYSTORE_ENGINE:-}" ]; then
+    bin=$KEYSTORE_ENGINE
+else
+    bin="$here/../build/keystore-engine"
+    sh "$here/build.sh" "$bin" >/dev/null
+fi
 
 command -v swtpm >/dev/null 2>&1 || { echo "swtpm not found" >&2; exit 2; }
 command -v tpm2_createprimary >/dev/null 2>&1 || { echo "tpm2-tools not found" >&2; exit 2; }

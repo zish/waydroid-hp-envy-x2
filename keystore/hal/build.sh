@@ -11,7 +11,7 @@
 # libstdc++/libgcc are linked statically so the only runtime deps are glibc,
 # glib and libgbinder -- all already on bigtab01 as Waydroid's own deps.
 #
-#   keystore/hal/build.sh            # build
+#   keystore/hal/build.sh            # build the daemon and km-bench
 #   keystore/hal/build.sh --deps     # (re)fetch gbinder/glibutil headers + host .so
 #   keystore/hal/build.sh --check    # build, then report runtime deps vs the host
 #   keystore/hal/build.sh --install  # build, then install to bigtab01 (sudo there)
@@ -79,7 +79,7 @@ LDFLAGS=( -L"$OUT/sysroot/lib" -Wl,--gc-sections -static-libstdc++ -static-libgc
 
 # service.cpp needs gbinder/glib; the engine TUs are plain C++17.
 SRCS=( "$here/service.cpp" "$here/../km_blob.cpp" "$here/../tools_backend.cpp"
-       "$here/../engine.cpp" )
+       "$here/../engine.cpp" "$here/../soft_crypto.cpp" )
 OBJS=()
 echo "== compiling"
 for s in "${SRCS[@]}"; do
@@ -95,6 +95,14 @@ g++ "${OBJS[@]}" -o "$OUT/waydroid-keystored" "${LDFLAGS[@]}" \
 	-lgbinder -lglibutil $GLIB_LIBS -lpthread -lm
 echo "== built $OUT/waydroid-keystored"
 ls -l "$OUT/waydroid-keystored"
+
+# km-bench: the host-side binder client that drives a second, bench-only
+# instance of the daemon (see kmbench.cpp). Built alongside, never installed.
+g++ "${CXXFLAGS[@]}" -c "$here/kmbench.cpp" -o "$OUT/kmbench.o"
+# shellcheck disable=SC2206
+g++ "$OUT/kmbench.o" "$OUT/km_blob.o" "$OUT/soft_crypto.o" -o "$OUT/km-bench" \
+	"${LDFLAGS[@]}" -lgbinder -lglibutil $GLIB_LIBS -lpthread
+echo "== built $OUT/km-bench"
 
 if [ "$DO_CHECK" = 1 ]; then
 	echo; echo "== runtime dependencies"

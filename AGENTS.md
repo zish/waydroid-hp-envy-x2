@@ -927,10 +927,24 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
     KeyMint through its km_compat *Legacy wrapper* every boot and fails `-68`
     (`HARDWARE_TYPE_UNAVAILABLE`) **without wedging** — the lockscreen stays up — so OQ4's absent case
     is safe and OQ3 is yes: the discovery path is live and wants a *served*
-    `keymaster@4.0::IKeymasterDevice/strongbox`, not just the feature XML. **Next is stage 3**: a
-    libgbinder hwbinder service that serves that instance, with `computeSharedHmac` load-bearing from
-    the first commit (a disagreeing strongbox could break the TEE instance's shared-secret
-    negotiation), landed behind a `session stop` not a reboot until measured.
+    `keymaster@4.0::IKeymasterDevice/strongbox`, not just the feature XML. **Stage 3a bound it**
+    (keystore2 tolerates our empty `computeSharedHmac`, so OQ4 is safe) **and stage 4 works from an
+    app, 2026-10-22: [keystore-probe/](keystore-probe), an ordinary app, passed 20/20** — EC P-256
+    keys at security level STRONGBOX that sign (verified in software), AES-GCM at 37 B and 100 KB and
+    AES-CBC round-tripping, all through `waydroid-keystored` ([keystore/hal/](keystore/hal)) and
+    swtpm. Four findings, each in [docs/73](docs/73-keystore-stage1-engine.md): stage 1 had **two
+    wrong constants its selftest could not see** (`PURPOSE` is `ENUM_REP`; `INVALID_KEY_BLOB` is −33,
+    not −24); **libhwbinder never registers an empty vector's buffer with the kernel**, so libgbinder's
+    reader stalls on every empty child — measured as 412 bytes of data and 16 of offsets, two objects
+    where nine were written; **`tpm2_encryptdecrypt` takes ≤ 65 535 bytes a run**; and **host
+    processes cannot binder-call each other here** (`unconfined_t`↔`unconfined_t` is denied), so the
+    bench client runs as `container_runtime_t`. Each daemon build costs a logout, because keystore2
+    binds once a session; `km-bench` against a second `strongbox-bench` instance tests a build over
+    real binder without one. **This image's default keymaster is SOFTWARE-level**, so the StrongBox is
+    the only key store here whose keys are not files. Auth-bound keys are refused until stage 5 makes
+    `computeSharedHmac` real, which is also why the feature XML is **deliberately not deployed** — it
+    would invite apps to put exactly those keys here. Nothing is packaged; the hand deployment removes
+    itself at the next logout.
     See [docs/65-tpm-keystore.md](docs/65-tpm-keystore.md).
 11. **A fingerprint HAL fed by libfprint — Chipsailing on bigtab01, Goodix on vidiot01.** **Added
     2026-10-10 at the owner's request as two items; scoped the same day as one, nothing built.**
@@ -1287,6 +1301,17 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   DocumentsUI a `content://` URI — even its status screen lists what it was *told*, never what is on
   disk. Same no-Gradle build as `sensor-app/`, except it does generate `R` (the notification needs a
   real drawable id, and `getIdentifier()` would trade a compile error for a silent runtime null)
+- `keystore/` — the TPM keyblob engine for goal 10 (`keystore-engine selftest` runs it against a
+  throwaway swtpm, checked against outside references), and in `keystore/hal/` `waydroid-keystored`,
+  the keymaster@4.0 StrongBox it serves over hwbinder, plus `km-bench`, which drives a second daemon
+  instance over real binder so a build can be tested without a logout. Read
+  [docs/73](docs/73-keystore-stage1-engine.md) before touching the HIDL reader: libhwbinder's empty
+  children are not kernel objects
+- `keystore-probe/` — "Keystore Probe", a dependency-free Kotlin app that asks AndroidKeyStore for
+  StrongBox keys the way any app would and checks every result against something else: signatures in
+  the software provider, the certificate against its own key, `KeyInfo.getSecurityLevel()` for where
+  the key really is. Same no-Gradle build as `sensor-app/`; `--install` deploys, runs and prints the
+  report. Unlock Android once after a boot first, or it reports nothing
 - `bt-app/` — "Bluetooth", a dependency-free Kotlin app that manages the *host's* BlueZ through
   `waydroid-btd`. It declares only `INTERNET`: it never touches Android's Bluetooth APIs, because
   this image has none, and the radio it drives is on the other side of a socket. It holds no state

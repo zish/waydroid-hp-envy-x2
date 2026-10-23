@@ -1,30 +1,30 @@
 /*
- * waydroid-keystored -- stage 3 of docs/65: a host-side HIDL
+ * waydroid-keystored -- a host-side HIDL
  * android.hardware.keymaster@4.0::IKeymasterDevice served over hwbinder via
- * libgbinder, registered as the "strongbox" instance, backed by the stage-1
- * TPM keyblob engine (keystore/engine.h). docs/73.
+ * libgbinder, registered as the "strongbox" instance, backed by the TPM keyblob
+ * engine (keystore/engine.h). docs/65 stages 3 and 4, docs/73.
  *
- * STAGE 3a (this file's current scope): BIND + MEASURE. keystore2 reaches for a
- * StrongBox KeyMint through its km_compat Legacy wrapper every boot and fails
- * -68 (docs/65 OQ3/OQ4, measured 2026-10-22). This serves getHardwareInfo so it
- * can bind, and instruments getHmacSharingParameters / computeSharedHmac so the
- * next console session can measure the real risk: whether a strongbox that does
- * not (yet) share the pre-shared HMAC key breaks the TEE instance's shared-secret
- * negotiation. The key-operation methods (generateKey/begin/update/finish/...)
- * are stage 4 and return a transaction error for now -- keystore2 does not call
- * them at boot, only when an app asks for a StrongBox key.
+ * Stage 3a made keystore2 bind it as STRONGBOX. Stage 4 serves the key
+ * operations: generateKey, importKey (raw AES), getKeyCharacteristics,
+ * exportKey (EC, X.509), and begin/update/finish/abort for EC P-256 signing and
+ * AES ECB/CBC/CTR/GCM. This file is marshalling only -- every decision about a
+ * key is the engine's, and is exercised by `keystore-engine selftest` without
+ * binder. Still not served, and answered with a well-formed UNIMPLEMENTED:
+ * attestKey (a non-goal, docs/65), upgradeKey, importWrappedKey and
+ * verifyAuthorization. computeSharedHmac still returns an empty check, which
+ * keystore2 tolerates (docs/73); auth-bound keys are refused until it is real.
  *
- * It is spawned, not a systemd unit, for the same reason as waydroid-sensord:
- * a bin_t binary started by systemd runs unconfined_service_t and hits the
- * binder { transfer } dontaudit trap (docs/35). A13's keymaster@4.0 passes only
- * value types across begin(), so the trap is milder here than A16's KeyMint, but
- * the launch model is kept identical.
+ * Launch model: started by hand for now, as root and unconfined_t, before the
+ * session -- it waits for the container's hwservicemanager and registers the
+ * moment it appears, which is how it wins the race against keystore2's boot-time
+ * probe. A packaged launch has to keep that property; docs/73.
  */
-#include "km_hidl_types.h"
-#include "../engine.h"
+#include "km_parcel.h"
 
+#include <algorithm>
 #include <errno.h>
 #include <gio/gio.h>
+#include <string>
 #include <glib-unix.h>
 #include <gutil_log.h>
 #include <string.h>
@@ -55,7 +55,7 @@ typedef struct app {
     GBinderLocalObject* obj;
     int ret;
     const char* name;
-    Engine* engine;        /* stage 4 key ops; unused at boot in stage 3a */
+    Engine* engine;
     /* Per-boot shared-secret material. Stable for the life of the process, as
      * the spec requires (the nonce must not change between
      * getHmacSharingParameters and computeSharedHmac). */
@@ -94,21 +94,66 @@ km_append_hmac_params(
         &parent);
 }
 
-/* A reply that is just the HIDL Status header plus one ErrorCode return value,
- * for the methods whose only output is ErrorCode. */
+/* A one-line rendering of a parameter list for the log: the tags a bench
+ * session needs to read off, by name, and the rest by number. */
+static std::string
+km_describe(
+    const AuthList& a)
+{
+    std::string out;
+    char buf[64];
+
+    for (const KeyParam& p : a.params) {
+        const char* name = NULL;
+        switch (p.tag) {
+        case Tag::PURPOSE: name = "PURPOSE"; break;
+        case Tag::ALGORITHM: name = "ALGORITHM"; break;
+        case Tag::KEY_SIZE: name = "KEY_SIZE"; break;
+        case Tag::BLOCK_MODE: name = "BLOCK_MODE"; break;
+        case Tag::DIGEST: name = "DIGEST"; break;
+        case Tag::PADDING: name = "PADDING"; break;
+        case Tag::EC_CURVE: name = "EC_CURVE"; break;
+        case Tag::MAC_LENGTH: name = "MAC_LENGTH"; break;
+        case Tag::MIN_MAC_LENGTH: name = "MIN_MAC_LENGTH"; break;
+        case Tag::NONCE: name = "NONCE"; break;
+        case Tag::ASSOCIATED_DATA: name = "AAD"; break;
+        case Tag::NO_AUTH_REQUIRED: name = "NO_AUTH_REQUIRED"; break;
+        case Tag::CALLER_NONCE: name = "CALLER_NONCE"; break;
+        case Tag::USER_SECURE_ID: name = "USER_SECURE_ID"; break;
+        case Tag::APPLICATION_ID: name = "APPLICATION_ID"; break;
+        case Tag::ORIGIN: name = "ORIGIN"; break;
+        default: break;
+        }
+        if (!name) {
+            snprintf(buf, sizeof(buf), "0x%08x ", static_cast<unsigned>(p.tag));
+        } else if (tagIsBytes(p.tag)) {
+            snprintf(buf, sizeof(buf), "%s[%zu] ", name, p.blob.size());
+        } else {
+            snprintf(buf, sizeof(buf), "%s=%llu ", name, (unsigned long long) p.u);
+        }
+        out += buf;
+    }
+    if (!out.empty()) out.pop_back();
+    return out;
+}
+
+/* Every reply starts with the HIDL status and, for this interface, an
+ * ErrorCode. The return values follow, and are always written in full: the
+ * client reads every one of them whatever the ErrorCode says, so an error reply
+ * still carries empty vectors and structs. */
 static GBinderLocalReply*
-km_reply_error_only(
+km_reply_new(
     GBinderLocalObject* obj,
     int* status,
+    GBinderWriter* w,
     KmError err)
 {
     GBinderLocalReply* reply = gbinder_local_object_new_reply(obj);
-    GBinderWriter writer;
 
     gbinder_local_reply_append_int32(reply, GBINDER_STATUS_OK);
     *status = GBINDER_STATUS_OK;
-    gbinder_local_reply_init_writer(reply, &writer);
-    gbinder_writer_append_int32(&writer, static_cast<gint32>(err));
+    gbinder_local_reply_init_writer(reply, w);
+    gbinder_writer_append_int32(w, static_cast<gint32>(err));
     return reply;
 }
 
@@ -124,19 +169,19 @@ app_reply(
     void* user_data)
 {
     App* app = (App*) user_data;
+    Engine* eng = app->engine;
     GBinderLocalReply* reply = NULL;
     GBinderWriter writer;
+    GBinderReader reader;
     const char* iface = gbinder_remote_request_interface(req);
 
     (void) flags;
-    /* Stage 3a diagnostic: log every incoming transaction with its code and
-     * interface, so a timestamped log shows exactly what keystore2 does and
-     * when, relative to its boot-time strongbox probe. */
-    GINFO("transaction code=%u iface=\"%s\"", code, iface ? iface : "(null)");
+    GDEBUG("transaction code=%u iface=\"%s\"", code, iface ? iface : "(null)");
     if (g_strcmp0(iface, KM_IFACE)) {
         GDEBUG("not our interface; declining");
         return NULL;
     }
+    gbinder_remote_request_init_reader(req, &reader);
 
     switch (code) {
     case KM_GET_HARDWARE_INFO:
@@ -153,58 +198,235 @@ app_reply(
         break;
 
     case KM_GET_HMAC_SHARING_PARAMETERS:
-        /* generates (ErrorCode, HmacSharingParameters). STAGE 3a: we return a
-         * well-formed params with a per-boot seed+nonce and ErrorCode OK, so
-         * keystore2 proceeds to computeSharedHmac -- which is where the real
-         * measurement is. The seed is ours and stable; a correct value waits on
-         * knowing the pre-shared key the TEE keymaster and gatekeeper use. */
-        reply = gbinder_local_object_new_reply(obj);
-        gbinder_local_reply_append_int32(reply, GBINDER_STATUS_OK);
-        *status = GBINDER_STATUS_OK;
-        gbinder_local_reply_init_writer(reply, &writer);
-        gbinder_writer_append_int32(&writer, static_cast<gint32>(KmError::OK));
+        /* generates (ErrorCode, HmacSharingParameters). A per-boot seed and
+         * nonce; a correct shared secret waits on the pre-shared key the TEE
+         * keymaster and gatekeeper use (stage 5). */
+        reply = km_reply_new(obj, status, &writer, KmError::OK);
         km_append_hmac_params(&writer, app->seed, sizeof(app->seed), app->nonce);
         GINFO("getHmacSharingParameters -> OK (provisional seed/nonce)");
         break;
 
     case KM_COMPUTE_SHARED_HMAC:
-        /* generates (ErrorCode, vec<uint8_t> sharingCheck). STAGE 3a PROBE: we
-         * do NOT yet compute the real CKDF/HMAC (needs the shared pre-shared key
-         * and a crypto path -- stage 3b). Returning OK with an empty check is a
-         * deliberate, measurable mismatch: the next console session reads whether
-         * this breaks the TEE instance's negotiation (docs/65 OQ4, present-but-
-         * failing case) or is tolerated. If it breaks TEE, computeSharedHmac must
-         * be correct before this instance may ever be served. */
-        reply = gbinder_local_object_new_reply(obj);
-        gbinder_local_reply_append_int32(reply, GBINDER_STATUS_OK);
-        *status = GBINDER_STATUS_OK;
-        gbinder_local_reply_init_writer(reply, &writer);
-        gbinder_writer_append_int32(&writer, static_cast<gint32>(KmError::OK));
-        gbinder_writer_append_hidl_vec(&writer, NULL, 0, 1); /* empty check */
-        GWARN("computeSharedHmac -> OK with EMPTY check (stage 3a probe); "
-              "expect a negotiation mismatch, this is what we are measuring");
+        /* generates (ErrorCode, vec<uint8_t> sharingCheck). An empty check is a
+         * deliberate mismatch: keystore2 logs it and carries on (docs/73), and
+         * auth-bound keys -- the only thing a real shared secret is for here --
+         * are refused at generation until stage 5 computes it. */
+        reply = km_reply_new(obj, status, &writer, KmError::OK);
+        gbinder_writer_append_hidl_vec(&writer, NULL, 0, 1);
+        GINFO("computeSharedHmac -> OK with an empty check (stage 5 makes it real)");
         break;
 
     case KM_ADD_RNG_ENTROPY:
         /* generates (ErrorCode). Harmless to accept; the TPM has its own RNG. */
-        reply = km_reply_error_only(obj, status, KmError::OK);
+        reply = km_reply_new(obj, status, &writer, KmError::OK);
         break;
+
+    case KM_GENERATE_KEY: {
+        /* (vec<KeyParameter>) generates (ErrorCode, vec<uint8_t> keyBlob,
+         * KeyCharacteristics) */
+        AuthList params;
+        Bytes blob;
+        KeyCharacteristics kc;
+        KmError e = km_read_params(&reader, params) ?
+            eng->generateKey(params, blob, kc) : KmError::INVALID_ARGUMENT;
+
+        reply = km_reply_new(obj, status, &writer, e);
+        km_append_bytes(&writer, blob);
+        km_append_characteristics(&writer, kc);
+        GINFO("generateKey {%s} -> %s, %zu-byte blob", km_describe(params).c_str(),
+            kmErrorName(e), blob.size());
+        break;
+    }
+
+    case KM_IMPORT_KEY: {
+        /* (vec<KeyParameter>, KeyFormat, vec<uint8_t> keyData) generates
+         * (ErrorCode, vec<uint8_t> keyBlob, KeyCharacteristics) */
+        AuthList params;
+        guint32 format = 0;
+        Bytes data, blob;
+        KeyCharacteristics kc;
+        KmError e = (km_read_params(&reader, params) &&
+            gbinder_reader_read_uint32(&reader, &format) &&
+            km_read_bytes(&reader, data)) ?
+            eng->importKey(params, static_cast<KeyFormat>(format), data, blob, kc) :
+            KmError::INVALID_ARGUMENT;
+
+        std::fill(data.begin(), data.end(), 0);
+        reply = km_reply_new(obj, status, &writer, e);
+        km_append_bytes(&writer, blob);
+        km_append_characteristics(&writer, kc);
+        GINFO("importKey {%s} format=%u -> %s", km_describe(params).c_str(),
+            format, kmErrorName(e));
+        break;
+    }
+
+    case KM_GET_KEY_CHARACTERISTICS: {
+        /* (vec<uint8_t> keyBlob, vec<uint8_t> clientId, vec<uint8_t> appData)
+         * generates (ErrorCode, KeyCharacteristics) */
+        Bytes blob, clientId, appData;
+        KeyCharacteristics kc;
+        KmError e = (km_read_bytes(&reader, blob) &&
+            km_read_bytes(&reader, clientId) && km_read_bytes(&reader, appData)) ?
+            eng->getKeyCharacteristics(blob, clientId, appData, kc) :
+            KmError::INVALID_ARGUMENT;
+
+        reply = km_reply_new(obj, status, &writer, e);
+        km_append_characteristics(&writer, kc);
+        GINFO("getKeyCharacteristics -> %s", kmErrorName(e));
+        break;
+    }
+
+    case KM_EXPORT_KEY: {
+        /* (KeyFormat, vec<uint8_t> keyBlob, vec<uint8_t> clientId,
+         * vec<uint8_t> appData) generates (ErrorCode, vec<uint8_t>) */
+        guint32 format = 0;
+        Bytes blob, clientId, appData, out;
+        KmError e = (gbinder_reader_read_uint32(&reader, &format) &&
+            km_read_bytes(&reader, blob) && km_read_bytes(&reader, clientId) &&
+            km_read_bytes(&reader, appData)) ?
+            eng->exportKey(static_cast<KeyFormat>(format), blob, clientId, appData,
+                out) : KmError::INVALID_ARGUMENT;
+
+        reply = km_reply_new(obj, status, &writer, e);
+        km_append_bytes(&writer, out);
+        GINFO("exportKey format=%u -> %s, %zu bytes", format, kmErrorName(e),
+            out.size());
+        break;
+    }
+
+    case KM_ATTEST_KEY:
+        /* generates (ErrorCode, vec<vec<uint8_t>> certChain). Attestation needs a
+         * chain rooted in a Google-signed key, which no TPM can have: a non-goal
+         * (docs/65). km_compat signs the key's own certificate without it. */
+        reply = km_reply_new(obj, status, &writer, KmError::UNIMPLEMENTED);
+        gbinder_writer_append_hidl_vec(&writer, NULL, 0, sizeof(GBinderHidlVec));
+        GINFO("attestKey -> UNIMPLEMENTED (attestation is a non-goal)");
+        break;
+
+    case KM_UPGRADE_KEY:
+        /* generates (ErrorCode, vec<uint8_t>). Only asked after begin returns
+         * KEY_REQUIRES_UPGRADE, which this engine never does. */
+        reply = km_reply_new(obj, status, &writer, KmError::UNIMPLEMENTED);
+        km_append_bytes(&writer, Bytes());
+        GINFO("upgradeKey -> UNIMPLEMENTED");
+        break;
+
+    case KM_IMPORT_WRAPPED_KEY:
+        /* generates (ErrorCode, vec<uint8_t>, KeyCharacteristics) */
+        reply = km_reply_new(obj, status, &writer, KmError::UNIMPLEMENTED);
+        km_append_bytes(&writer, Bytes());
+        km_append_characteristics(&writer, KeyCharacteristics());
+        GINFO("importWrappedKey -> UNIMPLEMENTED");
+        break;
+
+    case KM_VERIFY_AUTHORIZATION: {
+        /* generates (ErrorCode, VerificationToken). A TEE's job, not a
+         * StrongBox's; answered with an empty token. */
+        km_verification_token* tok = NULL;
+
+        reply = km_reply_new(obj, status, &writer, KmError::UNIMPLEMENTED);
+        tok = gbinder_writer_new0(&writer, km_verification_token);
+        tok->securityLevel = KM_SECURITY_STRONGBOX;
+        km_set_vec(&tok->parametersVerified, NULL, 0);
+        km_set_vec(&tok->mac, NULL, 0);
+        gbinder_writer_append_struct(&writer, tok, &km_verification_token_t, NULL);
+        GINFO("verifyAuthorization -> UNIMPLEMENTED");
+        break;
+    }
 
     case KM_DELETE_KEY:
     case KM_DELETE_ALL_KEYS:
     case KM_DESTROY_ATTESTATION_IDS:
-    case KM_ABORT:
-        /* generates (ErrorCode) only. Nothing is stored yet (stage 4), so OK. */
-        reply = km_reply_error_only(obj, status, KmError::OK);
+        /* generates (ErrorCode). Keys live in their blobs and nothing is stored
+         * here, so there is nothing to delete. */
+        reply = km_reply_new(obj, status, &writer, KmError::OK);
+        GDEBUG("code %u -> OK (nothing stored)", code);
         break;
 
+    case KM_BEGIN: {
+        /* (KeyPurpose, vec<uint8_t> keyBlob, vec<KeyParameter> inParams,
+         * HardwareAuthToken) generates (ErrorCode, vec<KeyParameter> outParams,
+         * uint64_t operationHandle) */
+        guint32 purpose = 0;
+        Bytes blob;
+        AuthList in, out;
+        guint64 handle = 0;
+        KmError e = (gbinder_reader_read_uint32(&reader, &purpose) &&
+            km_read_bytes(&reader, blob) && km_read_params(&reader, in)) ?
+            eng->begin(static_cast<Purpose>(purpose), blob, in, out, handle) :
+            KmError::INVALID_ARGUMENT;
+
+        reply = km_reply_new(obj, status, &writer, e);
+        km_append_params(&writer, out);
+        gbinder_writer_append_int64(&writer, handle);
+        GINFO("begin purpose=%u {%s} -> %s, op %016llx (%zu open)", purpose,
+            km_describe(in).c_str(), kmErrorName(e), (unsigned long long) handle,
+            eng->operationCount());
+        break;
+    }
+
+    case KM_UPDATE: {
+        /* (uint64_t handle, vec<KeyParameter> inParams, vec<uint8_t> input,
+         * HardwareAuthToken, VerificationToken) generates (ErrorCode,
+         * uint32_t inputConsumed, vec<KeyParameter> outParams,
+         * vec<uint8_t> output) */
+        guint64 handle = 0;
+        AuthList in, out;
+        Bytes input, output;
+        uint32_t consumed = 0;
+        KmError e = (gbinder_reader_read_uint64(&reader, &handle) &&
+            km_read_params(&reader, in) && km_read_bytes(&reader, input)) ?
+            eng->update(handle, in, input, consumed, out, output) :
+            KmError::INVALID_ARGUMENT;
+
+        reply = km_reply_new(obj, status, &writer, e);
+        gbinder_writer_append_int32(&writer, consumed);
+        km_append_params(&writer, out);
+        km_append_bytes(&writer, output);
+        GDEBUG("update op %016llx +%zu -> %s", (unsigned long long) handle,
+            input.size(), kmErrorName(e));
+        if (e != KmError::OK) {
+            GINFO("update op %016llx -> %s", (unsigned long long) handle,
+                kmErrorName(e));
+        }
+        break;
+    }
+
+    case KM_FINISH: {
+        /* (uint64_t handle, vec<KeyParameter> inParams, vec<uint8_t> input,
+         * vec<uint8_t> signature, HardwareAuthToken, VerificationToken)
+         * generates (ErrorCode, vec<KeyParameter> outParams, vec<uint8_t> output) */
+        guint64 handle = 0;
+        AuthList in, out;
+        Bytes input, signature, output;
+        KmError e = (gbinder_reader_read_uint64(&reader, &handle) &&
+            km_read_params(&reader, in) && km_read_bytes(&reader, input) &&
+            km_read_bytes(&reader, signature)) ?
+            eng->finish(handle, in, input, signature, out, output) :
+            KmError::INVALID_ARGUMENT;
+
+        reply = km_reply_new(obj, status, &writer, e);
+        km_append_params(&writer, out);
+        km_append_bytes(&writer, output);
+        GINFO("finish op %016llx +%zu -> %s, %zu bytes out", (unsigned long long)
+            handle, input.size(), kmErrorName(e), output.size());
+        break;
+    }
+
+    case KM_ABORT: {
+        /* (uint64_t handle) generates (ErrorCode) */
+        guint64 handle = 0;
+        KmError e = gbinder_reader_read_uint64(&reader, &handle) ?
+            eng->abort(handle) : KmError::INVALID_ARGUMENT;
+
+        reply = km_reply_new(obj, status, &writer, e);
+        GINFO("abort op %016llx -> %s", (unsigned long long) handle,
+            kmErrorName(e));
+        break;
+    }
+
     default:
-        /* Stage 4: generateKey/importKey/getKeyCharacteristics/exportKey/
-         * attestKey/upgradeKey/begin/update/finish/verifyAuthorization. These
-         * return complex parcelables and are not marshalled yet. keystore2 does
-         * not call them during binding or negotiation -- only when an app asks
-         * for a StrongBox key -- so a transaction error here is safe for stage 3. */
-        GINFO("code %u not implemented (stage 4)", code);
+        GWARN("unknown transaction code %u", code);
         *status = GBINDER_STATUS_FAILED;
         return NULL;
     }
@@ -318,7 +540,7 @@ app_run(App* app)
     app->loop = g_main_loop_new(NULL, TRUE);
     gbinder_servicemanager_add_service(app->sm, app->name, app->obj,
         app_add_service_done, app);
-    GINFO("waydroid-keystored ready (stage 3a: bind + measure).");
+    GINFO("waydroid-keystored ready (stage 4: key operations).");
     g_main_loop_run(app->loop);
 
     if (sigtrm) g_source_remove(sigtrm);
@@ -336,7 +558,7 @@ int main(int argc, char* argv[])
     const char* tcti = "swtpm:path=/run/swtpm-waydroid/sock";
     App app;
 
-    gutil_log_timestamp = TRUE;   /* stage 3a: correlate with keystore2's probe */
+    gutil_log_timestamp = TRUE;   /* to line up with keystore2's log */
     gutil_log_set_type(GLOG_TYPE_STDERR, logtag);
     gutil_log_default.level = GLOG_LEVEL_DEFAULT;
 
@@ -350,9 +572,9 @@ int main(int argc, char* argv[])
         } else if (!g_strcmp0(argv[i], "--help") || !g_strcmp0(argv[i], "-h")) {
             printf("usage: %s [--name INSTANCE] [--tcti TCTI] [--verbose] "
                    "[BINDER_DEVICE]\n"
-                   "  Serves %s/%s on BINDER_DEVICE (default %s).\n"
-                   "  Stage 3a: binds and measures shared-secret behaviour; key\n"
-                   "  operations are stage 4.\n",
+                   "  Serves %s/%s on BINDER_DEVICE (default %s),\n"
+                   "  backed by the TPM behind TCTI (default the waydroid-swtpm\n"
+                   "  socket).\n",
                    argv[0], KM_IFACE, DEFAULT_NAME, DEFAULT_DEVICE);
             return RET_OK;
         } else {
@@ -363,15 +585,27 @@ int main(int argc, char* argv[])
     memset(&app, 0, sizeof(app));
     app.ret = RET_ERR;
     app.name = name;
-    /* Per-boot seed and nonce from the host CSPRNG. Stage 3a does not touch the
-     * TPM: the engine (and its swtpm socket, tss:tss 0660) is for key ops in
-     * stage 4, and binding must not depend on TPM socket permissions. */
+    /* Per-boot seed and nonce from the host CSPRNG. Binding must not depend on
+     * the TPM, so neither does this. */
     if (getentropy(app.seed, sizeof(app.seed)) ||
         getentropy(app.nonce, sizeof(app.nonce))) {
         GERR("getentropy failed: %s", strerror(errno));
         return RET_ERR;
     }
     app.engine = new Engine(std::unique_ptr<TpmBackend>(makeToolsBackend(tcti)));
+    /* Say now, not at the first key request, whether the TPM answers. Not
+     * fatal: the engine retries on every key operation, and a strongbox that
+     * binds and then fails key generation is still better diagnosed than one
+     * that never registered. */
+    {
+        KmError e = app.engine->init();
+        if (e == KmError::OK) {
+            GINFO("TPM ready: %s", app.engine->backendDescription().c_str());
+        } else {
+            GWARN("TPM not ready (%s): %s -- key operations will fail until it is",
+                kmErrorName(e), app.engine->backendDescription().c_str());
+        }
+    }
 
     app.sm = gbinder_servicemanager_new2(device, "hidl", "hidl");
     if (gbinder_servicemanager_wait(app.sm, -1)) {

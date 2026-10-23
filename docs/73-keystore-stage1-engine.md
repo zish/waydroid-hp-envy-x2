@@ -1,9 +1,16 @@
-# 73 — keystore HAL stage 1: the TPM-backed keyblob engine
+# 73 — the keystore HAL, stages 1–4: a TPM-backed engine, and StrongBox keys from an app
 
-**Date:** 2026-10-21. **Status:** built and verified on the dev box and on bigtab01, 15/15 both.
-No binder, no Android interface, nothing installed — this is [65](65-tpm-keystore.md)'s stage 1, the
-TPM semantics settled and proven in a host CLI before a line of HIDL. Source in
-[keystore/](../keystore); [71](71-swtpm-host.md) is the stage-0 swtpm it runs against.
+**Date:** 2026-10-21 (stage 1) to 2026-10-22 (stage 4). **Status: StrongBox key operations work from
+an ordinary Android app on bigtab01, backed by swtpm — 20/20 in a probe app, 2026-10-22.** EC P-256
+signing and AES-GCM/CBC run through keymaster's begin/update/finish, the keys report security level
+STRONGBOX, and every result is checked by something other than our daemon. Nothing is packaged: the
+daemon is started by hand and the manifest is an overlay file, both removed again at the next logout
+(see *State on bigtab01* at the end). This note covers [65](65-tpm-keystore.md)'s stages 1, 2, 3a and
+4; source in [keystore/](../keystore), and [71](71-swtpm-host.md) is the stage-0 swtpm underneath.
+
+The stage 1 sections below are kept as written on 2026-10-21. Two things in them were wrong and are
+corrected in *Stage 4*: the engine encoded `PURPOSE` as the wrong tag type, and most of its error
+numbers did not match keymaster's.
 
 ## What stage 1 is, and what it is not
 
@@ -162,9 +169,8 @@ fatal** — `computeSharedHmac` can be made correct incrementally (stage 5) with
   against hwservicemanager's failed lazy-HAL start. A packaged deploy still wants the `waydroid_t`
   launch model (a session-start hook like sensors), but binding is not blocked on it.
 
-**Not yet done (stage 4/5):** key operations — `generateKey`/`begin`/`update`/`finish` still return
-a transaction error, so an app cannot yet *make* a StrongBox key; the `KeyParameter` /
-`KeyCharacteristics` marshalling for those; a correct `computeSharedHmac`; the
+**Not yet done at stage 3a** — and done since, in *Stage 4* below: the key operations and their
+`KeyParameter`/`KeyCharacteristics` marshalling. Still not done: a correct `computeSharedHmac`; the
 `FEATURE_STRONGBOX_KEYSTORE` feature XML (keystore2 has the seclevel, but PackageManager won't
 advertise the feature to apps without it); the ESAPI backend; a persistent launch hook; and the RPM.
 
@@ -210,3 +216,148 @@ so try daemon-only first.
 gatekeeper share, plus an HMAC/CKDF path — TPM or libcrypto), the KeyParameter/KeyCharacteristics
 marshalling, `generateKey`/`begin`/`update`/`finish` wired to the engine, the ESAPI backend that
 ships, and the RPM.
+
+## Stage 4 — StrongBox keys work from an app, 2026-10-22
+
+**Measured on bigtab01 with the owner at the console.** [keystore-probe/](../keystore-probe), an
+ordinary app with no permissions, asked AndroidKeyStore for StrongBox keys and passed **20/20**:
+
+| | Result | Time |
+|---|---|---|
+| EC P-256 `generateKeyPair`, `setIsStrongBoxBacked(true)` | `KeyInfo.getSecurityLevel()` = **STRONGBOX** | 306 ms |
+| its certificate | **signed by the key itself** — keystore2's signing pass during generation went through our `begin`/`finish` | |
+| `SHA256withECDSA` over 1000 bytes | verifies in the platform's **software** provider, from a copy of the public key AndroidKeyStore never touched | 58 ms |
+| AES-256-GCM, 37 bytes | keystore-chosen 12-byte IV, round-trips | 112 / 117 ms |
+| AES-256-GCM, 100 000 bytes | round-trips | 1045 / 1088 ms |
+| a tampered GCM tag | `AEADBadTagException` | |
+| AES-128-CBC/PKCS7, 1000 bytes | 1008 out, round-trips | |
+
+Zero AVCs during the run, keystore2 stayed `running`, and nothing reached `logcat -b crash`. The
+control — the same EC key without StrongBox — passed too, and reported its level as **SOFTWARE**:
+this image's default keymaster is a software one that keystore2 wraps at the TEE level. So on
+bigtab01 the StrongBox is the only key store whose keys are not plain files in Android's data.
+
+### What stage 4 added
+
+- **The engine** ([engine.cpp](../keystore/engine.cpp)) took keymaster's operation model:
+  `begin` returns a handle, `update` buffers, `finish` runs the primitive. Buffering is deliberate
+  — it is the only correct shape for GCM decryption, which must not release plaintext before the tag
+  is checked. EC P-256 signs with `DIGEST` SHA-256 or NONE; AES does ECB, CBC, CTR and GCM, with
+  PKCS7 for the first two. AES keys are created with mode NULL (`aes128null`), so one TPM key serves
+  every mode; a key made as `aes128cfb` would refuse ECB with `TPM_RC_MODE`. Raw AES import and EC
+  `exportKey(X509)` exist; EC import, RSA, HMAC and 3DES do not.
+- **GCM is built from the TPM's ECB.** A TPM 2.0 has no GCM, so one TPM call encrypts the zero block
+  (giving GHASH's subkey H), J0 and every counter block, and GHASH runs in
+  [soft_crypto.cpp](../keystore/soft_crypto.cpp). Every keyed block operation is in the TPM, but **H
+  is in host memory for the length of a GCM operation**. H lets you forge tags for that key, not
+  decrypt with it, and anything that can read the daemon's memory can already drive the TPM socket,
+  so it is no weaker than the daemon — but it is not "never leaves the TPM" either.
+- **The blob's tag list is now bound to its TPM key.** Stage 1 kept the authorization list in the
+  clear and trusted it, so an edited blob — `PURPOSE=SIGN` added to an encryption key — would have
+  been honoured. Each TPM object's authValue is now SHA-256 of the list it was created with, and every
+  use presents the digest of the list in the blob it was handed; an edited list fails authorization in
+  the TPM. Every key also gets **`noda`**: without it each such failure counts toward the TPM's
+  dictionary-attack lockout, which is TPM-wide, so a tampered blob replayed a few times would lock out
+  every key on the TPM — on vidiot01, keys that are not ours. The selftest checks both: the edited
+  blob fails with *authorization failure without DA implications*, and the real key still signs.
+- **Refused, not faked:** auth-bound keys (`USER_SECURE_ID`, `AUTH_TIMEOUT`, ...) get
+  `UNSUPPORTED_TAG`, because verifying a `HardwareAuthToken` needs the real shared secret (stage 5),
+  and listing those tags as hardware-enforced without it would be a claim keystore2 believes.
+  `attestKey` returns `UNIMPLEMENTED` (a non-goal, [65](65-tpm-keystore.md)); keystore2 then signs
+  the key's certificate itself, which is the self-signed certificate above.
+- **The feature XML is deliberately not deployed.** Advertising `FEATURE_STRONGBOX_KEYSTORE` would
+  invite apps to put auth-bound keys here, which fail today, where they currently fall back to the
+  TEE. Apps that ask for StrongBox without checking the feature get it already; that is what the
+  probe does.
+
+### Four findings, each paid for
+
+**1. Stage 1 had two wrong constants, and its selftest could not see either.** `PURPOSE` is
+`ENUM_REP | 1` (`0x20000001`); stage 1 encoded it as `ENUM` (`0x10000001`), so no Android request
+would ever have carried a purpose the engine recognised. And most `KmError` values were hand-numbered
+wrongly — `INVALID_KEY_BLOB` was −24; it is −33. Both passed because the selftest compared the engine
+with itself. The stage-4 selftest checks against outside references instead — published SHA-256 and
+GCM vectors, a reference AES for CBC/CTR/ECB, openssl verifying signatures — and Android confirmed
+the corrected numbering on the first bench run: our −38 came back to the app as *Invalid argument*.
+
+**2. libhwbinder does not register an empty vector's buffer with the kernel.** The first app run
+failed every StrongBox `generateKey` with `INVALID_ARGUMENT`: the daemon could not parse the request.
+The binder driver's own transaction log settled why — keystore2's `generateKey` with seven parameters
+was **412 bytes of data and 16 bytes of offsets**, two kernel objects where nine were written.
+libhwbinder's `Parcel::writeObject` records a `BINDER_TYPE_PTR` object in the offsets only when its
+buffer is non-null, so every empty child — each non-bytes parameter's blob, every empty clientId,
+appData and inParams — goes out as 40 bytes the kernel never translates. libgbinder's reader steps
+through registered objects only and stopped at the first one. Our replies were never affected, because
+libgbinder registers everything it writes; that is why keystore2 could still show the app our error.
+`km_read_child()` in [km_parcel.h](../keystore/hal/km_parcel.h) reads each child either way: a
+registered one through libgbinder, a null one recognised at the cursor and stepped over as data.
+Reading `/sys/kernel/debug/binder/transaction_log` needs a 30 ms sampling loop — it is a 32-entry ring
+and the sensors traffic rolls it in seconds.
+
+**3. `tpm2_encryptdecrypt` takes at most 65 535 bytes of input per run.** The second app run passed
+everything but the 100 KB GCM message (100 032 bytes to the TPM). The backend now splits on a block
+boundary and chains the TPM's own `ivOut` between runs, reloading and flushing the key each time to
+stay inside three transient slots; the selftest checks 150 000 bytes in all four modes against a
+reference AES.
+
+**4. Host processes cannot talk binder to each other here — only into Android's domain.** A host-side
+test client failed with `transaction credentials failed` and an AVC `denied { call }` from
+`unconfined_t` to `unconfined_t`. Measured with `selinux_check_access()`: neither `unconfined_t` nor
+`unconfined_service_t` may binder-call either of them, both may call `container_runtime_t`, and
+`container_runtime_t` may call both (but may `transfer` only to `unconfined_t` —
+[35](35-wifi-stage5.md)'s trap again). `unconfined_t` may transition into `container_runtime_t`, which
+accepts `bin_t` as an entrypoint, so the bench client runs as
+`runcon -t container_runtime_t` on a `bin_t`-labelled copy — the same arrangement as production, an
+Android-domain client calling an `unconfined_t` daemon.
+
+### Testing without a logout per build
+
+keystore2 binds the StrongBox once per session and cannot rebind, and a Waydroid service cannot be
+restarted ([48](48-battery-frozen-and-netd-stale.md)), so every daemon build tested through Android
+costs the owner a logout and login. Two things cut that to one logout per fix:
+
+- **[km-bench](../keystore/hal/kmbench.cpp)**, a host-side libgbinder client that writes requests in
+  libhwbinder's layout — empty children as unregistered raw objects — and drives a **second daemon
+  instance** registered as `strongbox-bench`, which keystore2 never sees. Run first against the
+  broken build, it never reached the daemon (finding 4); as `container_runtime_t` against the fixed
+  build it passed **15/15**: generate, export with empty clientId/appData, characteristics, sign
+  (openssl verifies), GCM with AAD both ways at 35 and 100 000 bytes, and an unknown handle.
+- **A swap watcher**: a root shell that waits for the session to stop, kills the old daemon, and
+  starts the installed one, so the new build is registered before the next login without anyone
+  timing it.
+
+Two traps from the bench: `pkill -f PATTERN` over ssh matches the remote shell's own command line and
+kills it — kill by PID; and after a reboot an ordinary app does not run until the device has been
+unlocked once (`sys.user.0.ce_available`), so a probe launched at the lock screen reports nothing.
+
+### Verified
+
+| | Dev box (Debian, swtpm 0.7.1) | bigtab01 (F44, swtpm 0.10.2) |
+|---|---|---|
+| `keystore-engine selftest` (throwaway swtpm) | **61/61** | **61/61** |
+| `km-bench`, real binder, bench instance | — | **15/15** |
+| keystore-probe from Android | — | **20/20** |
+
+### Still not done
+
+A correct `computeSharedHmac`, and with it auth-bound keys (stage 5); RSA, HMAC, 3DES and EC import;
+`upgradeKey` and `importWrappedKey`; the ESAPI backend, which would also remove ~3 process spawns per
+operation; a launch model that registers before keystore2 probes without a person at the console; the
+feature XML, after stage 5; and the RPM. Making the manifest an overlay-sync derive row needs a new
+row kind — it is an insertion, not the same-length byte swap derive rows do —
+[strongbox-manifest.sh](../artifacts/keystore/strongbox-manifest.sh) is the derivation, hash-checked
+at both ends.
+
+### State on bigtab01 after the run
+
+- **`waydroid-ext-swtpm` 1.0.0 is reinstalled**, by `rpm-ostree install --apply-live` on 2026-10-22
+  (it had been removed and rebooted out that afternoon at the owner's request). A live apply is staged
+  for the next boot too, but it is not durable until that boot happens — the mdns lesson in
+  [packaging/README.md](../packaging/README.md). `/usr/bin/swtpm` reads `unlabeled_t` until then,
+  because swtpm-selinux's policy is not loaded live; [71](71-swtpm-host.md) measured that
+  `unconfined_service_t` may run it anyway, and it did.
+- **Removed automatically at the next logout** by `/var/tmp/keystore-cleanup.sh`: the strongbox
+  manifest in the overlay, `/usr/local/bin/waydroid-keystored`, and the bench scratch in
+  `/var/tmp/wks`. A declared strongbox with nothing serving it is the one combination never booted,
+  so the manifest goes when the daemon does. Its log, `/var/tmp/waydroid-keystored.log`, stays.
+- **Keystore Probe stays installed in Android**, like the other probes.

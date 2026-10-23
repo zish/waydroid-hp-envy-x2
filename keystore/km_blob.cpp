@@ -1,4 +1,4 @@
-// km_blob.cpp -- AuthList queries and KeyBlob (de)serialization.
+// km_blob.cpp -- AuthList queries, KeyBlob (de)serialization and authDigest.
 //
 // The blob format is our own, little-endian, length-prefixed, versioned. It is
 // NOT the HIDL hidl_vec<KeyParameter> wire format -- that marshalling belongs to
@@ -6,6 +6,8 @@
 // AuthList. Keeping stage 1's at-rest format independent of the binder ABI means
 // a blob minted now survives a change of interface (keymaster@4.0 -> KeyMint).
 #include "keystore.h"
+#include "soft_crypto.h"
+#include <algorithm>
 #include <cstring>
 
 namespace wks {
@@ -14,6 +16,24 @@ std::optional<uint64_t> AuthList::first(Tag t) const {
     for (const auto& p : params)
         if (p.tag == t) return p.u;
     return std::nullopt;
+}
+
+const Bytes* AuthList::firstBytes(Tag t) const {
+    for (const auto& p : params)
+        if (p.tag == t) return &p.blob;
+    return nullptr;
+}
+
+bool AuthList::has(Tag t) const {
+    for (const auto& p : params)
+        if (p.tag == t) return true;
+    return false;
+}
+
+void AuthList::remove(Tag t) {
+    params.erase(std::remove_if(params.begin(), params.end(),
+                                [t](const KeyParam& p) { return p.tag == t; }),
+                 params.end());
 }
 
 bool AuthList::hasEnumVal(Tag t, uint32_t v) const {
@@ -64,18 +84,30 @@ struct Reader {
 };
 } // namespace
 
+namespace {
+void putAuthList(Bytes& b, const AuthList& a) {
+    putU32(b, static_cast<uint32_t>(a.params.size()));
+    for (const auto& prm : a.params) {
+        putU32(b, static_cast<uint32_t>(prm.tag));
+        putU64(b, prm.u);
+        putBlob(b, prm.blob);
+    }
+}
+} // namespace
+
+Bytes authDigest(const AuthList& a) {
+    static const char domain[] = "waydroid-keystore authorizations v2";
+    Bytes b(domain, domain + sizeof domain);   // includes the NUL, as a separator
+    putAuthList(b, a);
+    return Sha256::hash(b);
+}
+
 Bytes KeyBlob::serialize() const {
     Bytes b;
     putU32(b, MAGIC);
     putU32(b, version);
     putU32(b, static_cast<uint32_t>(algorithm));
-    // auth list
-    putU32(b, static_cast<uint32_t>(authorizations.params.size()));
-    for (const auto& prm : authorizations.params) {
-        putU32(b, static_cast<uint32_t>(prm.tag));
-        putU64(b, prm.u);
-        putBlob(b, prm.blob);
-    }
+    putAuthList(b, authorizations);
     putBlob(b, tpmPublic);
     putBlob(b, tpmPrivate);
     return b;
@@ -86,7 +118,9 @@ std::optional<KeyBlob> KeyBlob::parse(const Bytes& in) {
     KeyBlob kb;
     if (r.u32() != MAGIC) return std::nullopt;
     kb.version = r.u32();
-    if (kb.version != 1) return std::nullopt;
+    // Version 1 (stage 1) encoded PURPOSE wrongly and bound nothing to the TPM
+    // object; no such blob ever reached Android, so it is refused, not migrated.
+    if (kb.version != VERSION) return std::nullopt;
     kb.algorithm = static_cast<Algorithm>(r.u32());
     uint32_t n = r.u32();
     if (!r.ok || n > 4096) return std::nullopt;
@@ -100,7 +134,7 @@ std::optional<KeyBlob> KeyBlob::parse(const Bytes& in) {
     }
     kb.tpmPublic = r.blob();
     kb.tpmPrivate = r.blob();
-    if (!r.ok) return std::nullopt;
+    if (!r.ok || r.p != r.end) return std::nullopt;
     return kb;
 }
 

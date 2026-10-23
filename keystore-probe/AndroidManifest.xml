@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Keystore Probe - does Android's keystore have a working StrongBox here, and
+  does a key in it behave like a key? Goal 10; see docs/65-tpm-keystore.md and
+  docs/73-keystore-stage1-engine.md.
+
+  Same house style as the other probes: depends on NOTHING but the platform. No
+  AndroidX, no Compose, no coroutines, no Gradle. See build.sh.
+
+  No permissions are declared, and none are needed: AndroidKeyStore is open to
+  every app, and the report goes to this app's own external files directory. The
+  probe must ask for StrongBox exactly as an ordinary app would, or its answer
+  would not be about ordinary apps.
+
+  minSdkVersion is 31 because KeyInfo.getSecurityLevel(), the one field that
+  says whether a key really landed in the StrongBox, was added there.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.systemhalted.keystoreprobe"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="33" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="@string/app_name"
+            android:launchMode="singleTop"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

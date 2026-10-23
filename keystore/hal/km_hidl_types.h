@@ -7,9 +7,7 @@
 // standard HIDL ones. Mirrors the shape of sensors/hybrisbindertypes.h.
 //
 // Enum numeric values match the .hal so KmError (keystore/engine.h) and these
-// are the same integers on the wire. This header covers stage 3a (bind +
-// shared-secret) fully; KeyParameter / KeyCharacteristics / HardwareAuthToken
-// marshalling for stage 4 is added when generateKey/begin land.
+// are the same integers on the wire.
 #ifndef WAYDROID_KM_HIDL_TYPES_H
 #define WAYDROID_KM_HIDL_TYPES_H
 
@@ -64,5 +62,43 @@ struct km_hmac_sharing_parameters {
     GBinderHidlVec seed KM_ALIGNED(8);
     uint8_t nonce[32] KM_ALIGNED(1);
 } KM_ALIGNED(8);
+
+// KeyParameter { Tag tag; IntegerParams f; vec<uint8_t> blob; } -- 32 bytes.
+// IntegerParams is a plain union of the enums, bool, uint32, uint64 and
+// dateTime, so it is 8-byte aligned at offset 8; a uint32 value is its low four
+// bytes and a bool its first byte (little-endian). The sender does not clear the
+// bytes a narrower member leaves, so a reader must mask by the tag's type.
+struct km_key_parameter {
+    guint32 tag;
+    guint32 pad;
+    guint64 f;
+    GBinderHidlVec blob;
+} KM_ALIGNED(8);
+G_STATIC_ASSERT(sizeof(struct km_key_parameter) == 32);
+
+// KeyCharacteristics { vec<KeyParameter> softwareEnforced;
+//                      vec<KeyParameter> hardwareEnforced; }
+struct km_key_characteristics {
+    GBinderHidlVec softwareEnforced;
+    GBinderHidlVec hardwareEnforced;
+} KM_ALIGNED(8);
+G_STATIC_ASSERT(sizeof(struct km_key_characteristics) == 32);
+
+// VerificationToken { uint64_t challenge; Timestamp timestamp;
+//   vec<KeyParameter> parametersVerified; SecurityLevel securityLevel;
+//   vec<uint8_t> mac; } -- only ever written empty, by verifyAuthorization.
+struct km_verification_token {
+    guint64 challenge;
+    guint64 timestamp;
+    GBinderHidlVec parametersVerified;
+    guint32 securityLevel;
+    guint32 pad;
+    GBinderHidlVec mac;
+} KM_ALIGNED(8);
+G_STATIC_ASSERT(sizeof(struct km_verification_token) == 56);
+
+// HardwareAuthToken and VerificationToken arrive as the last arguments of
+// begin/update/finish. Nothing here verifies them -- auth-bound keys are
+// refused at generation until stage 5 -- so they are never parsed.
 
 #endif

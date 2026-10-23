@@ -2,7 +2,9 @@
 
 **Date:** 2026-10-10. **Status:** feasibility only when written. **Stage 0 done 2026-10-19** —
 `waydroid-ext-swtpm` is built, packaged, installed and verified on bigtab01, and corrects two claims
-below; see [71](71-swtpm-host.md). Stages 1–5, the keystore HAL itself, are not started. Opened at the
+below; see [71](71-swtpm-host.md). **Stages 1–4 done by 2026-10-22: StrongBox keys work from an ordinary
+app on bigtab01, 20/20** ([73](73-keystore-stage1-engine.md)); stage 5 (the shared secret, and with it
+auth-bound keys) and packaging are not started. Opened at the
 owner's request as two roadmap items — *deploy swtpm to bigtab01 and configure LineageOS to use it*,
 and *configure vidiot01's hardware TPM2 device to Waydroid*. They are scoped together here because
 they are **one component with two backends**, in the same sense that
@@ -391,10 +393,16 @@ The work is in the semantics:
    nothing behind it. Expect `keystore2` to log a declared-but-absent instance. That informative
    first failure is the stage-0 result, and it also answers the open question about whether each
    framework surfaces the feature at all.
+   **Answered from the baseline, 2026-10-22, so never armed; and the fragment turned out to break
+   boot** — a VINTF fragment re-declaring keymaster@4.0 conflicts with the vendor manifest, and the
+   working route overrides `manifest.xml` whole ([73](73-keystore-stage1-engine.md)).
 3. **Register the instance over libgbinder**, `getHardwareInfo` only. This is where the
    binder-`transfer` trap appears on A16, so expect it and keep the stage small.
+   **Done 2026-10-22 (stage 3a): keystore2 binds it as STRONGBOX.**
 4. **EC P-256 and AES keys**, generate / sign / verify, tags enforced. Verified by a dependency-free
    APK in the `sensor-app/` mould, since nothing in the image will ask for StrongBox on its own.
+   **Done 2026-10-22: [keystore-probe/](../keystore-probe) passed 20/20 from Android** — EC P-256
+   signing, AES-GCM and AES-CBC, with GCM built from the TPM's ECB ([73](73-keystore-stage1-engine.md)).
 5. **Auth-bound keys and `computeSharedHmac`**, which is the step that makes
    [66](66-fingerprint-hal.md)'s auth tokens real.
 
@@ -435,6 +443,8 @@ Android image; and any claim that bigtab01's swtpm improves that machine's secur
    already is, wrapped for TEE) is what turns −68 into a real StrongBox. The feature XML is only
    PackageManager's half. Still to pin: whether the legacy wrapper needs the VINTF declaration to
    *bind* a served instance or binds it from hwservicemanager regardless — stage 3 settles it.
+   **Settled by stage 3a: it needs the declaration.** Served but undeclared, keystore2 never contacts
+   the daemon at all ([73](73-keystore-stage1-engine.md)).
 4. **What does each `keystore2` do when a strongbox instance fails `computeSharedHmac`?** If it
    refuses to boot the keystore rather than dropping the instance, stage 3 is riskier than it looks
    and belongs behind a `session stop` rather than a reboot.
@@ -443,8 +453,14 @@ Android image; and any claim that bigtab01's swtpm improves that machine's secur
    `earlyBootEnded returned service specific error: -68`), shared-secret negotiation still
    *concludes successfully* for the TEE instance, and `keystore2` registers and runs with a working
    lockscreen. So a declared-but-absent StrongBox is safe — the stage-2 "informative failure" was
-   obtained from the baseline, which is why no empty instance was ever armed. **The *present but
-   failing* case is still unproven**: when a strongbox instance joins shared-secret negotiation and
+   obtained from the baseline, which is why no empty instance was ever armed. *Corrected by stage 3a:*
+   that baseline was **undeclared**, not declared-but-absent — with no manifest entry keystore2 never
+   reaches for the instance at all. A strongbox that is declared with nothing serving it has still
+   never been booted, which is why the manifest and the daemon are deployed and removed together.
+   **The *present but failing* case is still unproven**: when a strongbox instance joins shared-secret negotiation and
    computes a *disagreeing* HMAC, whether negotiation still concludes for everyone or breaks the TEE
    instance too is the real stage-3/5 risk. Treat `computeSharedHmac` as load-bearing from the first
    strongbox commit, and land stage 3 behind a `session stop`, not a reboot, until this is measured.
+   **Answered safe by stage 3a, 2026-10-22:** with our empty check keystore2 logged `NOT PROVISIONED
+   CORRECTLY`, still concluded negotiation, and the TEE instance and the lockscreen were unaffected
+   ([73](73-keystore-stage1-engine.md)).
