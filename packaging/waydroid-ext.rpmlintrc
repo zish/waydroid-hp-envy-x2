@@ -115,7 +115,11 @@ addFilter("waydroid-ext-backlight.*only-non-binary-in-usr-lib")
 # used to be 400 KB of somebody else's ELF is a manifest and nothing else
 # (docs/54-no-vendored-binaries.md). An empty-looking package is exactly right
 # here, and the check has no way to know that.
-addFilter("waydroid-ext-(brightness-overlay|wifi-framework|wifi-hostd|camera-hal|battery).*only-non-binary-in-usr-lib")
+#
+# strongbox joined on 2026-10-23 for the derive-row reason: it carries two
+# insertions into the image's own VINTF manifest and no bytes of the manifest
+# (docs/75).
+addFilter("waydroid-ext-(brightness-overlay|wifi-framework|wifi-hostd|camera-hal|battery|strongbox).*only-non-binary-in-usr-lib")
 
 # ------------------------------------ a package that is a patch, not a binary
 #

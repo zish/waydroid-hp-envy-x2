@@ -49,9 +49,11 @@ hash is recorded in 64.
 **bigtab01, 2026-10-23: goal 10's stage 5 works in Android.** A StrongBox key bound to the lockscreen
 signed one second after the owner's real pattern unlock, and refused both before it and 18 s after.
 keystore2 negotiated the shared HMAC key with the TEE *and* the StrongBox and found them in agreement.
-See [74](74-keystore-stage5-auth.md), whose *Still not done* list is current. The next step is
-packaging, or the launch model that would let the daemon register without someone logging out and in.
-The feature XML is the owner's policy call. **Android here has the owner's Pattern lock**:
+See [74](74-keystore-stage5-auth.md), whose *Still not done* list is current. **Packaged the same
+day and not yet installed** — `waydroid-ext-keystored`, `waydroid-ext-strongbox` and
+`waydroid-ext-overlay-sync` 1.2.0, built and install-tested on the dev box; the next step is
+[75](75-keystore-packaging.md)'s *Deploying it on bigtab01*, which needs the owner for sudo and a
+logout or reboot. The feature XML is the owner's policy call. **Android here has the owner's Pattern lock**:
 `bin/keystore-auth-test.sh` detects it, never touches it, and needs the owner at the machine to unlock
 when the screen re-locks. Nothing is packaged. The hand deployment removes itself at the next logout
 (table below), and [artifacts/keystore/hand-deploy.sh](../artifacts/keystore/hand-deploy.sh) is how

@@ -11,12 +11,22 @@
 # libstdc++/libgcc are linked statically so the only runtime deps are glibc,
 # glib and libgbinder -- all already on bigtab01 as Waydroid's own deps.
 #
+# That is right for a dev box matching a host it cannot compile on, and wrong
+# inside rpmbuild, which must be offline and must bind against the builder's own
+# libraries. --rpm is that second build, exactly as wifi/build.sh's: the daemon's
+# source list and link line, with headers and libraries from pkg-config and the
+# optimisation and hardening flags from the rpm build environment. It builds the
+# daemon only -- km-bench is a bench tool and no package ships it -- and stops:
+# installing is %install's job, in artifacts/keystore/install.sh. It never
+# reaches the network or $HOST, and refuses to be combined with the modes that do.
+#
 #   keystore/hal/build.sh            # build the daemon and km-bench
 #   keystore/hal/build.sh --deps     # (re)fetch gbinder/glibutil headers + host .so
+#   keystore/hal/build.sh --rpm      # build the daemon inside rpmbuild: pkg-config, offline
 #   keystore/hal/build.sh --check    # build, then report runtime deps vs the host
 #   keystore/hal/build.sh --install  # build, then install to bigtab01 (sudo there)
 #
-# Env: HOST=<ip>  OUT=<dir>
+# Env: HOST=<ip>  OUT=<dir>  CXXFLAGS= LDFLAGS= (honoured by --rpm)
 set -euo pipefail
 
 HOST="${HOST:-10.42.0.137}"
@@ -24,20 +34,86 @@ here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 OUT="${OUT:-$repo/build/keystore-hal}"
 
+# Captured before the CXXFLAGS/LDFLAGS arrays below take the names: --rpm
+# appends to the distribution's flags rather than discarding them. CFLAGS is not
+# read, every source here being C++ (wifi/build.sh says why at length).
+ENV_CXXFLAGS="${CXXFLAGS:-}"
+ENV_LDFLAGS="${LDFLAGS:-}"
+
 GBINDER_TAG=1.1.47      # must match libgbinder on the host
 GLIBUTIL_TAG=1.0.82     # must match libglibutil on the host
 
-DO_DEPS=0; DO_CHECK=0; DO_INSTALL=0
+DO_DEPS=0; DO_CHECK=0; DO_INSTALL=0; DO_RPM=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--deps) DO_DEPS=1; shift ;;
 	--check) DO_CHECK=1; shift ;;
 	--install) DO_INSTALL=1; DO_CHECK=1; shift ;;
+	--rpm) DO_RPM=1; shift ;;
 	*) echo "unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
 
+if [ "$DO_RPM" = 1 ] && [ $((DO_DEPS + DO_CHECK + DO_INSTALL)) -ne 0 ]; then
+	echo "--rpm cannot be combined with --deps, --check or --install" >&2
+	exit 2
+fi
+
 mkdir -p "$OUT"
+
+# The daemon's translation units, one list for both builds. service.cpp needs
+# gbinder/glib; the engine TUs are plain C++17.
+SRCS=( "$here/service.cpp" "$here/../km_blob.cpp" "$here/../tools_backend.cpp"
+       "$here/../engine.cpp" "$here/../soft_crypto.cpp" "$here/../auth.cpp" )
+
+if [ "$DO_RPM" = 1 ]; then
+	PKGS="libgbinder libglibutil glib-2.0 gobject-2.0 gio-2.0 gio-unix-2.0"
+	missing=""
+	for p in $PKGS; do
+		pkg-config --exists "$p" || missing="$missing $p"
+	done
+	# Fail and say so rather than falling back to the vendored headers, which
+	# came off one host over ssh and would ship that host's ABI.
+	if [ -n "$missing" ]; then
+		cat >&2 <<-EOM
+			missing build dependencies:$missing
+
+			On Fedora: dnf install libgbinder-devel libglibutil-devel glib2-devel
+			Debian packages neither library; there, use
+			    packaging/build-mod.sh --prebuilt keystored
+			to package the binary a plain keystore/hal/build.sh produced.
+		EOM
+		exit 1
+	fi
+	# shellcheck disable=SC2086  # $PKGS is a word list of pkg-config names
+	PKG_CFLAGS="$(pkg-config --cflags $PKGS)"
+	# shellcheck disable=SC2086
+	PKG_LIBS="$(pkg-config --libs $PKGS)"
+	# shellcheck disable=SC2206  # flag lists, split on purpose
+	CXXFLAGS=(${ENV_CXXFLAGS:--O2 -g} -Wall -Wextra -Wno-unused-parameter
+		-std=gnu++17 -pthread -ffunction-sections -fdata-sections
+		-I"$here" -I"$here/.." $PKG_CFLAGS)
+	# The builder's CXXFLAGS on the link line too, for -flto and annobin, as
+	# wifi/build.sh explains.
+	# shellcheck disable=SC2206,SC2054
+	LDFLAGS=(${ENV_CXXFLAGS:-} ${ENV_LDFLAGS:-} -Wl,--gc-sections
+		-static-libstdc++ -static-libgcc)
+	# shellcheck disable=SC2206
+	LIBS=($PKG_LIBS -lpthread -lm)
+
+	OBJS=()
+	echo "== compiling (rpm)"
+	for s in "${SRCS[@]}"; do
+		o="$OUT/$(basename "${s%.cpp}").o"
+		echo "   $(basename "$s")"
+		g++ "${CXXFLAGS[@]}" -c "$s" -o "$o"
+		OBJS+=("$o")
+	done
+	echo "== linking"
+	g++ "${OBJS[@]}" -o "$OUT/waydroid-keystored" "${LDFLAGS[@]}" "${LIBS[@]}"
+	echo "== built $OUT/waydroid-keystored"
+	exit 0
+fi
 
 # ---------------------------------------------------------------- dependencies
 if [ "$DO_DEPS" = 1 ] || [ ! -d "$OUT/libgbinder" ]; then
@@ -78,9 +154,6 @@ CXXFLAGS+=($GLIB_CFLAGS)
 # shellcheck disable=SC2054  # -Wl, passes its argument after a comma, not a list
 LDFLAGS=( -L"$OUT/sysroot/lib" -Wl,--gc-sections -static-libstdc++ -static-libgcc )
 
-# service.cpp needs gbinder/glib; the engine TUs are plain C++17.
-SRCS=( "$here/service.cpp" "$here/../km_blob.cpp" "$here/../tools_backend.cpp"
-       "$here/../engine.cpp" "$here/../soft_crypto.cpp" "$here/../auth.cpp" )
 OBJS=()
 echo "== compiling"
 for s in "${SRCS[@]}"; do

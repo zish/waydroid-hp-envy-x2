@@ -57,6 +57,12 @@ understates it: **8 of 27 have a `%check`.** Overlay-kind mods get one **synthes
 anything. Two host-kind mods declare their own: `mdns` and `binder-policy`. The gap is the
 other seventeen host mods, and the two group mods.
 
+**Recounted 2026-10-23 from the `.mod` files: 13 of 30.** Seven overlay components carry the
+synthesised check (`strongbox` joined them), and six host mods declare their own:
+`binder-policy`, `mdns`, `wifid`, `swtpm`, and since 2026-10-23 `keystored` (the TPM engine's 87
+checks against a throwaway swtpm) and `overlay-sync` (its first, 19 checks of the derive path end to
+end). Before that day it was 10 of 28; the paragraph above predates the `wifid` and `swtpm` checks.
+
 `wifid` is the third declared check, added 2026-10-09, and it is a **tripwire rather than a
 test**: which service-manager protocol the daemon must speak is a property of the image
 (`aidl3` at API 33, `aidl6` at API 36), `service.cpp` hardcodes it as a `#define`, and one
@@ -275,6 +281,9 @@ plain — and asserts the harness reaches the right verdict on each.
 | `dexopt` | yes | yes | **yes** | plus `non-etc-or-var-file-marked-as-conffile` — **written, not shipped**, see below |
 | `appfuse` | yes | yes | **yes** | yes — the backlight baseline exactly: `no-signature`, `invalid-url Source0`, `no-%check-section`, `no-manual-page-for-binary` |
 | `mdns` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` — and **without** `no-%check-section`, which it is the first host package here to clear |
+| `overlay-sync` 1.2.0 | yes | yes | **yes**, `%check` 19/19 | `no-manual-page-for-binary` only, past the usual `no-signature` |
+| `keystored` 1.0.0 | yes | yes | **yes**, `--prebuilt` only; `%check` 11 passed, 2 skipped (cross-file checks whose files are not in its tarball) | the `wifid` baseline exactly: `no-manual-page-for-binary`, `unstripped-binary-or-object` |
+| `strongbox` 1.0.0 | yes | yes | **yes** | clean once added to the rc file's derive-row `only-non-binary-in-usr-lib` filter, beside `camera-hal` and `battery` |
 
 ### The seven host packages added 2026-09-27
 
@@ -453,6 +462,28 @@ every autotools package.
 `no-signature` and `invalid-url Source0` are deliberately not filtered: both are real and both
 are release-time work. Everything else rpmlint said is filtered with a written reason in
 [waydroid-ext.rpmlintrc](waydroid-ext.rpmlintrc).
+
+## The keystore pair, and the keystone's insertion edit — 2026-10-23
+
+Two new modifications and a keystone bump, all built on the dev box and none yet installed
+anywhere. [docs/75](../docs/75-keystore-packaging.md) is the record.
+
+- **`keystored`** — `waydroid-keystored`, its unit (enabled, `unconfined_t`, `PrivateTmp`) and
+  `/etc/waydroid-keystored.conf` (`%config(noreplace)`, shipping `--accept-unsigned-auth-tokens`).
+  Host kind, x86_64, `ANDROID="13"`, the `wifid` shape including the `%bcond` and an offline
+  `keystore/hal/build.sh --rpm`. The daemon gained a `GetSession` gate first: ungated, it had
+  written 7,551 binder failure pairs to bigtab01's kernel log in two hours at the greeter.
+- **`strongbox`** — overlay kind, one derive row and no bytes: the image's VINTF manifest with two
+  lines inserted. Hard-requires `keystored`, which recommends it back, so the strongbox is never
+  declared with nothing installed to serve it.
+- **`overlay-sync` 1.2.0** — a derive row's edits may insert as well as replace
+  (`<hex offset>+<hex bytes>`), every offset into the stock file, applied highest first. Its first
+  `%check`. Every overlay component requires this package, so the bump touches the one contract
+  they share; the format is a strict superset, so no existing row changes meaning.
+
+`test-install.sh overlay-sync strongbox keystored`: **18 passed, 0 failed**, `keystored`'s edited
+conf kept as `.rpmsave`. `verify-units.sh`: `waydroid-keystored.service` verifies. The source arm
+of `keystored` has not been built anywhere yet — CI's Fedora `rpm` job is its first.
 
 ## The keystone bump — manifest format v2, 2026-09-26
 

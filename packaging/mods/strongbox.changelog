@@ -1,0 +1,7 @@
+* Fri Oct 23 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First release. Declares the "strongbox" keymaster@4.0 instance in Android's
+  vendor VINTF manifest by a derive row: two inserted lines, between the image's
+  own stock hash and the result keystore2 has bound since 2026-10-22. Ships no
+  bytes of the manifest. Needs waydroid-overlay-sync 1.2.0 for insertions, and
+  waydroid-ext-keystored, so the strongbox is never declared with nothing to
+  serve it.

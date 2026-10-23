@@ -278,9 +278,10 @@ test; its cost is that it needs a person at the machine. Its first attempt also 
 
 ## Still not done
 
-RSA, HMAC, 3DES and EC import; `upgradeKey` and `importWrappedKey`; the ESAPI backend; a launch model
-that registers before keystore2 probes without a person at the console; the
-`FEATURE_STRONGBOX_KEYSTORE` feature XML; and the RPM. On the feature XML specifically: stage 4 held it
+RSA, HMAC, 3DES and EC import; `upgradeKey` and `importWrappedKey`; the ESAPI backend; and the
+`FEATURE_STRONGBOX_KEYSTORE` feature XML. The launch model and the RPM were done the next day as
+`waydroid-ext-keystored` and `waydroid-ext-strongbox`, built and tested offline and not yet installed
+([75](75-keystore-packaging.md)). On the feature XML specifically: stage 4 held it
 back because auth-bound keys would fail here, and they no longer do — but advertising the feature tells
 apps this machine has a StrongBox of the CDD's kind, and with unsigned tokens accepted its auth binding
 is keystore2's, not its own. That is now a policy question for the owner rather than a missing piece.

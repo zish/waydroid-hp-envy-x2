@@ -130,7 +130,10 @@ every boot. With the owner at the console a clean session was read read-only, an
   negotiation *concluded successfully* for the TEE instance.
 
 So [65](65-tpm-keystore.md)'s open question 4 is answered on the safe side — a declared-but-absent
-StrongBox does **not** wedge `keystore2` — and open question 3 is answered yes: the discovery path
+StrongBox does **not** wedge `keystore2` — and open question 3 is answered yes. **Corrected
+2026-10-23 ([75](75-keystore-packaging.md)): this boot had the strongbox *undeclared*, and stage 3a
+below found keystore2 engages only a declared one, so the declared-and-absent case open question 4
+asks about has still never been booted.** Open question 3: the discovery path
 is live and wants a *served* `keymaster@4.0/strongbox` instance, not just the feature XML. Arming an
 empty instance would have cost a session restart and the kiosk risk for information the baseline
 already gives, so it was skipped. The staged overlay files in

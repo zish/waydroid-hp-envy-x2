@@ -955,9 +955,18 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
     both refusals it was keystore2 that refused, before the StrongBox was asked. **Android here has the
     owner's Pattern lock**, so `bin/keystore-auth-test.sh` uses the owner's unlock and never sets,
     enters or clears the credential. The feature XML is still **not deployed**, and that is now a
-    policy question for the owner rather than a missing piece. Nothing is packaged.
+    policy question for the owner rather than a missing piece.
     [artifacts/keystore/hand-deploy.sh](artifacts/keystore/hand-deploy.sh) removes the hand deployment
     at the next logout, and its boot guard removes it if a reboot comes first.
+    **Packaged 2026-10-23, not yet installed — [docs/75](docs/75-keystore-packaging.md):**
+    `waydroid-ext-keystored` (the daemon as a unit from boot, wifid's shape) and
+    `waydroid-ext-strongbox` (the manifest as a derive row, hard-requiring the daemon), on
+    `waydroid-ext-overlay-sync` 1.2.0, whose derive rows can now **insert** bytes. Two findings
+    shaped it. **The stage-5 daemon could not ship as it was**: ungated, it wrote 7,551 binder
+    failure pairs to the kernel log in two hours at the greeter, docs/69's fault, so it now waits on
+    `GetSession` first. And **open question 4 is still open**: docs/73's "answered safe" came from a
+    boot with the strongbox *undeclared*, so a declared strongbox with nothing serving it has never
+    been booted, and the packages are shaped to keep it unreachable.
     See [docs/65-tpm-keystore.md](docs/65-tpm-keystore.md).
 11. **A fingerprint HAL fed by libfprint — Chipsailing on bigtab01, Goodix on vidiot01.** **Added
     2026-10-10 at the owner's request as two items; scoped the same day as one, nothing built.**
@@ -1385,7 +1394,9 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   **Read it before assuming anything is packaged**, and get the count from
   `packaging/gen-spec.sh --list` rather than from prose — it marks the unshipped ones and cannot
   go stale. **28 `.mod` files as of 2026-10-19, 27 shipped; 26 of them installed on bigtab01**,
-  counted from that day's `rpm-ostree status` rather than carried forward. The one shipped and not
+  counted from that day's `rpm-ostree status` rather than carried forward. **30 as of 2026-10-23**:
+  `keystored` and `strongbox` were added, built and install-tested on the dev box, and are not
+  installed anywhere yet ([docs/75](docs/75-keystore-packaging.md)). The one shipped and not
   installed is `binder-policy`, built and tested but not installed anywhere. **`mdns` was found
   missing the same day although this file said it was installed**: its package, reconciler and
   unit were absent while the avahi config it manages stayed in force. It had been lost with its

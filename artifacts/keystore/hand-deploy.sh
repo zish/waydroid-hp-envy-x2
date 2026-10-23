@@ -48,6 +48,15 @@ session_running() {
 [ $# -ge 1 ] && [ -x "$1" ] || { echo "usage: $0 DAEMON [ARGS...]" >&2; exit 2; }
 daemon=$1; shift
 
+# This is for a host WITHOUT the packages (docs/75). With them, the packaged
+# daemon would register the same name alongside this one and the manifest is
+# already overlay-sync's; test a build there with a drop-in that points
+# waydroid-keystored.service's ExecStart at it instead, between sessions.
+if systemctl cat waydroid-keystored.service >/dev/null 2>&1; then
+	log "refusing: waydroid-keystored.service is installed; use a drop-in, not this (docs/75)"
+	echo "refusing: waydroid-keystored.service is installed; use a drop-in instead (docs/75)" >&2
+	exit 3
+fi
 if [ -e "$OVL" ]; then
 	log "refusing: $OVL already exists (another deployment, or a stale one)"
 	exit 3
