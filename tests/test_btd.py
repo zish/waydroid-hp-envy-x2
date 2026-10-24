@@ -9,7 +9,9 @@ the app shows the user, so they are pinned here verbatim.
 import os
 import stat
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 
 import _scripts
@@ -82,6 +84,44 @@ class Token(unittest.TestCase):
             path = os.path.join(tmp, "token")
             open(path, "w").close()
             self.assertRegex(btd.ensure_token(path), r"^[0-9a-f]{64}$")
+
+
+@unittest.skipUnless(STUBBED, "real PyGObject here; importing btd at all is the check")
+class UnixSignalShim(unittest.TestCase):
+    """The three PyGObjects btd's GLibUnix shim meets.
+
+    CI's first run (2026-10-23) failed on the middle one, which the stub could
+    not show: Ubuntu 24.04's GLibUnix has no signal_add, and that raises
+    AttributeError where a missing GLibUnix raises ImportError.
+    """
+
+    def load_with(self, glibunix):
+        repo = sys.modules["gi.repository"]
+        saved_unix = repo.__dict__.get("GLibUnix")
+        saved_old = repo.GLib.unix_signal_add
+        repo.GLib.unix_signal_add = self.old = lambda *a, **kw: None
+        if glibunix is None:
+            repo.__dict__.pop("GLibUnix", None)
+        else:
+            repo.GLibUnix = glibunix
+        try:
+            return _scripts.load("artifacts/bluetooth/waydroid-btd")
+        finally:
+            repo.GLib.unix_signal_add = saved_old
+            repo.GLibUnix = saved_unix
+
+    def test_new_module_is_preferred(self):
+        new = lambda *a, **kw: None
+        mod = self.load_with(types.SimpleNamespace(signal_add=new))
+        self.assertIs(mod.unix_signal_add, new)
+
+    def test_module_without_signal_add_falls_back(self):
+        mod = self.load_with(types.SimpleNamespace())
+        self.assertIs(mod.unix_signal_add, self.old)
+
+    def test_no_module_falls_back(self):
+        mod = self.load_with(None)
+        self.assertIs(mod.unix_signal_add, self.old)
 
 
 @unittest.skipUnless(subprocess.run(["sh", "-c", "command -v openssl"],

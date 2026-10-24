@@ -17,7 +17,7 @@
 # its own release cadence and no host dependencies, and coupling them would
 # reissue one every time the other changed.
 
-VERSION=1.1.0
+VERSION=1.1.1
 RELEASE=1
 KIND=host
 ARCH=noarch
