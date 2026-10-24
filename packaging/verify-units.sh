@@ -27,6 +27,13 @@
 # waydroid-container.service is what lets binder-nice's drop-in be verified at
 # all: a drop-in is only parsed as part of the unit it extends.
 #
+# Not checked: Documentation=man: pages (--man=no). verify looks a man page up
+# on the checking machine, exactly as it does a binary, and a man page has no
+# extracted-tree equivalent: the one referenced today, swtpm(8), is swtpm's, not
+# ours. So the answer is about the checker, never the host -- the dev box passes
+# it, and CI's Fedora container, installed without documentation, failed
+# waydroid-swtpm.service on it in CI's third run (2026-10-23) with nothing wrong.
+#
 # Not checked: `systemd-analyze security`. Every daemon here is a root service
 # that mounts, labels or reaches into the container's namespaces, so the score
 # is 9.x UNSAFE for all of them by design and would be noise (docs/53).
@@ -92,7 +99,7 @@ pass=0
 fail=0
 for u in $units; do
 	name=$(basename "$u")
-	out=$(SYSTEMD_UNIT_PATH="$unitdir:$stubs:" systemd-analyze verify "$u" 2>&1) || true
+	out=$(SYSTEMD_UNIT_PATH="$unitdir:$stubs:" systemd-analyze verify --man=no "$u" 2>&1) || true
 	# verify loads every unit on the search path and complains about any of
 	# them, so keep only the lines naming THIS unit or its drop-ins -- every
 	# unit gets its own turn, so nothing is lost, and nothing verify says about
