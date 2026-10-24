@@ -66,6 +66,9 @@ typedef struct app {
     Engine* engine;
     guint sessionWatch;
     guint sessionWatchMs;
+    gboolean tpmReady;
+    int tpmTries;
+    KmError tpmError;
 } App;
 
 /* ------------------------------------------------------------------ helpers */
@@ -558,8 +561,48 @@ app_session_present(void)
  * gbinder_servicemanager_new2(), so nothing exists that could poll binder. */
 #define SESSION_GATE_GIVEUP_SEC (60)
 
+/* Whether the TPM answers, found out while the gate waits and said before
+ * registering -- not at the first key request, since a strongbox that binds
+ * and then fails key generation is better diagnosed than one that says nothing.
+ * Never fatal: the daemon registers either way and the engine retries on every
+ * key operation, so a declared strongbox always has something behind it.
+ *
+ * Not before the gate. The unit is ordered After=waydroid-swtpm.service, which
+ * for a Type=simple unit means swtpm has forked, not that it listens: on
+ * bigtab01's first packaged boot (2026-10-23, docs/75) a check at startup ran
+ * 0.2 s early and wrote six TCTI errors and a "TPM not ready" to the journal,
+ * and the first key operation found the TPM fine. And not between the gate and
+ * registration, where keystore2 asked 64 ms after the gate opened. So the wait
+ * tries it: after the first second, then at 2, 4, 8... seconds, which bounds
+ * what a TPM that is really down costs the journal and still notices one that
+ * comes up late. */
 static void
-app_wait_for_session(void)
+app_try_tpm(App* app)
+{
+    if (app->tpmReady) return;
+    app->tpmTries++;
+    app->tpmError = app->engine->init();
+    if (app->tpmError == KmError::OK) {
+        app->tpmReady = TRUE;
+        GINFO("TPM ready: %s", app->engine->backendDescription().c_str());
+    }
+}
+
+/* Once the gate has opened. A gate that did not wait -- a session already
+ * running, or no system bus -- gets its one try here, before registering, as
+ * every start did before 1.0.1. */
+static void
+app_report_tpm(App* app)
+{
+    if (!app->tpmTries) app_try_tpm(app);
+    if (!app->tpmReady) {
+        GWARN("TPM not ready (%s): %s -- key operations will fail until it is",
+            kmErrorName(app->tpmError), app->engine->backendDescription().c_str());
+    }
+}
+
+static void
+app_wait_for_session(App* app)
 {
     GError* err = NULL;
     GDBusConnection* bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
@@ -585,6 +628,8 @@ app_wait_for_session(void)
                   "binder");
         }
         sleep(1);
+        unsigned n = (unsigned) i + 1;
+        if (!(n & (n - 1))) app_try_tpm(app);
     }
     g_object_unref(bus);
 }
@@ -727,21 +772,8 @@ int main(int argc, char* argv[])
     GINFO("auth tokens: %s", opts.acceptUnsignedAuthTokens ?
         "signed or unsigned (--accept-unsigned-auth-tokens); auth tags at KEYSTORE level" :
         "signed with the shared key only; auth tags at STRONGBOX level");
-    /* Say now, not at the first key request, whether the TPM answers. Not
-     * fatal: the engine retries on every key operation, and a strongbox that
-     * binds and then fails key generation is still better diagnosed than one
-     * that never registered. */
-    {
-        KmError e = app.engine->init();
-        if (e == KmError::OK) {
-            GINFO("TPM ready: %s", app.engine->backendDescription().c_str());
-        } else {
-            GWARN("TPM not ready (%s): %s -- key operations will fail until it is",
-                kmErrorName(e), app.engine->backendDescription().c_str());
-        }
-    }
-
-    app_wait_for_session();
+    app_wait_for_session(&app);
+    app_report_tpm(&app);
     app.sm = gbinder_servicemanager_new2(device, "hidl", "hidl");
     if (!app.sm) {
         GERR("cannot open %s", device);

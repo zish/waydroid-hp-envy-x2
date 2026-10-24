@@ -31,7 +31,7 @@
 # hard-requiring this package in the other direction, the wifid/wifi-hostd
 # pair's shape.
 
-VERSION=1.0.0
+VERSION=1.0.1
 RELEASE=1
 KIND=host
 ARCH=x86_64
