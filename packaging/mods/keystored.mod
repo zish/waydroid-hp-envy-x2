@@ -32,7 +32,7 @@
 # pair's shape.
 
 VERSION=1.0.1
-RELEASE=1
+RELEASE=2
 KIND=host
 ARCH=x86_64
 
@@ -60,6 +60,7 @@ GLOBALS='%bcond_with prebuilt
 # swtpm, tpm2-tools and coreutils are for %check, which runs the engine's own
 # suite against a throwaway swtpm and requires it to run rather than skip.
 BUILDREQUIRES="gcc-c++
+libstdc++-static
 pkgconfig(libgbinder) >= 1.1.47
 pkgconfig(libglibutil) >= 1.0.82
 pkgconfig(glib-2.0)

@@ -1,3 +1,12 @@
+* Fri Oct 23 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.5-2
+- No code change. BuildRequires libstdc++-static, which the source build has
+  always needed: it links libstdc++ statically on purpose, and Fedora ships
+  libstdc++.a only in that package. CI's first Fedora build of the source arm
+  stopped at the link with "cannot find -lstdc++". The Debian dev box, where
+  the --prebuilt arm is built, never saw it, because Debian ships libstdc++.a
+  with the compiler. Reissued as a new release because the source package
+  changed, and two different artifacts must not share one NVR.
+
 * Fri Oct 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.5-1
 - Exit when the session that started this daemon is gone, instead of polling an
   empty binder for ever. container_manager.stop() already means to kill us at

@@ -7,7 +7,7 @@
 # and iwd or connman could be others.
 
 VERSION=1.1.2
-RELEASE=1
+RELEASE=2
 KIND=host
 ARCH=x86_64
 
@@ -65,7 +65,8 @@ pkgconfig(gobject-2.0)
 pkgconfig(gio-2.0)
 pkgconfig(gio-unix-2.0)
 systemd-rpm-macros
-gcc-c++"
+gcc-c++
+libstdc++-static"
 
 # NetworkManager is hard: NmBackend::init() refuses to start without it on the
 # system bus. It is also the one dependency this design exists to let somebody

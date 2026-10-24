@@ -40,7 +40,7 @@
 # which must be offline and must bind to this buildroot's libraries.
 
 VERSION=1.0.5
-RELEASE=1
+RELEASE=2
 KIND=host
 
 # Compiled x86_64. NOT noarch, for the same reason camera-gbm is not: a noarch
@@ -82,6 +82,7 @@ GLOBALS='%bcond_with prebuilt
 %endif'
 
 BUILDREQUIRES="gcc-c++
+libstdc++-static
 pkgconfig(libgbinder) >= 1.1.47
 pkgconfig(libglibutil) >= 1.0.82
 pkgconfig(glib-2.0)
