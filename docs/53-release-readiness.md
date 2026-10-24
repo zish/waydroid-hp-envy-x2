@@ -374,6 +374,27 @@ on `gbinder.h`, which is exactly what the Fedora container's `dnf builddep` supp
 job itself has not run yet** — there is no container runtime here — so its first run on GitHub is
 the verification.
 
+**It first ran on 2026-10-23, the first time the workflow was pushed, and was green on the fourth
+run** ([40046241533](https://github.com/zish/waydroid-hp-envy-x2/actions/runs/40046241533)). Each
+run failed one stage further on than the last. None of the four faults could be seen from this box,
+which is the case for having the job at all:
+
+| Run | Failed at | Cause | Fix |
+|---|---|---|---|
+| 1 | `rpm`, the build, at `keystored` | the C++ daemons link `-static-libstdc++` on purpose, and Fedora ships `libstdc++.a` only in `libstdc++-static`, which no `.mod` listed. Debian ships it with the compiler. `wifid` and `sensord` had the same gap; the job builds in name order and stopped before reaching them | `ce3e315`: BuildRequires in all three, reissued as `keystored` 1.0.1-2, `wifid` 1.1.2-2, `sensord` 1.0.5-2 |
+| 1 | `tests`, `test_btd` | `waydroid-btd`'s PyGObject shim caught only `ImportError`. Ubuntu 24.04's `GLibUnix` exists without `signal_add`, which raises `AttributeError`. This box has no PyGObject, and the test stub's `GLibUnix` always had `signal_add` | `7419b1d`: `btd` 1.1.1, and a test of all three shapes that fails on the old shim |
+| 2 | `rpm`, the install test, 3 of 192 | `[ -e ]` follows symlinks, and the `-debuginfo` subpackages, built for the first time with the source arms, carry build-id links to binaries outside their test root | `c18116f`: `-e` or `-L`; a fixture that fails on the old check; CI now runs `--selftest --all` |
+| 3 | `rpm`, `verify-units.sh` | `systemd-analyze verify` looked up `man:swtpm(8)` in a container installed without documentation, which says nothing about any host | `d26c1cc`: `--man=no`, reproduced here with a `man` that always fails |
+
+Run 4 in numbers: 35 packages built, **the source arms of `keystored`, `wifid` and `sensord`
+compiled for the first time anywhere**; `test-install.sh` 196 passed with its 4 selftest
+expectations; `verify-units.sh` 20 of 20. Two things it does not show. `keystored`'s `%check`
+there ran the engine 84 passed, 2 skipped, because the build root has no `openssl` command for
+the two outside-reference checks (`keystore/main.cpp`'s `skip()`), so in CI the engine is checked
+against swtpm but not against openssl. And GitHub annotates every job with a Node.js 20
+deprecation, for the pinned `actions/checkout` and `actions/cache`; those are warnings, and
+Dependabot proposes the bumps.
+
 **Every shipped systemd unit is verified, from 2026-10-17**:
 [packaging/verify-units.sh](../packaging/verify-units.sh), the last step of the `rpm` job, extracts
 the newest build of each package with `rpm2cpio` and runs `systemd-analyze verify` on the units as
@@ -580,6 +601,8 @@ string Android reports through the sensors HAL, so changing it changes observabl
      that will compile it, and the LDFLAGS defect found during review — the builder's `CXXFLAGS`
      were on the compile line only, silently discarding `-flto=auto` and half of annobin's
      instrumentation — is the kind of thing only that build will confirm is now right.
+     **It has been compiled since 2026-10-23**, by CI's first green run, once the source arm
+     gained the `libstdc++-static` build dependency it had always needed (above, *It first ran*).
 2. **Move the APKs into their own GitHub repositories**, one per app, each with its own CI/CD,
    pulled back in here as **git submodules**. Added at the owner's request 2026-09-22; the shape
    was settled 2026-09-29.

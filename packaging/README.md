@@ -445,6 +445,8 @@ built without SELinux, and every line ends `|| :` because no scriptlet may fail 
   is developed, so `sh -n wifi/build.sh` has never been a valid check on it.
 - `libgbinder-devel` is a Fedora package and this box is Debian 13, which packages neither
   libgbinder nor libglibutil. **So the source arm has still never been compiled anywhere.**
+  (It has since 2026-10-23, in CI, after a `libstdc++-static` build dependency it had always
+  needed: [docs/53](../docs/53-release-readiness.md), *It first ran*.)
   `--rpm` exits 1 with a message naming the missing pkg-config modules, the `dnf install` line,
   and the two routes that do work here. `wifid.mod` now carries the `%bcond_with prebuilt`
   two-arm build that `sensord.mod` has, with `PREBUILT_FILES="build/wifi/daemon/waydroid-wifid"`,
@@ -487,7 +489,9 @@ daemon ask before swtpm listened. [docs/75](../docs/75-keystore-packaging.md) is
 
 `test-install.sh overlay-sync strongbox keystored`: **18 passed, 0 failed**, `keystored`'s edited
 conf kept as `.rpmsave`. `verify-units.sh`: `waydroid-keystored.service` verifies. The source arm
-of `keystored` has not been built anywhere yet — CI's Fedora `rpm` job is its first.
+of `keystored` was first built by CI's Fedora `rpm` job on 2026-10-23, and failed at the link
+until 1.0.1-2 added `libstdc++-static` ([docs/53](../docs/53-release-readiness.md), *It first
+ran*).
 
 ## The keystone bump — manifest format v2, 2026-09-26
 

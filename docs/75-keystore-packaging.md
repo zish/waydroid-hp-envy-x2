@@ -145,12 +145,13 @@ built with `printf` and hashed separately, so the code is never judged against i
 
 ## Not yet verified
 
-What only bigtab01 could show has now been shown there (*Deployed on bigtab01*, below). Two items
-remain:
+What only bigtab01 could show has now been shown there (*Deployed on bigtab01*, below). The source
+arm on Fedora has been shown too, by CI's first runs on 2026-10-23. It failed at the link until
+`keystored` 1.0.1-2 added `libstdc++-static`, which the stand-in `.pc` files on the Debian dev box
+could not reveal, since Debian ships `libstdc++.a` with the compiler. Since then it builds, and its
+`%check` passes in the Fedora build root, there with the engine's two openssl cross-checks skipped
+([53](53-release-readiness.md), *It first ran*). One item remains:
 
-- **The source arm on Fedora.** The dev box is Debian and cannot install `libgbinder-devel`, so CI's
-  `rpm` job is the first real source build. The `--rpm` path has been exercised here only against
-  stand-in `.pc` files.
 - **Open question 4**, as above. It is optional.
 
 ## What a StrongBox gives apps here, and what it cannot

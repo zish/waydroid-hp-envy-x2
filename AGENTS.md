@@ -1269,7 +1269,10 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   tracked binary hash-pinned in `tests/binary-allowlist`, every relative doc link resolving, every
   XML file parsing. Same script in lefthook's `pre-push` and in
   [.github/workflows/ci.yml](.github/workflows/ci.yml), whose `rpm` job also builds every
-  shipped `.mod` from source on Fedora. Distinct from `bin/*-test.sh`, which need the live host.
+  shipped `.mod` from source on Fedora. **CI first ran on 2026-10-23, when the workflow was first
+  pushed, and was green on the fourth run.** None of the four faults it found could be seen from the
+  dev box: a missing `libstdc++-static`, a PyGObject shim, symlinks in `-debuginfo` packages, and a
+  man page in a nodocs container. Distinct from `bin/*-test.sh`, which need the live host.
   See [docs/53](docs/53-release-readiness.md)
 - `bin/` — helper scripts for working with the host, incl. stdlib-only V4L2 probes
   (`v4l2-formats.py`, `v4l2-curfmt.py`, `v4l2-grab.py`) written because `v4l-utils` is not
