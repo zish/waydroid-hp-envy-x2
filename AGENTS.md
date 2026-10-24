@@ -970,10 +970,12 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
     been booted, and the packages are shaped to keep it unreachable.
     **Installed the same evening and verified through a real boot**: the packaged daemon runs as
     `unconfined_t`, was silent at the greeter, registered 64 ms before keystore2 asked for it, and the
-    auth test passed **32/32** against it. One defect, unfixed: the unit's `After=waydroid-swtpm`
-    waits only for a `Type=simple` fork, so the daemon's boot-time TPM check runs before swtpm
-    listens and logs a false `TPM not ready`. It is harmless, because the engine retries on every
-    key operation; the fix is `keystored` 1.0.1, checking after the session gate instead.
+    auth test passed **32/32** against it. One defect, fixed in **`keystored` 1.0.1** that evening
+    and verified by another boot and another 32/32: the unit's `After=waydroid-swtpm` waits only for
+    a `Type=simple` fork, so 1.0.0's boot-time TPM check ran before swtpm listened and logged a false
+    `TPM not ready`. 1.0.1 checks from inside the session wait. **Checking after the gate was the
+    obvious fix, and it was the wrong one**: it would put a TPM exec between the session appearing and
+    the strongbox registering, and keystore2 asked 64 ms after the gate opened.
     See [docs/65-tpm-keystore.md](docs/65-tpm-keystore.md).
 11. **A fingerprint HAL fed by libfprint — Chipsailing on bigtab01, Goodix on vidiot01.** **Added
     2026-10-10 at the owner's request as two items; scoped the same day as one, nothing built.**

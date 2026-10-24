@@ -8,7 +8,7 @@ of edit.
 
 | Package | Kind | What it ships |
 |---|---|---|
-| `waydroid-ext-keystored` 1.0.0 | host, x86_64 | the daemon, `waydroid-keystored.service` (enabled), `/etc/waydroid-keystored.conf` |
+| `waydroid-ext-keystored` 1.0.1 | host, x86_64 | the daemon, `waydroid-keystored.service` (enabled), `/etc/waydroid-keystored.conf`. 1.0.1 moved its boot-time TPM check into the session wait |
 | `waydroid-ext-strongbox` 1.0.0 | overlay, noarch | one **derive** row: the vendor VINTF manifest declaring `strongbox`, made from the user's own `vendor.img` |
 | `waydroid-ext-overlay-sync` 1.2.0 | host, noarch | derive rows may now **insert** bytes; its first `%check` |
 
@@ -230,16 +230,67 @@ Two findings.
   will fail until it is` and went on to the gate. That is the runtime guarantee under *A correction
   first*, exercised by accident on the first boot: the daemon registered regardless, and
   `Engine::ensurePrimary()` latches only success. So the first key operation, at 19:45:51, found
-  the persistent primary with no further message. The cost is one false alarm in every boot's
-  journal. **Not fixed.** It needs a `keystored` 1.0.1 and a reboot to deploy. The fix belongs in the
-  daemon, which can check the TPM after the gate instead of before it: by the time a session
-  exists, swtpm has been listening for as long as the greeter was up.
+  the persistent primary with no further message. The cost was one false alarm in every boot's
+  journal. **Fixed in `keystored` 1.0.1 the same evening**, below.
 - **The auth test printed another session's daemon lines.** Its last section read
   `/var/tmp/waydroid-keystored.log`, hand-deploy.sh's file, which outlives the hand deployment, so
   this run printed the 12:29 daemon's start and its 14:35 negotiation as if they were its own. It now reads the unit's
   journal whenever `waydroid-keystored.service` exists. The messages carry the same leading
   timestamp, so the `since` filter is unchanged. Rerun against this session, it prints 18:50:57's
-  negotiation and 19:47:35's decision.
+  negotiation and 19:47:35's decision, and the 1.0.1 run below printed its own session's lines.
+
+### `keystored` 1.0.1: the TPM check moves into the wait
+
+The first fix proposed above, checking the TPM *after* the gate, was rejected before it was written.
+It would put a `tpm2_readpublic`, tens of milliseconds by `tools_backend.cpp`'s exec path, between
+the session appearing and the strongbox registering. keystore2 had asked 64 ms after the gate opened.
+It also would not have silenced the six TCTI lines, which are the backend's and come from any check
+that runs before swtpm listens.
+
+So 1.0.1 ([service.cpp](../keystore/hal/service.cpp), `app_try_tpm()` and `app_report_tpm()`) tries
+the TPM from inside the gate's wait. The first try comes after its first one-second sleep, then
+another at 2, 4, 8… seconds. Doubling keeps a TPM that is really down from costing the journal more
+than a logarithmic number of tries, and still notices one that comes up late. The verdict is given
+once, as the session arrives, and only if the TPM never answered. When the gate does not wait (a
+session already running, or no system bus), there is one check before registering, as in every
+start before.
+
+Offline first, on the dev box: a private `dbus-daemon` as the system bus, where `GetSession` never
+answers, and a throwaway swtpm started late on purpose.
+
+| Case | Result |
+|---|---|
+| swtpm 0.3 s after the daemon, the boot race | `TPM ready` at +1.05 s; **no TCTI lines** and no warning |
+| swtpm 5 s late | tries at 1, 2 and 4 s fail; ready at +8.1 s; no warning |
+| no TPM at all | tries at 1, 2, 4, 8, 16 and 32 s; one `TPM not ready` when the gate gives up at 60 s |
+| no system bus, so no wait | one check, ready at +0.045 s, before binder is opened |
+
+The harness's first run failed every case for a reason of its own: it put swtpm's socket under the
+scratch directory, whose path is over the 108-byte `sun_path` limit, the trap
+[65](65-tpm-keystore.md) already records. It now runs swtpm and the daemon from the case's directory
+with a relative socket name.
+
+Then on bigtab01. `%check` passed 11 with 2 skipped, as for 1.0.0, and `test-install.sh` 18/18.
+rpmlint's findings were identical to 1.0.0's, line for line, and the packaged binary was
+byte-identical to the build from `baeeee0`. It went in as one transaction,
+`rpm-ostree uninstall waydroid-ext-keystored --install …1.0.1…`. `db diff` showed that single
+change with the base commit unmoved. It booted at 20:10 into `13a2e3a9…`, with `0672d3b2…`, the
+1.0.0 deployment, as the rollback.
+
+| 20:10, the greeter | |
+|---|---|
+| swtpm started / the daemon started | 20:10:04.188 / 20:10:04.196, the same race as 1.0.0's boot |
+| `no waydroid session yet` | 20:10:06.068 |
+| `TPM ready` | **20:10:07.113**, on the wait's first try. No TCTI lines, no `TPM not ready` |
+| `--verify`; kernel log | exit 0; only systemd mounting binderfs |
+
+| 20:11, the session | |
+|---|---|
+| the gate opens | 20:11:19.231 |
+| hwservicemanager appears / `Added …/strongbox` | 20:11:19.831 / 20:11:19.832 |
+| keystore2's `getHardwareInfo`, `computeSharedHmac` over 2 participants | 20:11:19.975, 143 ms after registering |
+| kernel binder lines | five failed pings in the half-second before hwservicemanager, none the daemon's (pid 881): `waydroid-wifid`, `waydroid container start`, `waydroid show-full-ui` |
+| `bin/keystore-auth-test.sh` | **32/32**. auth-fresh started at the unlock, 20:15:10; the token was 1024 ms old of 15 000 |
 
 **Open question 4 is no closer.** This boot declared a StrongBox and served it. The case that question
 is about, declared with nothing serving it, is still unbooted, and it stays optional.

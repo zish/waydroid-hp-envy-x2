@@ -282,7 +282,7 @@ plain — and asserts the harness reaches the right verdict on each.
 | `appfuse` | yes | yes | **yes** | yes — the backlight baseline exactly: `no-signature`, `invalid-url Source0`, `no-%check-section`, `no-manual-page-for-binary` |
 | `mdns` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` — and **without** `no-%check-section`, which it is the first host package here to clear |
 | `overlay-sync` 1.2.0 | yes | yes | **yes**, `%check` 19/19 | `no-manual-page-for-binary` only, past the usual `no-signature` |
-| `keystored` 1.0.0 | yes | yes | **yes**, `--prebuilt` only; `%check` 11 passed, 2 skipped (cross-file checks whose files are not in its tarball) | the `wifid` baseline exactly: `no-manual-page-for-binary`, `unstripped-binary-or-object` |
+| `keystored` 1.0.1 | yes | yes | **yes**, `--prebuilt` only; `%check` 11 passed, 2 skipped (cross-file checks whose files are not in its tarball); 1.0.1's findings identical to 1.0.0's | the `wifid` baseline exactly: `no-manual-page-for-binary`, `unstripped-binary-or-object` |
 | `strongbox` 1.0.0 | yes | yes | **yes** | clean once added to the rc file's derive-row `only-non-binary-in-usr-lib` filter, beside `camera-hal` and `battery` |
 
 ### The seven host packages added 2026-09-27
@@ -467,8 +467,10 @@ are release-time work. Everything else rpmlint said is filtered with a written r
 
 Two new modifications and a keystone bump, all built on the dev box and **installed on bigtab01 the
 same evening** in one transaction (`uninstall waydroid-ext-overlay-sync` plus three `--install`s),
-booted and verified: the auth test passed 32/32 against the packaged daemon.
-[docs/75](../docs/75-keystore-packaging.md) is the record.
+booted and verified: the auth test passed 32/32 against the packaged daemon. `keystored` 1.0.1
+followed that evening, replacing the layered 1.0.0 in one `uninstall` plus `--install` transaction.
+It moves the boot-time TPM check into the session wait, because swtpm's `Type=simple` unit let the
+daemon ask before swtpm listened. [docs/75](../docs/75-keystore-packaging.md) is the record.
 
 - **`keystored`** — `waydroid-keystored`, its unit (enabled, `unconfined_t`, `PrivateTmp`) and
   `/etc/waydroid-keystored.conf` (`%config(noreplace)`, shipping `--accept-unsigned-auth-tokens`).

@@ -55,9 +55,11 @@ installed the same day**: `waydroid-ext-keystored` 1.0.0, `waydroid-ext-strongbo
 daemon came up as `unconfined_t`, sat silent at the greeter behind its `GetSession` gate, registered
 64 ms before keystore2 asked, and `bin/keystore-auth-test.sh` passed **32/32** against it
 ([75](75-keystore-packaging.md), *Deployed on bigtab01*). The hand deployment removed itself at the
-logout before the install. **Next, small:** `keystored` 1.0.1, checking the TPM after the session gate
-rather than before, because at boot it runs before swtpm listens and logs a false `TPM not ready`
-every time. The feature XML is the owner's policy call. **Android here has the owner's Pattern lock**:
+logout before the install. **`keystored` 1.0.1 followed that evening**: at boot the 1.0.0 daemon
+checked the TPM before swtpm listened and logged a false `TPM not ready`, so 1.0.1 checks from
+inside the session wait instead. Booted at 20:10, it logged `TPM ready` on the wait's first try with
+no TCTI errors, registered 143 ms before keystore2 asked, and passed the auth test 32/32 again
+([75](75-keystore-packaging.md)). The feature XML is the owner's policy call. **Android here has the owner's Pattern lock**:
 `bin/keystore-auth-test.sh` detects it, never touches it, and needs the owner at the machine to unlock
 when the screen re-locks. To test a new daemon build now, use a drop-in on `waydroid-keystored.service`
 between sessions: [hand-deploy.sh](../artifacts/keystore/hand-deploy.sh) refuses on a host with the
@@ -527,7 +529,7 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 |---|---|
 | **`waydroid-ext-swtpm` 1.0.0** (layered 2026-10-19; uninstalled and rebooted out 2026-10-22, reinstalled with `--apply-live` the same evening — durable at the next boot) | `waydroid-swtpm.service` running swtpm on `/run/swtpm-waydroid/sock`, enabled from `/usr/lib`. Remove with `rpm-ostree uninstall waydroid-ext-swtpm`; its swtpm dependencies go with it. See [71](71-swtpm-host.md) |
 | **`/var/lib/swtpm-waydroid/`** | the software TPM's state and seeds, `tss` 0700. **Not owned by any package and kept on uninstall on purpose** — deleting it discards every key ever sealed under it. Deleted with the 2026-10-22 cleanup and recreated by the reinstall; it now holds the keystore's persistent primary at `0x81010020`, under which the StrongBox keys of 2026-10-22's tests were made — discarding it invalidates those test keys and nothing else |
-| **`waydroid-ext-keystored` 1.0.0**, **`waydroid-ext-strongbox` 1.0.0**, **`waydroid-ext-overlay-sync` 1.2.0** (layered 2026-10-23, booted 18:40 into `0672d3b2…`; the previous deployment `9394b8cc…` is the rollback) | `waydroid-keystored.service` enabled from `/usr/lib`, running `--accept-unsigned-auth-tokens` from `/etc/waydroid-keystored.conf`; the strongbox manifest is a derive row, `--verify` exit 0. Remove both together with `rpm-ostree uninstall waydroid-ext-strongbox waydroid-ext-keystored`: the manifest must never outlive the daemon. See [75](75-keystore-packaging.md) |
+| **`waydroid-ext-keystored` 1.0.1**, **`waydroid-ext-strongbox` 1.0.0**, **`waydroid-ext-overlay-sync` 1.2.0** (layered 2026-10-23, booted 18:40 into `0672d3b2…`; `keystored` 1.0.1 booted 20:10 into `13a2e3a9…`, and `0672d3b2…`, the 1.0.0 deployment, is the rollback) | `waydroid-keystored.service` enabled from `/usr/lib`, running `--accept-unsigned-auth-tokens` from `/etc/waydroid-keystored.conf`; the strongbox manifest is a derive row, `--verify` exit 0. Remove both together with `rpm-ostree uninstall waydroid-ext-strongbox waydroid-ext-keystored`: the manifest must never outlive the daemon. See [75](75-keystore-packaging.md) |
 | the **stage-5** hand deployment ([74](74-keystore-stage5-auth.md)) | **gone**: hand-deploy.sh removed its manifest, `/usr/local/bin/waydroid-keystored` and its boot guard at the 2026-10-23 18:32 logout, then exited. Left behind and inert: `/var/tmp/wks-deploy/` (the script and a copy of the old daemon), its log `/var/tmp/waydroid-keystored.log`, and the three RPMs in `/var/tmp/keystore-rpms/` |
 | Keystore Probe (`com.systemhalted.keystoreprobe`) in Android | installed 2026-10-22, updated 2026-10-23 with the `auth-*` modes, like the other probes; `pm uninstall` to remove |
 | **`/var`** | `chown root:root` on 2026-10-19 at the owner's direction; it had been `jmelanso:jmelanso`, which broke every `--apply-live`'s tmpfiles step ([packaging/README.md](../packaging/README.md), fifth and sixth migrations) |
