@@ -150,7 +150,7 @@ jobs:
         # `|| true` against waydroid-ext.rpmlintrc's accepted baseline.
         run: packaging/build-mod.sh --lint --all
       - name: Install / edit / uninstall test
-        run: packaging/test-install.sh --all
+        run: packaging/test-install.sh --selftest --all
       - name: systemd-analyze verify every shipped unit
         # Against the units as packaged, placeholders substituted; see the
         # script header for what is stubbed and why.
