@@ -25,7 +25,7 @@
 # drops the session back to the SDDM greeter and needs someone at the machine, so
 # it prints the restart and lets a human choose. --apply opts in.
 
-VERSION=1.1.0
+VERSION=1.2.0
 RELEASE=1
 KIND=host
 
@@ -103,9 +103,23 @@ Nothing here restarts the container. On a kiosk host that ends the running
 session and drops back to the greeter, so a change that needs a restart to
 reach Android says so and stops."
 
+# selftest.sh and stage-overlay.sh are here for %check only. The selftest runs
+# rows the way a .mod writes them through stage-overlay.sh -- which validates
+# them at every overlay component's build -- and the manifest it writes through
+# the reconciler, so the two halves of the derive format are tested together.
 SOURCES="artifacts/overlay-manager/install.sh
+artifacts/overlay-manager/selftest.sh
 artifacts/overlay-manager/waydroid-overlay-sync
-artifacts/overlay-manager/waydroid-overlay-sync.service"
+artifacts/overlay-manager/waydroid-overlay-sync.service
+packaging/stage-overlay.sh"
+
+# The derive path end to end, offline, with a stub debugfs serving a stand-in
+# image: replacements, insertions, the order that keeps stock offsets valid, both
+# refusals, --verify and convergence. The first %check this package has had; the
+# derive format had been verified only by living on bigtab01 until 1.2.0
+# extended it.
+CHECK='%check
+sh artifacts/overlay-manager/selftest.sh'
 
 # UNITDIR is passed explicitly so the unit lands in %{_unitdir} rather than the
 # installer's /etc default. A packaged unit belongs in /usr/lib/systemd/system;

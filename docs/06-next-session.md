@@ -7,14 +7,83 @@ second, separate camera fix (lens facing) plus the `Fence::waitForever` stall.
 [12-camera](12-v4l2-frame-errors.md) records two intermittent camera faults that could NOT be
 reproduced, and the long list of causes they rule out.
 
-**The next session is not about bigtab01.** Opened 2026-10-06: a second host — a Dell Inspiron,
-Comet Lake-U, Fedora Silverblue 44, GNOME, Waydroid 1.6.3 — is being set up, and the owner is wiping
-it and installing WayDroid-ATV's Android 16 images to debug a boot failure whose symptom was not
-recorded the first time. Start from [63-second-host-and-android-16.md](63-second-host-and-android-16.md):
-it has the package-portability verdict (22 of 25 move, 16 unchanged; 23 of 26 and 17 unchanged
-since `mdns` was packaged on 2026-10-06), the three documented A16
-failure modes with which ones to expect on an Intel Gen9.5 iGPU, and a six-step checklist for the
-attempt. Nothing in it has been run on that machine.
+**The next session is not about bigtab01.** Opened 2026-10-06 against a Dell Inspiron, and
+**retargeted on 2026-10-08 to `vidiot01`**, which is where the owner actually deployed WayDroid-ATV's
+Android 16 **20260803** images (`/etc/waydroid-extra/images`).
+**Start from [64-vidiot01-atv-host.md](64-vidiot01-atv-host.md)**, then
+[63-second-host-and-android-16.md](63-second-host-and-android-16.md) for the package-portability
+verdict (22 of 25 move, 16 unchanged; 23 of 26 and 17 unchanged since `mdns` was packaged on
+2026-10-06), the three documented A16 failure modes, and the six-step attempt checklist — 63 is
+annotated where `vidiot01` supersedes it.
+
+64 has `vidiot01` as *measured*, three pre-flight findings that would each have cost a boot
+(`waydroid0` missing; `waydroid upgrade` refused; the inverted `card0`/`card1` on a hybrid GPU), and
+**the answers to 63's two open questions, obtained by opening the image rather than booting it**:
+`wifid` is a re-measurement, `sensord` is a rewrite. It also re-measures the three image-pinned
+packages into three different situations rather than one — only `battery`'s target binary is
+genuinely gone.
+
+**`vidiot01` is not expendable**: it hosts this dev container on host networking *and* the `vidiot`
+AP that other devices use, so NetworkManager there is off-limits.
+
+**Android 16 now boots there.** The A/B pair ran 2026-10-08 with the host Enforcing:
+bare → no boot in 240 s and 657 `spc_t → container_runtime_t` binder denials; with
+[`artifacts/binder/waydroid_binder.cil`](../artifacts/binder/waydroid_binder.cil) loaded → booted in
+**18 seconds**, zero denials, setup wizard on screen. **The module is verified.** Fedora's own
+`waydroid` policy module has the same gap, so the next piece of work on it is upstream, not local.
+
+**And the GUI works there, verified 2026-10-08** — a real `xdg_toplevel` titled `Waydroid`, which
+Mutter configures maximised at 1920x1048, with frames confirmed on screen by `wp_presentation_feedback`
+(298 presented / 0 discarded in 5 s). Beware the host's blanked panel: asleep, the same healthy-looking
+window reports 0 presented / 380 discarded. 64 has the detail and the traps.
+
+**Where to pick up:** the setup wizard has not been completed, so nothing past first boot has been
+exercised — no launcher, no app, and nothing asked of camera, audio, sensors or Wi-Fi. The cheapest
+next measurements are the generated **Vulkan** props (gralloc is now measured:
+`ro.hardware.gralloc=minigbm`, so the `gbm_mesa` wrapper and the [08](08-camera-fixed.md) bug are off
+the active path), `idle-delay 0` plus a deliberate screen blank to test whether ATV #37's composer
+crash is really gone — the *wake* direction has now been survived by accident, the *blank* direction
+has not been tried — and re-deriving `camera-hal`'s offset against the A16 binary, whose new stock
+hash is recorded in 64.
+
+**bigtab01, 2026-10-23: goal 10's stage 5 works in Android.** A StrongBox key bound to the lockscreen
+signed one second after the owner's real pattern unlock, and refused both before it and 18 s after.
+keystore2 negotiated the shared HMAC key with the TEE *and* the StrongBox and found them in agreement.
+See [74](74-keystore-stage5-auth.md), whose *Still not done* list is current. **Packaged and
+installed the same day**: `waydroid-ext-keystored` 1.0.0, `waydroid-ext-strongbox` 1.0.0 and
+`waydroid-ext-overlay-sync` 1.2.0, layered in one transaction and booted at 18:40. The packaged
+daemon came up as `unconfined_t`, sat silent at the greeter behind its `GetSession` gate, registered
+64 ms before keystore2 asked, and `bin/keystore-auth-test.sh` passed **32/32** against it
+([75](75-keystore-packaging.md), *Deployed on bigtab01*). The hand deployment removed itself at the
+logout before the install. **`keystored` 1.0.1 followed that evening**: at boot the 1.0.0 daemon
+checked the TPM before swtpm listened and logged a false `TPM not ready`, so 1.0.1 checks from
+inside the session wait instead. Booted at 20:10, it logged `TPM ready` on the wait's first try with
+no TCTI errors, registered 143 ms before keystore2 asked, and passed the auth test 32/32 again
+([75](75-keystore-packaging.md)). The feature XML is the owner's policy call. **Android here has the owner's Pattern lock**:
+`bin/keystore-auth-test.sh` detects it, never touches it, and needs the owner at the machine to unlock
+when the screen re-locks. To test a new daemon build now, use a drop-in on `waydroid-keystored.service`
+between sessions: [hand-deploy.sh](../artifacts/keystore/hand-deploy.sh) refuses on a host with the
+packages.
+
+**bigtab01, 2026-10-22: goal 10's StrongBox works from an app.** Stages 1–4 of
+[65](65-tpm-keystore.md) are done — an ordinary app gets EC P-256 and AES keys at security level
+STRONGBOX, backed by swtpm, 20/20 in [keystore-probe/](../keystore-probe); see
+[73](73-keystore-stage1-engine.md). `waydroid-ext-swtpm` was uninstalled that afternoon and
+**reinstalled live** that evening; it becomes durable at the next boot.
+
+**bigtab01, 2026-10-19: goal 10's stage 0 is done and the owner chose to stop there.**
+`waydroid-ext-swtpm` is installed and verified — [71](71-swtpm-host.md) — and Android sees nothing,
+because the keystore HAL that would consume it is stages 1–5. Four things changed on that machine the
+same day, and each is worth knowing before touching it: **Secure Boot is on** (so the kernel is in
+`lockdown=integrity`: hibernation refused, `/dev/port` blocked — still no TPM device); **`/var` is
+`root:root`** again, which closes the fifth migration's tmpfiles fault; the long-standing
+**`InterruptedLiveCommit` is gone**, by reboot; and **`waydroid-ext-mdns` turned out not to be
+installed** although every record said it was — lost with its staged deployment when a 2026-10-12
+suspend never resumed; its avahi config is still in force, its reconciler is not. **It was reinstalled
+and verified the same evening** — `waydroid-mdns-reflector --verify` exits 0
+([packaging/README.md](../packaging/README.md), *Recounted 2026-10-19*). avahi joins `waydroid0`
+by hotplug when a session creates it, measured the same evening, which closes
+[45](45-mdns-reflection.md)'s last reboot question.
 
 ## One-paragraph state
 
@@ -124,6 +193,30 @@ which needs the toggle, even though the scan data behind it is now real.
 Side-quests from the 2026-09-06 sessions, none of them on the AGENTS.md goal list. Each is
 scoped and cheap to resume; none is blocking.
 
+### An upstream kernel divide-by-zero, found 2026-10-15, to report when convenient
+
+Writing any value to an `in_*_hysteresis` attribute whose HID unit exponent is −7 or −8 takes a
+kernel divide error in `convert_to_vtf_format()` — two of the sixteen exponents the HID spec
+allows, no malformed descriptor needed. Still present in mainline at HEAD `2f2f7eeef8b0`
+(2026-10-15); the file's last substantive change is from 2021. On bigtab01 it is `dev_rotation`'s
+`in_rot_hysteresis`, and it was hit five times before the cause was understood.
+
+Root-only, kills the writing task, machine survives (`panic_on_oops = 0` here). Fully written up
+in **[68](68-hid-sensor-hysteresis-oops.md)** with a userspace reproduction that needs no hardware
+([`artifacts/hid-sensor-oops/repro.c`](../artifacts/hid-sensor-oops/repro.c)), the proposed fix,
+and the maintainer addresses.
+
+**Parked at the owner's request, 2026-10-15** — documented now, submitted later. Three things to do
+first, in order:
+
+1. **Search `lore.kernel.org` for a duplicate.** This was attempted and returned nothing parseable,
+   so "unreported" is *not* established. Unfixed is established; that is a different claim.
+2. Build the proposed fix against a kernel tree. It has never been compiled.
+3. Decide whether to send it at all, and under whose `Signed-off-by` — the DCO is a provenance
+   assertion only the author can make. The kernel takes patches by email only; `torvalds/linux` on
+   GitHub has issues disabled and its `/pulls` endpoint 404s, both verified, so `gh` is no help.
+   No SMTP identity is configured on the dev box.
+
 ### Bluetooth as a wake source — **deferred at the owner's request, 2026-09-06**
 
 The wish is to wake the laptop with the HP bluetooth keyboard. The hardware looks capable and
@@ -226,6 +319,27 @@ with `packaging/build-mod.sh --lint <name>`.
   [docs/53](53-release-readiness.md).
 - **Write `BUILDING.md`.** Neither compiled daemon can currently be built by anyone who cannot
   ssh to bigtab01.
+- **Two new goals, added 2026-10-10 at the owner's request and scoped the same day — goals 10 and
+  11.** Four items as asked for, two components as scoped, because each pair shares a backend seam.
+  **Goal 10, a TPM behind Android's keystore** ([65](65-tpm-keystore.md)): nothing in Android speaks
+  TPM 2.0, so the only consumer is the keystore HAL and the HAL is the whole project — swtpm on
+  bigtab01 is the development rig for vidiot01's **Intel PTT fTPM**, which is the real thing.
+  bigtab01 does have a **TPM 1.2**, and it is invisible to the OS: no TPM device in any of its ten
+  ACPI tables and `ima: No TPM chip found` in the journal, i.e. hidden in firmware setup. **The
+  first action on this item is five minutes in that firmware**, hoping for a 1.2 → 2.0 mode switch;
+  the 1.2 can only ever serve the seal-and-wrap role, which is why the backend contract should be
+  written narrowly enough for it and the 1.2 implementation left unwritten. Recommended shape is a
+  `strongbox` instance rather than a replacement for `default`; attestation is impossible and is an
+  explicit non-goal; and vidiot01's TPM already holds four persistent objects, so **never
+  `tpm2_clear` it**. **Goal 11, a fingerprint HAL fed by libfprint** ([66](66-fingerprint-hal.md)):
+  on **both** images the biometric framework is running with zero sensors and no feature XML, which
+  is stage 0 all over again. Stock libfprint 1.94.100 knows **neither** reader, but the owner's work
+  on it (`../libfprint-goodix-538d-redhat`) is a packaging project with CI in which the Goodix fork
+  already builds and tests, so that half is an install; the CS9711 needs a spec. The readers moved
+  the plan: the Goodix is integrated in a personal laptop and cannot travel, the **CS9711 is
+  external USB**, and the Android side cannot tell them apart — so **the CS9711 is the reader for
+  both Waydroid hosts** and the A16 half needs no Goodix. The remaining question for the owner is
+  bigtab01's firmware TPM setting.
 - **Enforcement is already in place for signed commits** — `bin/check-signed-commits.sh`, wired
   to `.git/hooks/pre-push` and to [lefthook.yml](../lefthook.yml). All 94 commits on master
   already pass. Note `lefthook install` replaces the native shim with lefthook's dispatcher.
@@ -320,8 +434,10 @@ Four things to know before touching it:
   `waydroid-wifid.service` handles it. **`bin/wifi-test.sh` checks this first** — see
   [35](35-wifi-stage5.md).
 
-- **An overlay file is not deployed until the container *service* restarts.**
-  `waydroid container restart` does nothing for it — see [32](32-wifi-stage3.md). This already bit a
+- **An overlay file is not deployed until the Waydroid *session* restarts** — on bigtab01, log out
+  of the `waydroid-cage` session at SDDM and back in. `waydroid container restart` does nothing for
+  it ([32](32-wifi-stage3.md)), and `systemctl restart waydroid-container.service` ends the session,
+  applies nothing and still reports success ([AGENTS.md](../AGENTS.md)). This already bit a
   Stage 0 file that had not been in effect for a day without anyone noticing. Verify from inside the
   container, not by listing the overlay directory.
 
@@ -411,6 +527,12 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 ## State left on bigtab01
 | Item | State |
 |---|---|
+| **`waydroid-ext-swtpm` 1.0.0** (layered 2026-10-19; uninstalled and rebooted out 2026-10-22, reinstalled with `--apply-live` the same evening — durable at the next boot) | `waydroid-swtpm.service` running swtpm on `/run/swtpm-waydroid/sock`, enabled from `/usr/lib`. Remove with `rpm-ostree uninstall waydroid-ext-swtpm`; its swtpm dependencies go with it. See [71](71-swtpm-host.md) |
+| **`/var/lib/swtpm-waydroid/`** | the software TPM's state and seeds, `tss` 0700. **Not owned by any package and kept on uninstall on purpose** — deleting it discards every key ever sealed under it. Deleted with the 2026-10-22 cleanup and recreated by the reinstall; it now holds the keystore's persistent primary at `0x81010020`, under which the StrongBox keys of 2026-10-22's tests were made — discarding it invalidates those test keys and nothing else |
+| **`waydroid-ext-keystored` 1.0.1**, **`waydroid-ext-strongbox` 1.0.0**, **`waydroid-ext-overlay-sync` 1.2.0** (layered 2026-10-23, booted 18:40 into `0672d3b2…`; `keystored` 1.0.1 booted 20:10 into `13a2e3a9…`, and `0672d3b2…`, the 1.0.0 deployment, is the rollback). **The repo is a release ahead and that is fine**: `keystored` 1.0.1-2 differs from the installed 1.0.1-1 only in a build dependency, as do `wifid` 1.1.2-2 and `sensord` 1.0.5-2, and `btd` 1.1.1's one change is a fallback Fedora 44 never takes ([53](53-release-readiness.md), *It first ran*); none needs redeploying | `waydroid-keystored.service` enabled from `/usr/lib`, running `--accept-unsigned-auth-tokens` from `/etc/waydroid-keystored.conf`; the strongbox manifest is a derive row, `--verify` exit 0. Remove both together with `rpm-ostree uninstall waydroid-ext-strongbox waydroid-ext-keystored`: the manifest must never outlive the daemon. See [75](75-keystore-packaging.md) |
+| the **stage-5** hand deployment ([74](74-keystore-stage5-auth.md)) | **gone**: hand-deploy.sh removed its manifest, `/usr/local/bin/waydroid-keystored` and its boot guard at the 2026-10-23 18:32 logout, then exited. Left behind and inert: `/var/tmp/wks-deploy/` (the script and a copy of the old daemon), its log `/var/tmp/waydroid-keystored.log`, and the three RPMs in `/var/tmp/keystore-rpms/` |
+| Keystore Probe (`com.systemhalted.keystoreprobe`) in Android | installed 2026-10-22, updated 2026-10-23 with the `auth-*` modes, like the other probes; `pm uninstall` to remove |
+| **`/var`** | `chown root:root` on 2026-10-19 at the owner's direction; it had been `jmelanso:jmelanso`, which broke every `--apply-live`'s tmpfiles step ([packaging/README.md](../packaging/README.md), fifth and sixth migrations) |
 | **`/usr/local/bin/waydroid-sync`**, **`waydroid-bt-restore`** | periodic sync-window scripts, mode `0755`. See [17](17-hybrid-sleep.md). Delete to revert |
 | `/etc/systemd/system-sleep/50-waydroid-sync` | **REMOVED 2026-09-07** — it had never run. systemd 259 scans only `/usr/lib/systemd/system-sleep`, empty and read-only here; measured, 9 suspends in one boot and 0 hook runs, and `/run/waydroid-sync.cycle` had never existed. Replaced by `waydroid-sync-sleep.service` below. `/etc/systemd/system-sleep/` is now **empty and must stay that way** — anything put there is silently dead. See [27](27-android-power-button.md) |
 | **`/etc/systemd/system/waydroid-sync.{timer,service}`** | installed but the timer is **DISABLED**. Its guards were verified to refuse action, but the path where it *acts* has never run. Enable with `sudo systemctl enable --now waydroid-sync.timer` once tested |
@@ -448,7 +570,9 @@ Goal 1 is complete for the stated purpose, but these were never exercised
 | `/var/lib/waydroid/waydroid-wifid.pid` | the wifi daemon's single-instance lock. Recreated on demand, safe to delete |
 | `/var/lib/waydroid/waydroid-wifi-sync.state` | which networks the sync has confirmed present in Android. **Deleting it is safe** — it only ever licenses a deletion, so losing it makes the next run more conservative, not less |
 | `vidiot (Waydroid)` NM profile | the daemon's projection of an Android-driven connection: pinned to `wlp0s20u1`, `never-default`, `route-metric 1000`, UUID derived from the SSID. Recreated on the next connect if deleted. **Not** the host's own `vidiot` profile |
-| **`/usr/local/bin/waydroid-sensord`** | **the sensors fix**, 663 KB, mode `0755`. `/usr/local` is a symlink to `/var/usrlocal`, so no layering and no reboot. **Delete to revert** — waydroid then restores `waydroid.stub_sensors_hal=1` by itself |
+| ~~`/usr/local/bin/waydroid-sensord`~~ | **GONE, and deliberately — it is now a packaged RPM at `/usr/bin/waydroid-sensord`** (`waydroid-ext-sensord`, **1.0.4-1** as of 2026-10-15). The by-hand copy was deleted as part of packaging it, and it must stay deleted: `container_manager.py` searches `PATH=/usr/local/bin:/usr/bin`, so anything left there silently shadows the package. Check provenance with `rpm -qf $(readlink -f /proc/<pid>/exe)`. See [67](67-sensor-poll-cost.md) |
+| **`/usr/local/bin/waydroid-sensord-sample`** + **`/etc/systemd/system/waydroid-sensord-sample.{service,timer}`** | **enabled** via a `timers.target.wants/` symlink; samples the daemon's CPU, RSS, thread and descriptor counts every 10 minutes into `/var/log/waydroid-sensord-stability.log`, with state in `/var/lib/waydroid-sensord-sample.state`. Added 2026-10-15 to answer whether the held IIO descriptors leak — they do not, over 10 hours. `sudo sh artifacts/sensord-stability/install.sh --uninstall` removes all of it and keeps the log. Source in [artifacts/sensord-stability/](../artifacts/sensord-stability/) |
+| `~jmelanso/sensord-stability.sh`, `~jmelanso/sensord-stability.log` | the hand-run `sleep 600` loop the timer above replaced. **Stopped**; nine lines of log left in place, not continued. Safe to delete |
 | `/var/lib/waydroid/waydroid-sensord.pid` | the daemon's single-instance lock. Recreated on demand, safe to delete |
 | `/etc/waydroid-sensors.conf` | **not installed.** Optional; documented sample in [artifacts/sensors/](../artifacts/sensors/) |
 | **`overlay/vendor/bin/hw/android.hardware.health@2.0-service.waydroid`** | **patched health HAL — this is the battery fix**, mode `0755`. Delete to revert |
@@ -512,6 +636,7 @@ container host, **not** to this environment — it is not the target kernel for 
 | Present | `gcc`, `make`, `ld`, **binutils** (`readelf`, `objdump`, `nm`, `strings`), `curl`, `wget`, `openssl`, `xxd` |
 | Missing | `clang` (the NDK brings its own), `rsync`, `rpm2cpio`, `cpio`, `bison`, `flex`, `bc` |
 | Added 2026-09-06 | `cmake`, `libglib2.0-dev`, `pkg-config` (for `sensors/build.sh`). **`python3` is present** — the earlier note here saying otherwise was wrong |
+| Added 2026-10-10 | `swtpm` 0.7.1 and `tpm2-tools` 5.7, for goal 10. Debian's `tpm2-tss` ships **`tcti-swtpm`**, so a full software TPM 2.0 runs here with no hardware and no privilege — demonstrated, see [65](65-tpm-keystore.md). Note `/dev/tpmrm0` *is* passed into this container from `vidiot01` but is unusable (`root:tss` 0660, and `coder` is not in that group) |
 | **`apt` + passwordless `sudo`** | **available** — install what you need here rather than on bigtab01 |
 | `docker` | **unavailable by design.** This box *is* a Docker container and docker-in-docker is not set up, so the `/home/coder/bin/docker` shim fails with *"No suitable executable found"*. **Do not try to fix it** — plan without a container runtime |
 

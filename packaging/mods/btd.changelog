@@ -1,3 +1,9 @@
+* Fri Oct 23 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.1-1
+- Fall back to GLib.unix_signal_add when GLibUnix exists but has no
+  signal_add, as on Ubuntu 24.04, which raises AttributeError rather than the
+  ImportError the shim caught. It failed the daemon's import in CI's first run.
+  Fedora 44 takes the GLibUnix path and is unaffected.
+
 * Wed Sep 30 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
 - API versioning (docs/58). This daemon now speaks a declared range of wire
   formats -- API 1 to 1 today -- and agrees one with the app at auth instead of

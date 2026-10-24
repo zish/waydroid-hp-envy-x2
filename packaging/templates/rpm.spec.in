@@ -18,6 +18,7 @@ Source0:        %{name}-%{version}.tar.gz
 @REQUIRES@
 @RECOMMENDS@
 @CONFLICTS@
+@ANDROID@
 
 %description
 @DESCRIPTION@

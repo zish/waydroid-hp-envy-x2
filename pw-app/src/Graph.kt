@@ -121,11 +121,16 @@ class Graph {
     fun metadata(name: String): JSONObject? =
         of("metadata").firstOrNull { it.optString("name") == name }
 
-    /** A `settings` value, or null. The daemon projects them as they arrive. */
+    /**
+     * A `settings` value, or null. The daemon projects them as they arrive.
+     *
+     * Through `text`, like every other projected string: a key present with a
+     * JSON null value used to come back as the four characters "null", which
+     * the quantum row would have shown as the quantum.
+     */
     fun setting(key: String): String? {
         val entries = metadata("settings")?.optJSONObject("entries") ?: return null
-        if (!entries.has(key)) return null
-        return entries.opt(key)?.toString()
+        return text(entries, key)
     }
 
     /** Which node this port belongs to, for labelling a link end. */

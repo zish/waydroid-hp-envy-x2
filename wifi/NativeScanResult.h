@@ -46,6 +46,7 @@
 
 #pragma once
 
+#include "BeaconIes.h"
 #include "WifiBackend.h"
 
 #include <gbinder.h>
@@ -55,15 +56,6 @@
 
 namespace waydroid {
 namespace wifi {
-
-/* CLOCK_BOOTTIME in microseconds -- the clock Android compares tsf against. */
-uint64_t boottimeUsec();
-
-/* The 802.11 capability field, from what the host knows about the BSS. */
-uint16_t beaconCapability(const Bss& bss);
-
-/* A beacon IE blob describing this BSS: SSID plus RSN/WPA if it is secured. */
-std::vector<uint8_t> buildBeaconIes(const Bss& bss);
 
 /*
  * Write NativeScanResult[].  Results whose SSID cannot be represented are

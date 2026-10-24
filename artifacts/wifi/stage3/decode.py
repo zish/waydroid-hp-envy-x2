@@ -64,7 +64,7 @@ def cap_string(ies, beacon_cap):
                 mfpr = bool(p[4] & (1 << 6)); mfpc = bool(p[4] & (1 << 7))
     out = ""
     if not protos and privacy: out += "[WEP]"
-    for name, akm, pw, grp, caps, gmc in protos:
+    for name, akm, pw, _grp, _caps, _gmc in protos:
         s = "[" + name + "".join(("-" if j == 0 else "+") + a for j, a in enumerate(akm)) \
                 + "".join(("-" if j == 0 else "+") + c for j, c in enumerate(pw)) + "]"
         wpa2 = ""

@@ -204,6 +204,46 @@ static gboolean sensor_poll_tick(gpointer user_data)
     return G_SOURCE_CONTINUE;
 }
 
+/*
+ * Arm, re-arm or stop the poll timer to match what is enabled right now.
+ *
+ * This used to be a single g_timeout_add() in the constructor that nothing
+ * ever removed, so the daemon woke 20 times a second for the life of the
+ * session whether or not anything was subscribed -- and always at that one
+ * rate, however slowly the hub published or however slowly Android had asked
+ * to be fed.  Now the period follows the shortest interval any enabled sensor
+ * wants, and there is no timer at all when nothing is enabled.
+ *
+ * Call sites are activate() and batch(), both of which run on an hwbinder
+ * thread while the timer dispatches on the main thread.  That is safe:
+ * attaching and destroying a GSource is serialised by the GMainContext's own
+ * lock, destroying a source that is mid-dispatch is defined behaviour, and
+ * attaching one wakes a context that is blocked in g_main_loop_run -- which is
+ * exactly how a poll() blocked with nothing enabled gets going again once
+ * Android activates its first sensor.
+ */
+static void sensor_device_retune_timer(SensorDevice *dev)
+{
+    SensorIIO *iio = dev->mIioDevice;
+    int want = iio->AnyEnabled() ? iio->TickIntervalMs() : 0;
+
+    if (want == dev->poll_tick_ms)
+        return;
+
+    if (dev->poll_source) {
+        g_source_remove(dev->poll_source);
+        dev->poll_source = 0;
+    }
+    dev->poll_tick_ms = want;
+
+    if (want > 0) {
+        dev->poll_source = g_timeout_add(want, sensor_poll_tick, dev);
+        GDEBUG("poll timer armed at %d ms", want);
+    } else {
+        GDEBUG("nothing enabled, poll timer stopped");
+    }
+}
+
 Sensors::Sensors()
     : mSensorDevice(nullptr)
 {
@@ -223,11 +263,12 @@ Sensors::Sensors()
     pthread_mutex_init(&mSensorDevice->lock, NULL);
     mSensorDevice->loop = g_main_loop_new(NULL, TRUE);
 
-    /* The reader runs on the default GMainContext.  poll() blocks by running
-     * a nested main loop on that same context, so this timeout keeps firing
-     * while poll() waits -- which is what wakes it. */
-    g_timeout_add(mSensorDevice->mIioDevice->PollIntervalMs(),
-                  sensor_poll_tick, mSensorDevice);
+    /* No timer yet -- activate() arms one when Android subscribes to its first
+     * sensor.  The reader runs on the default GMainContext, and poll() blocks
+     * by running a nested main loop on that same context, so once armed the
+     * timeout keeps firing while poll() waits, which is what wakes it. */
+    mSensorDevice->poll_source = 0;
+    mSensorDevice->poll_tick_ms = 0;
 }
 
 /* Fill in the four hidl_string fields of a sensor_t from string literals. */
@@ -264,9 +305,16 @@ std::vector<sensor_t> Sensors::getSensorsList()
     SensorIIO *iio = mSensorDevice->mIioDevice;
 
     /* minDelay is the fastest rate we can actually serve.  Reading three
-     * sysfs attributes over the hub's i2c link costs 3-7 ms, so promising
-     * more than the configured poll rate would be a lie. */
-    const int32_t min_delay_us = iio->PollIntervalMs() * 1000;
+     * sysfs attributes over the hub's i2c link costs 3-7 ms, so promising more
+     * than the configured poll rate would be a lie.  It is NOT reduced to the
+     * hub's in_<type>_sampling_frequency: polled reads are answered on demand
+     * and return fresh samples past that rate, and advertising the lower number
+     * made Android stop asking for the 66.67 ms it wanted.  SensorIIO's
+     * ReadHubRate carries the measurement.
+     *
+     * max_delay_us has to stay inside the HID function device's runtime-PM
+     * autosuspend window (3000 ms) or a sensor polled at the slowest rate
+     * Android may ask for would go cold between reads. */
     const int32_t max_delay_us = 1000000;
 
     for (int id = 0; id < MAX_NUM_SENSORS; id++) {
@@ -281,7 +329,7 @@ std::vector<sensor_t> Sensors::getSensorsList()
         s.handle = id;
         s.version = 1;
         s.power = 0.5f;
-        s.minDelay = min_delay_us;
+        s.minDelay = iio->MinDelayUs(id);
         s.maxDelay = max_delay_us;
         s.fifoReservedEventCount = 0;
         s.fifoMaxEventCount = 0;
@@ -361,7 +409,35 @@ int Sensors::activate(int32_t handle, bool enabled)
         else
             mSensorDevice->mIioDevice->DisableSensorEvents(handle);
         mSensorDevice->active_sensors = new_sensors;
+        sensor_device_retune_timer(mSensorDevice);
     }
+    pthread_mutex_unlock(&mSensorDevice->lock);
+    return RESULT_OK;
+}
+
+/*
+ * ISensors::batch -- the rate Android wants for one sensor.
+ *
+ * service.cpp used to read the parcel into a throwaway variable and return OK,
+ * so this was a no-op and every client got the one fixed poll rate.  A client
+ * asking SENSOR_DELAY_NORMAL (200 ms) was being served at 50 ms: four HID
+ * round trips per sample it actually wanted.
+ *
+ * maxReportLatencyNs stays ignored on purpose -- getSensorsList advertises
+ * fifoMaxEventCount = 0, so this HAL has told Android it does not batch, and
+ * Android does not ask it to.
+ */
+int Sensors::batch(int32_t handle, int64_t samplingPeriodNs,
+                   int64_t maxReportLatencyNs)
+{
+    if (!ID_CHECK(handle)) {
+        GERR("batch: bad handle ID: %d", handle);
+        return RESULT_BAD_VALUE;
+    }
+
+    pthread_mutex_lock(&mSensorDevice->lock);
+    mSensorDevice->mIioDevice->SetSamplingPeriod(handle, samplingPeriodNs);
+    sensor_device_retune_timer(mSensorDevice);
     pthread_mutex_unlock(&mSensorDevice->lock);
     return RESULT_OK;
 }

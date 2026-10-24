@@ -91,10 +91,14 @@ try:
     # PyGObject 3.56 moved the unix signal helpers out of GLib and deprecated
     # the old names loudly enough to put a warning in the journal on every
     # start. Fedora 44 has the new module; keep working on hosts that do not.
+    # Not having it is two failures, not one: no GLibUnix at all raises
+    # ImportError, and a GLibUnix without signal_add -- Ubuntu 24.04's, the
+    # CI runner's -- raises AttributeError, which the first version of this
+    # missed and which failed CI's first run.
     from gi.repository import GLibUnix
 
     unix_signal_add = GLibUnix.signal_add
-except ImportError:                                    # pragma: no cover
+except (ImportError, AttributeError):                  # pragma: no cover
     unix_signal_add = GLib.unix_signal_add
 
 BLUEZ = "org.bluez"

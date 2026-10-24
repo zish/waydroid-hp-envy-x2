@@ -125,9 +125,11 @@ selftest() {
 		echo conf > %{buildroot}/etc/wetest/keep.conf
 		echo tool > %{buildroot}%{_bindir}/wetest-tool
 		chmod 0755 %{buildroot}%{_bindir}/wetest-tool
+		ln -s ../share/wetest/elsewhere %{buildroot}%{_bindir}/wetest-link
 		%files
 		$cfg
 		%{_bindir}/wetest-tool
+		%{_bindir}/wetest-link
 		EOS
 		rpmbuild --define "_topdir $ft" -bb "$ft/SPECS/$kind.spec" >"$ft/$kind.log" 2>&1 || {
 			echo "selftest: could not build the $kind fixture" >&2
@@ -150,6 +152,10 @@ selftest() {
 	       "FAIL under /etc and not %config"
 	expect "uninstall still exits 0 in both fixtures" \
 	       "ok  uninstall succeeds with edited files present"
+	# wetest-link points into a package that is not installed, as a
+	# -debuginfo package's build-id links do.
+	expect "a symlink into another package counts as installed" \
+	       "ok  every %files entry is on disk"
 
 	if [ "$sfail" != 0 ]; then
 		echo "  the checks below cannot be trusted; full fixture run:" >&2
@@ -170,7 +176,7 @@ mkdir -p "$WORK"
 
 if [ "$SELFTEST" = 1 ]; then
 	printf '== selftest\n'
-	if selftest; then pass=$((pass + 3)); else fail=$((fail + 1)); fi
+	if selftest; then pass=$((pass + 4)); else fail=$((fail + 1)); fi
 	[ -n "$mods" ] || { printf '\ntest-install: selftest only\n'; [ "$fail" = 0 ]; exit $?; }
 fi
 
@@ -212,10 +218,14 @@ for mod in $mods; do
 		continue
 	fi
 
-	# Every path the package claims must actually be on disk.
+	# Every path the package claims must actually be on disk. A symlink is on
+	# disk whatever it points at: -e alone follows it, and a -debuginfo
+	# package's build-id link points at its main package's binary, which is
+	# not in this root -- three false failures in CI's first run (2026-10-23).
 	missing=0
 	for f in $(rpm -qlp "$rpmfile" 2>/dev/null); do
-		[ -e "$R$f" ] || { note "claimed but absent: $f"; missing=$((missing + 1)); }
+		[ -e "$R$f" ] || [ -L "$R$f" ] ||
+			{ note "claimed but absent: $f"; missing=$((missing + 1)); }
 	done
 	[ "$missing" = 0 ] && ok "every %files entry is on disk" \
 	                   || bad "$missing file(s) claimed by %files and not installed"

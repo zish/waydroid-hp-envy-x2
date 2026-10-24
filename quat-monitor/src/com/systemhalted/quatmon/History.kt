@@ -20,14 +20,29 @@ import java.util.zip.GZIPInputStream
 object History {
 
     private const val TAG = "quatmon"
-    private const val FILES = 3
+    // internal rather than private only so quat-monitor/test can reach it.
+    internal const val FILES = 3
 
     fun loadInto(dir: File, ring: Ring) {
+        val (loaded, found) = load(dir, ring) { f, e ->
+            Log.e(TAG, "history: ${f.name} unreadable", e)
+        } ?: return
+        Log.i(TAG, "history: loaded $loaded samples from $found file(s)")
+    }
+
+    /*
+     * Everything loadInto does except the logging, so quat-monitor/test can run
+     * it on the JVM, where android.util.Log is a stub that throws. Returns
+     * (samples loaded, matching files found), or null when there is nothing to
+     * load -- the case in which loadInto logs nothing at all.
+     */
+    internal fun load(dir: File, ring: Ring,
+                      onError: (File, Exception) -> Unit): Pair<Int, Int>? {
         val files = dir.listFiles { f ->
             f.name.startsWith("quat-") &&
                 (f.name.endsWith(".csv") || f.name.endsWith(".csv.gz"))
-        }?.sortedBy { it.name } ?: return
-        if (files.isEmpty()) return
+        }?.sortedBy { it.name } ?: return null
+        if (files.isEmpty()) return null
 
         var loaded = 0
         for (f in files.takeLast(FILES)) {
@@ -42,13 +57,14 @@ object History {
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "history: ${f.name} unreadable", e)
+                onError(f, e)
             }
         }
-        Log.i(TAG, "history: loaded $loaded samples from ${files.size} file(s)")
+        return Pair(loaded, files.size)
     }
 
-    private fun parse(line: String): Sample? {
+    // internal rather than private only so quat-monitor/test can reach it.
+    internal fun parse(line: String): Sample? {
         if (line.isEmpty() || line[0] == 'w') return null      // header
         val c = line.split(',')
         if (c.size < 30) return null

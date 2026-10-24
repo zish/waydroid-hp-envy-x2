@@ -46,7 +46,7 @@ class MainActivity : Activity() {
 
     private fun rule(title: String) {
         emit("")
-        emit("=== $title ".padEnd(72, '='))
+        emit(ruleLine(title))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -171,47 +171,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Runs [f] and renders either its value or the exception it threw. */
-    private fun tryOf(f: () -> Any?): String =
-        try { f()?.toString() ?: "null" } catch (t: Throwable) { "THREW ${describe(t)}" }
-
-    private fun describe(t: Throwable): String {
-        val extra = if (t is MediaDrm.MediaDrmStateException) {
-            " diagnostic=${t.diagnosticInfo}"
-        } else ""
-        return "${t.javaClass.simpleName}: ${t.message}$extra"
-    }
-
-    private fun hex(b: ByteArray?): String {
-        if (b == null) return "null"
-        val sb = StringBuilder("(${b.size} bytes) ")
-        for (i in 0 until minOf(b.size, 32)) sb.append("%02x".format(b[i]))
-        if (b.size > 32) sb.append("...")
-        return sb.toString()
-    }
-
-    private fun hdcp(v: Int) = when (v) {
-        MediaDrm.HDCP_LEVEL_UNKNOWN -> "UNKNOWN"
-        MediaDrm.HDCP_NONE -> "NONE"
-        MediaDrm.HDCP_NO_DIGITAL_OUTPUT -> "NO_DIGITAL_OUTPUT"
-        MediaDrm.HDCP_V1 -> "V1"
-        MediaDrm.HDCP_V2 -> "V2"
-        MediaDrm.HDCP_V2_1 -> "V2_1"
-        MediaDrm.HDCP_V2_2 -> "V2_2"
-        MediaDrm.HDCP_V2_3 -> "V2_3"
-        else -> "?($v)"
-    }
-
-    private fun level(v: Int) = when (v) {
-        MediaDrm.SECURITY_LEVEL_UNKNOWN -> "UNKNOWN"
-        MediaDrm.SECURITY_LEVEL_SW_SECURE_CRYPTO -> "SW_SECURE_CRYPTO (L3)"
-        MediaDrm.SECURITY_LEVEL_SW_SECURE_DECODE -> "SW_SECURE_DECODE"
-        MediaDrm.SECURITY_LEVEL_HW_SECURE_CRYPTO -> "HW_SECURE_CRYPTO"
-        MediaDrm.SECURITY_LEVEL_HW_SECURE_DECODE -> "HW_SECURE_DECODE"
-        MediaDrm.SECURITY_LEVEL_HW_SECURE_ALL -> "HW_SECURE_ALL (L1)"
-        else -> "?($v)"
-    }
-
     /** Also written to disk so build.sh --pull can retrieve it without logcat. */
     private fun save() {
         try {
@@ -227,13 +186,15 @@ class MainActivity : Activity() {
     companion object {
         const val TAG = "DRMPROBE"
 
-        private val SCHEMES = listOf(
+        // internal rather than private only so drm-probe/test can reach it.
+        internal val SCHEMES = listOf(
             "Widevine" to UUID.fromString("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"),
             "ClearKey" to UUID.fromString("e2719d58-a985-b3c9-781a-b030af78d30e"),
             "PlayReady" to UUID.fromString("9a04f079-9840-4286-ab92-e65be0885f95"),
         )
 
-        private val SECURITY_LEVELS = listOf(
+        // internal rather than private only so drm-probe/test can reach it.
+        internal val SECURITY_LEVELS = listOf(
             "SW_SECURE_CRYPTO" to MediaDrm.SECURITY_LEVEL_SW_SECURE_CRYPTO,
             "SW_SECURE_DECODE" to MediaDrm.SECURITY_LEVEL_SW_SECURE_DECODE,
             "HW_SECURE_ALL" to MediaDrm.SECURITY_LEVEL_HW_SECURE_ALL,
@@ -243,7 +204,8 @@ class MainActivity : Activity() {
         // and "description" are the two the framework logged -1010 for. The rest are
         // Widevine's own, and are exactly what a player queries when deciding whether
         // a device is fit to play.
-        private val STRING_PROPS = listOf(
+        // internal rather than private only so drm-probe/test can reach it.
+        internal val STRING_PROPS = listOf(
             "vendor", "version", "description", "algorithms",
             "securityLevel", "systemId", "oemCryptoApiVersion",
             "maxNumberOfSessions", "numberOfOpenSessions",
@@ -254,6 +216,7 @@ class MainActivity : Activity() {
             "resourceRatingTier", "widevineCdmVersion",
         )
 
-        private val BYTE_PROPS = listOf("deviceUniqueId", "provisioningUniqueId", "serviceCertificate")
+        // internal rather than private only so drm-probe/test can reach it.
+        internal val BYTE_PROPS = listOf("deviceUniqueId", "provisioningUniqueId", "serviceCertificate")
     }
 }

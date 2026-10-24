@@ -58,8 +58,9 @@ object Anomaly {
         f.writeText(out.toString())
     }
 
+    // internal rather than private only so quat-monitor/test can reach it.
     @Synchronized
-    private fun setCapture(dir: File, id: Long, name: String) {
+    internal fun setCapture(dir: File, id: Long, name: String) {
         val f = eventsFile(dir)
         if (!f.exists()) return
         val out = StringBuilder()

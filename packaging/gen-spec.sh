@@ -36,11 +36,16 @@ while [ $# -gt 0 ]; do
 		for m in "$MODDIR"/*.mod; do
 			[ -e "$m" ] || continue
 			n=$(basename "$m" .mod)
+			# shellcheck source=/dev/null  # a .mod, chosen at run time
 			s=$(. "$m" >/dev/null 2>&1; printf '%s' "${SUMMARY:-}")
+			# shellcheck source=/dev/null  # a .mod, chosen at run time
 			u=$(. "$m" >/dev/null 2>&1; printf '%s' "${SHIPPED:-}")
+			# shellcheck source=/dev/null  # a .mod, chosen at run time
+			a=$(. "$m" >/dev/null 2>&1; printf '%s' "${ANDROID:-}")
+			[ -n "$a" ] || a="?"
 			case "$u" in
-			[Nn]o|[Ff]alse|0) printf '%-28s %s\n' "$n (unshipped)" "$s" ;;
-			*)                printf '%-28s %s\n' "$n" "$s" ;;
+			[Nn]o|[Ff]alse|0) printf '%-28s %-8s %s\n' "$n (unshipped)" "$a" "$s" ;;
+			*)                printf '%-28s %-8s %s\n' "$n" "$a" "$s" ;;
 			esac
 		done
 		exit 0 ;;
@@ -68,7 +73,7 @@ render_one() {
 	NAME=$mod VERSION=0.0.0 RELEASE=1 SUMMARY="" DESCRIPTION="" LICENSE="GPL-3.0-or-later"
 	ARCH=noarch KIND=host REQUIRES="" RECOMMENDS="" CONFLICTS="" BUILDREQUIRES=""
 	DOCS="" FILES="" PAYLOAD_FILES="" INSTALL="" BUILD="" SCRIPTLETS="" GLOBALS=""
-	CHECK=""
+	CHECK="" ANDROID=""
 	# shellcheck disable=SC1090
 	. "$modfile"
 
@@ -96,6 +101,46 @@ render_one() {
 	deps Requires      "$REQUIRES"      >"$tmp/REQUIRES"
 	deps Recommends    "$RECOMMENDS"    >"$tmp/RECOMMENDS"
 	deps Conflicts     "$CONFLICTS"     >"$tmp/CONFLICTS"
+
+	# --- which Android this modification is known to apply to --------------
+	#
+	# WHY THE FIELD EXISTS. Until 2026-10-09 nothing in a .mod said which
+	# Android image a modification was valid for, and that was tolerable only
+	# while there was one image. There are now two -- bigtab01's LineageOS 20
+	# (Android 13, API 33) and the WayDroid-ATV LineageOS 23.2 build (Android
+	# 16, API 36) -- and they disagree about things modifications depend on:
+	# the A16 vendor image has no HIDL sensors HAL at all, its health HAL is
+	# AIDL rather than HIDL@2.0, and Waydroid moves service_manager_protocol
+	# from aidl3 to aidl6 at API 36. docs/63 and docs/64.
+	#
+	# This is deliberately NOT a branch. docs/47 already answered the same
+	# question for a structurally identical problem -- supporting Debian and
+	# Arch alongside Fedora -- with "one spec set ... the expensive content is
+	# written once, and each format's template is only the part that genuinely
+	# differs". Android version is another axis of the same kind: 17 of 26
+	# modifications are unchanged between the two images, and a branch would
+	# make those seventeen the thing maintained twice.
+	#
+	# VALUES: major Android versions, space separated, or the single word
+	# `any`. `any` is a claim about CONTENT, not about testing -- it means the
+	# modification contains nothing image-specific (host policy, host daemons
+	# that do not speak a versioned Android interface, host configuration), so
+	# the image cannot invalidate it. A modification that has simply not been
+	# tried on an image does not get listed for it.
+	#
+	# UNSET IS HONEST AND IS THE DEFAULT. Most mods predate the field and
+	# classifying them by guesswork would be worse than admitting the gap, so
+	# an unset ANDROID renders NOTHING -- every pre-existing spec is byte for
+	# byte what it was -- and `gen-spec.sh --list` shows it as `?` so the
+	# backlog is visible rather than forgotten.
+	: >"$tmp/ANDROID"
+	for a in $ANDROID; do
+		case "$a" in
+		any|[1-9]|[1-9][0-9]) ;;
+		*) echo "$mod: ANDROID=\"$ANDROID\" has an unusable entry \"$a\"; want major versions or 'any'" >&2; exit 1 ;;
+		esac
+		printf '%-15s %s\n' "Provides:" "waydroid-ext-android($a)"
+	done >"$tmp/ANDROID"
 
 	# --- arch -------------------------------------------------------------
 	#

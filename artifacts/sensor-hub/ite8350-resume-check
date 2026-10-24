@@ -73,6 +73,7 @@ accel_is_stale() {
 	[ -z "$d" ] && return 0                 # gone entirely counts as stale
 	first=$(cat "$d"/in_accel_{x,y,z}_raw 2>/dev/null | tr '\n' ' ')
 	[ -z "$first" ] && return 0
+	# shellcheck disable=SC2034  # a count of fifteen polls; the index is unused
 	for i in $(seq 1 15); do
 		sleep 0.2
 		cur=$(cat "$d"/in_accel_{x,y,z}_raw 2>/dev/null | tr '\n' ' ')

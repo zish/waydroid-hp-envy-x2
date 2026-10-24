@@ -1,0 +1,46 @@
+# Load the waydroid_binder SELinux module, every boot.
+#
+# This exists because the package's %post cannot do it on an rpm-ostree host:
+# scriptlets run against the compose and not against the booted system, so the
+# module never reaches the running machine's policy store. waydroid_backlight
+# was found failing exactly that way on its first real install (2026-09-24) --
+# package present, policy absent, nothing reporting a problem.
+# waydroid-overlay-sync.service exists for the same reason and is ordered the
+# same way.
+#
+# ORDERING IS LOAD-BEARING HERE, WHICH IS THE DIFFERENCE FROM
+# waydroid-appfuse-policy.service. There the Before= is a courtesy: vold mounts
+# on demand, so a policy that lands late costs only the calls made before it.
+# Here the policy decides whether Android boots AT ALL -- without it every
+# binder transaction between spc_t and container_runtime_t is refused, init
+# gives up on the crash-looping HALs, and the container sits in bootanim until
+# somebody restarts the whole session. A policy that arrives after
+# waydroid-container.service has started is therefore worth nothing until the
+# next restart, so the ordering has to hold.
+#
+# STILL NOT Requires=/RequiredBy= ANYTHING, for the reason the rest of this
+# repository gives: a container that refuses to start is a worse failure than a
+# container that starts degraded, and an admin debugging a broken policy store
+# should not also lose the ability to start Waydroid by hand.
+#
+# ConditionSecurity=selinux keeps this off hosts where it would be meaningless.
+# The loader checks the same thing and exits 0, so this is an optimisation and
+# not the guard.
+
+[Unit]
+Description=Load the waydroid_binder SELinux module
+Documentation=file:///usr/share/doc/waydroid-ext-binder-policy/64-vidiot01-atv-host.md
+Before=waydroid-container.service
+After=local-fs.target
+ConditionSecurity=selinux
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# --quiet: on a healthy host the stamp already matches and the kernel agrees the
+# rules are in force, so the journal gets a line only when the policy actually
+# changed or the decision check failed.
+ExecStart=@BINDIR@/waydroid-binder-policy --quiet
+
+[Install]
+WantedBy=multi-user.target

@@ -6,10 +6,17 @@
 # ever owning a phy. WifiBackend.h is the seam: NmBackend is one implementation
 # and iwd or connman could be others.
 
-VERSION=1.1.0
-RELEASE=1
+VERSION=1.1.2
+RELEASE=2
 KIND=host
 ARCH=x86_64
+
+# Android 13 only for now, and the gap is small and known rather than vague:
+# Waydroid moves service_manager_protocol from aidl3 to aidl6 at API 36, and
+# wifi/service.cpp hardcodes "aidl3". The supplicant surface also needs
+# re-extracting against AIDL v4 (hostapd v3). The host's libgbinder already
+# implements aidl6, so nothing blocks this but the work. docs/64.
+ANDROID="13"
 
 SUMMARY="Host-side wificond and supplicant for Waydroid, driving NetworkManager"
 
@@ -58,7 +65,8 @@ pkgconfig(gobject-2.0)
 pkgconfig(gio-2.0)
 pkgconfig(gio-unix-2.0)
 systemd-rpm-macros
-gcc-c++"
+gcc-c++
+libstdc++-static"
 
 # NetworkManager is hard: NmBackend::init() refuses to start without it on the
 # system bus. It is also the one dependency this design exists to let somebody
@@ -74,7 +82,7 @@ NetworkManager"
 RECOMMENDS="waydroid-ext-wifi-hostd
 waydroid-ext-wifi-framework"
 
-DOCS="docs/user/lxc-config.md docs/user/overlay.md docs/29-wifi-plan.md docs/31-wifi-stage2.md docs/34-wifi-second-radio.md docs/35-wifi-stage5.md docs/59-wifi-stage5-polish.md docs/60-wifi-nl80211.md"
+DOCS="docs/69-wifid-binder-ping-spam.md docs/user/lxc-config.md docs/user/overlay.md docs/29-wifi-plan.md docs/31-wifi-stage2.md docs/34-wifi-second-radio.md docs/35-wifi-stage5.md docs/59-wifi-stage5-polish.md docs/60-wifi-nl80211.md"
 
 DESCRIPTION="Serves Android's Wi-Fi native interfaces -- IWificond, IClientInterface,
 IWifiScannerImpl and the supplicant AIDL surface -- from the host, over the
@@ -113,9 +121,34 @@ SELinux the directive is inert, which is correct."
 # stop.
 SOURCES="wifi
 artifacts/wifi/install.sh
+artifacts/wifi/selftest.sh
 artifacts/wifi/waydroid-wifid.conf
 artifacts/wifi/waydroid-wifid.service
 artifacts/wifi/waydroid-wifi-nudge"
+
+# THE PROTOCOL TRIPWIRE, and the reason this mod grew a %check at all.
+#
+# Which service-manager protocol this daemon must speak is a property of the
+# ANDROID IMAGE, not of the daemon: Waydroid's protocol.py picks aidl3 at API 33
+# and aidl6 at API 36, while the binder/RPC protocol stays aidl3 for both
+# (measured on vidiot01's live waydroid.cfg -- docs/64). service.cpp hardcodes
+# both as #defines, which is fine while ANDROID= names one version and is a
+# silent lie the moment it names two: one compiled constant cannot be aidl3 and
+# aidl6 at once.
+#
+# So the check pins the constants to what ANDROID="13" claims, and the rule is
+# that changing SM_PROTOCOL and changing ANDROID= are the same commit. Making
+# wifid support both images means making the constant stop being a constant
+# first; until then ANDROID="13 16" here would produce a package that is wrong
+# on one of the two hosts it claims.
+#
+# Verified to fire rather than assumed: flipping SM_PROTOCOL to aidl6 in a copy
+# of the tree fails the check and the build with it.
+#
+# Everything else in the selftest is source-level hygiene that needs no gbinder,
+# no container and no compiled daemon, so it runs on the --prebuilt path too.
+CHECK='%check
+sh artifacts/wifi/selftest.sh'
 
 # Staged into prebuilt/ by build-mod.sh --prebuilt; ignored otherwise. This is
 # where a plain wifi/build.sh leaves its output, and staging it is the only way

@@ -44,22 +44,24 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.sin
 
+// internal rather than private only so sensor-app/test can reach it (also the
+// camera constants and the face, light and demo tables below).
 // Slab half-extents in the device frame: +X right across the screen, +Y up the
 // screen, +Z out of the screen. 16:10-ish, and thin.
-private const val HX = 1.00
-private const val HY = 0.62
-private const val HZ = 0.055
+internal const val HX = 1.00
+internal const val HY = 0.62
+internal const val HZ = 0.055
 
 private const val RING_R = 1.60
 private const val RING_SEG = 48
-private const val CAM_D = 6.0          // camera distance from the origin
-private const val CAM_EL = 26.0        // camera elevation above the world plane
+internal const val CAM_D = 6.0          // camera distance from the origin
+internal const val CAM_EL = 26.0        // camera elevation above the world plane
 
 // Light direction in world coordinates (from above, slightly south and east),
 // pre-normalised. Used for a flat Lambert term so adjacent faces separate.
-private const val LX = 0.2494
-private const val LY = -0.4490
-private const val LZ = 0.8580
+internal const val LX = 0.2494
+internal const val LY = -0.4490
+internal const val LZ = 0.8580
 
 /*
  * Face corners, ordered top-left, top-right, bottom-right, bottom-left AS SEEN
@@ -69,7 +71,7 @@ private const val LZ = 0.8580
  * normals. The box is convex, so culling alone gives correct occlusion and no
  * depth sort is required.
  */
-private val FACE_XYZ = arrayOf(
+internal val FACE_XYZ = arrayOf(
     doubleArrayOf(-HX, +HY, +HZ, +HX, +HY, +HZ, +HX, -HY, +HZ, -HX, -HY, +HZ), // +Z front
     doubleArrayOf(+HX, +HY, -HZ, -HX, +HY, -HZ, -HX, -HY, -HZ, +HX, -HY, -HZ), // -Z back
     doubleArrayOf(+HX, +HY, +HZ, +HX, +HY, -HZ, +HX, -HY, -HZ, +HX, -HY, +HZ), // +X right
@@ -78,7 +80,7 @@ private val FACE_XYZ = arrayOf(
     doubleArrayOf(-HX, -HY, +HZ, +HX, -HY, +HZ, +HX, -HY, -HZ, -HX, -HY, -HZ)  // -Y bottom
 )
 
-private val FACE_N = arrayOf(
+internal val FACE_N = arrayOf(
     doubleArrayOf(0.0, 0.0, 1.0), doubleArrayOf(0.0, 0.0, -1.0),
     doubleArrayOf(1.0, 0.0, 0.0), doubleArrayOf(-1.0, 0.0, 0.0),
     doubleArrayOf(0.0, 1.0, 0.0), doubleArrayOf(0.0, -1.0, 0.0)
@@ -103,7 +105,7 @@ private val CARDINAL = arrayOf("N", "E", "S", "W")
  * the host is ssh. Each matrix is written as its three columns: where device
  * X, Y and Z land in the world frame (East, North, Up).
  */
-private val DEMO_R = arrayOf(
+internal val DEMO_R = arrayOf(
     // X=East, Y=North, Z=Up -- flat on its back, screen up, top edge north.
     floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f),
     // X=West, Y=North, Z=Down -- flat on its face.
@@ -118,7 +120,7 @@ private val DEMO_R = arrayOf(
     floatArrayOf(0f, 0f, -1f, -1f, 0f, 0f, 0f, 1f, 0f)
 )
 
-private val DEMO_NAME = arrayOf(
+internal val DEMO_NAME = arrayOf(
     "demo · flat on its back, top edge north",
     "demo · flat on its face",
     "demo · upright, screen facing south",
@@ -163,11 +165,37 @@ internal fun withAlpha(color: Int, alpha: Int) = (color and 0x00FFFFFF) or (alph
  * Row-major R maps device vectors to world (East, North, Up), so device +Y
  * lands at (R[1], R[4], R[7]) and device +Z at (R[2], R[5], R[8]).
  */
-internal fun useTopEdge(m: FloatArray): Boolean =
-    hypot(m[1].toDouble(), m[4].toDouble()) >= hypot(m[2].toDouble(), m[5].toDouble())
+internal fun useTopEdge(m: FloatArray): Boolean = useTopEdge(m, null)
 
-internal fun headingOf(m: FloatArray): Double {
-    val az = if (useTopEdge(m)) {
+/*
+ * The same choice with memory, which is what the live view and the demo use.
+ *
+ * The two references agree as a laptop tilts back, but not as a machine rolls
+ * onto its side edge: there the top edge and the screen back are BOTH
+ * horizontal, at right angles to each other, and that pose is reachable from
+ * flat (where the top edge was the reference) and from upright (where the
+ * screen back was). Any fixed tie-break makes one of those paths jump 90
+ * degrees at exactly 90 of roll -- demo pose 3 read 270 straight after pose 2
+ * read 0. So the reference in use is kept until the other one's horizontal
+ * projection is longer by REF_HYSTERESIS, and [wasTopEdge] null (no history)
+ * falls back to the plain comparison.
+ */
+internal const val REF_HYSTERESIS = 0.1
+
+internal fun useTopEdge(m: FloatArray, wasTopEdge: Boolean?): Boolean {
+    val top = hypot(m[1].toDouble(), m[4].toDouble())
+    val back = hypot(m[2].toDouble(), m[5].toDouble())
+    return when (wasTopEdge) {
+        null -> top >= back
+        true -> top + REF_HYSTERESIS >= back
+        false -> top > back + REF_HYSTERESIS
+    }
+}
+
+internal fun headingOf(m: FloatArray): Double = headingOf(m, useTopEdge(m))
+
+internal fun headingOf(m: FloatArray, topEdge: Boolean): Double {
+    val az = if (topEdge) {
         Math.toDegrees(atan2(m[1].toDouble(), m[4].toDouble()))
     } else {
         Math.toDegrees(atan2(-m[2].toDouble(), -m[5].toDouble()))
@@ -175,8 +203,46 @@ internal fun headingOf(m: FloatArray): Double {
     return if (az < 0) az + 360.0 else az
 }
 
-internal fun headingRefOf(m: FloatArray): String =
-    if (useTopEdge(m)) "top edge" else "screen back"
+internal fun headingRefOf(m: FloatArray): String = refName(useTopEdge(m))
+
+internal fun refName(topEdge: Boolean): String = if (topEdge) "top edge" else "screen back"
+
+/*
+ * The view's projection and culling arithmetic, lifted out of AttitudeView as
+ * plain functions so it can be tested without a Canvas. The view calls these
+ * and nothing else; see its toWorld(), project() and drawSlab().
+ */
+
+/** Device frame -> world frame through row-major m (East, North, Up). */
+internal fun deviceToWorld(m: FloatArray, x: Double, y: Double, z: Double, out: DoubleArray) {
+    out[0] = m[0] * x + m[1] * y + m[2] * z
+    out[1] = m[3] * x + m[4] * y + m[5] * z
+    out[2] = m[6] * x + m[7] * y + m[8] * z
+}
+
+/** World -> screen for a camera CAM_D from the origin at elevation asin(sinEl). */
+internal fun projectPoint(
+    e: Double, n: Double, u: Double,
+    sinEl: Double, cosEl: Double, cx: Float, cy: Float, focal: Double,
+    out: DoubleArray
+) {
+    val yc = n * sinEl + u * cosEl
+    val zc = n * cosEl - u * sinEl
+    val d = CAM_D + zc
+    out[0] = cx + focal * e / d
+    out[1] = cy - focal * yc / d
+    out[2] = zc
+}
+
+/** Twice the signed shoelace area of the quad (vx[i], vy[i]), i = 0..3. */
+internal fun signedArea2(vx: FloatArray, vy: FloatArray): Double {
+    var area2 = 0.0
+    for (i in 0 until 4) {
+        val j = (i + 1) and 3
+        area2 += vx[i].toDouble() * vy[j] - vx[j].toDouble() * vy[i]
+    }
+    return area2
+}
 
 class AttitudeView(context: Context) : View(context) {
 
@@ -202,6 +268,7 @@ class AttitudeView(context: Context) : View(context) {
     private var curRoll = 0.0
     private var curLive = false
     private var curLabel = ""
+    private var demoTopEdge = true
 
     init {
         setOnClickListener { selectDemo(if (demo >= DEMO_R.size - 1) -1 else demo + 1) }
@@ -211,7 +278,10 @@ class AttitudeView(context: Context) : View(context) {
         demo = i
         if (i >= 0) {
             SensorManager.getOrientation(DEMO_R[i], tmpAngles)
-            demoAz = headingOf(DEMO_R[i])
+            // The cycle carries the reference from pose to pose, as moving
+            // the machine would; entering it from live starts afresh.
+            demoTopEdge = useTopEdge(DEMO_R[i], if (i == 0) null else demoTopEdge)
+            demoAz = headingOf(DEMO_R[i], demoTopEdge)
             demoPitch = Math.toDegrees(tmpAngles[1].toDouble())
             demoRoll = Math.toDegrees(tmpAngles[2].toDouble())
         }
@@ -318,25 +388,16 @@ class AttitudeView(context: Context) : View(context) {
     // -------------------------------------------------------------- projection
 
     /** Device frame -> world frame. cur maps device vectors into East/North/Up. */
-    private fun toWorld(x: Double, y: Double, z: Double, out: DoubleArray) {
-        out[0] = cur[0] * x + cur[1] * y + cur[2] * z
-        out[1] = cur[3] * x + cur[4] * y + cur[5] * z
-        out[2] = cur[6] * x + cur[7] * y + cur[8] * z
-    }
+    private fun toWorld(x: Double, y: Double, z: Double, out: DoubleArray) =
+        deviceToWorld(cur, x, y, z, out)
 
     /**
      * World frame -> screen, perspective. out = [screen x, screen y, camera
      * depth relative to the origin]; that third value is what splits the ring
      * into a half drawn behind the slab and a half drawn in front of it.
      */
-    private fun project(e: Double, n: Double, u: Double, out: DoubleArray) {
-        val yc = n * sinEl + u * cosEl
-        val zc = n * cosEl - u * sinEl
-        val d = CAM_D + zc
-        out[0] = cx + focal * e / d
-        out[1] = cy - focal * yc / d
-        out[2] = zc
-    }
+    private fun project(e: Double, n: Double, u: Double, out: DoubleArray) =
+        projectPoint(e, n, u, sinEl, cosEl, cx, cy, focal, out)
 
     // ------------------------------------------------------------------ drawing
 
@@ -510,11 +571,7 @@ class AttitudeView(context: Context) : View(context) {
             }
             // Twice the signed screen area; positive means the outside of the
             // face is toward the camera. See the FACE_XYZ comment.
-            var area2 = 0.0
-            for (i in 0 until 4) {
-                val j = (i + 1) and 3
-                area2 += vx[i].toDouble() * vy[j] - vx[j].toDouble() * vy[i]
-            }
+            val area2 = signedArea2(vx, vy)
             if (area2 <= 0.0) continue
 
             toWorld(FACE_N[f][0], FACE_N[f][1], FACE_N[f][2], wp)

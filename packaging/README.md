@@ -14,6 +14,63 @@ is an overlayfs lowerdir over a read-only image), names the seven overlay files 
 a stock file and are therefore the surface an image upgrade can break, and carries the
 Debian/Ubuntu and other-distro roadmap. Read it before touching anything here.
 
+## Which Android a modification applies to — the `ANDROID` field, added 2026-10-09
+
+There are now two images in play — bigtab01's LineageOS 20 (Android 13, API 33) and the
+WayDroid-ATV LineageOS 23.2 build (Android 16, API 36) — and until this field existed nothing
+in a `.mod` said which one a modification was valid for. A `.mod` may now declare:
+
+```sh
+ANDROID="13"        # known to apply to Android 13
+ANDROID="13 16"     # both
+ANDROID="any"       # contains nothing image-specific
+```
+
+Each entry renders one `Provides: waydroid-ext-android(N)`, so a host can ask
+`rpm -q --whatprovides 'waydroid-ext-android(16)'` instead of reading twenty-seven spec files.
+`gen-spec.sh --list` shows the value, or `?` where it is unset.
+
+**`any` is a claim about content, not about testing.** It means the modification contains
+nothing an image could invalidate — host policy, host configuration, a host daemon that speaks
+no versioned Android interface. A modification that merely has not been *tried* on an image does
+not get listed for it.
+
+**Unset is the default and renders nothing.** All twenty-seven specs were confirmed to render
+byte-for-byte identically with the field in place and unset, the same way `gen-spec.sh`'s
+earlier `CHECK` fix was checked. Classifying the remaining mods by guesswork would be worse
+than admitting the gap, so `--list` shows `?` and the backlog stays visible. Six are classified
+so far, each from measured evidence in [docs/64](../docs/64-vidiot01-atv-host.md): `sensord`,
+`wifid`, `battery`, `camera-hal` and `camera-gbm` as `13`, and `binder-policy` as `any`.
+
+**This is deliberately not a branch.** [docs/47](../docs/47-package-split.md) already answered
+the same question for supporting Debian and Arch alongside Fedora — one spec set, the expensive
+content written once, each target's template only the part that genuinely differs. Android
+version is another axis of the same kind, and 17 of 26 modifications are unchanged between the
+two images; a branch would make those seventeen the thing maintained twice.
+
+### `%check` coverage, counted properly
+
+Worth stating precisely, because counting only the mods that *declare* `CHECK=` badly
+understates it: **8 of 27 have a `%check`.** Overlay-kind mods get one **synthesised** by
+`gen-spec.sh` — it verifies every payload file against the manifest and fails the build if a
+`derive` or `link` row ships bytes it must never ship — so all six have one without declaring
+anything. Two host-kind mods declare their own: `mdns` and `binder-policy`. The gap is the
+other seventeen host mods, and the two group mods.
+
+**Recounted 2026-10-23 from the `.mod` files: 13 of 30.** Seven overlay components carry the
+synthesised check (`strongbox` joined them), and six host mods declare their own:
+`binder-policy`, `mdns`, `wifid`, `swtpm`, and since 2026-10-23 `keystored` (the TPM engine's 87
+checks against a throwaway swtpm) and `overlay-sync` (its first, 19 checks of the derive path end to
+end). Before that day it was 10 of 28; the paragraph above predates the `wifid` and `swtpm` checks.
+
+`wifid` is the third declared check, added 2026-10-09, and it is a **tripwire rather than a
+test**: which service-manager protocol the daemon must speak is a property of the image
+(`aidl3` at API 33, `aidl6` at API 36), `service.cpp` hardcodes it as a `#define`, and one
+compiled constant cannot be both. So the check pins the constant to what `ANDROID=` claims and
+fails the build if they drift apart. Confirmed to fire by flipping `SM_PROTOCOL` to `aidl6` in
+a copy of the tree. `battery` and `camera-hal` — the other two divergent modifications — are
+overlay-kind and already covered by the synthesised check.
+
 ## Built is not the same as installable — audited 2026-09-22, revised 2026-09-24
 
 The table below says which modifications survive `rpmbuild`. It does not say whether the
@@ -43,7 +100,53 @@ transaction. The group went to 1.0.1 for the dependency change.
 **Superseded 2026-09-27: 22 modifications are written and all 22 produce something
 installable**, `wifid` included, once `--prebuilt` is used for the two compiled daemons.
 
-**Recounted 2026-10-06: there are 26 `.mod` files, 25 of them shipped.** `dexopt` is the one
+**Recounted 2026-10-19: there are 28 `.mod` files, 27 of them shipped, and 26 installed on
+bigtab01** — counted from `rpm-ostree status` on the booted deployment that day, not carried
+forward from the paragraphs below. The 28th is `swtpm`, installed the same day (sixth migration,
+below). `binder-policy` is the one shipped and not installed, as the next paragraph says. The count
+stood at **25** earlier that day, because **`mdns`, which the paragraph after that says was installed
+on 2026-10-06, was not**: `rpm -q waydroid-ext-mdns` answered *not installed*, and `/usr/bin/waydroid-mdns-reflector` and its
+unit were gone, while the `/etc` side of that live apply survives — `/etc/waydroid-mdns.conf`
+dated 2026-10-06 19:39, and `/etc/avahi/avahi-daemon.conf` hash-identical to
+`artifacts/mdns/avahi-daemon.conf` with `enable-reflector=yes`. So reflection should still work,
+and what is missing is the per-boot reconcile, `--verify`/`--revert` and rpm ownership. **How it
+was lost is established**, from rpm-ostreed's own transaction log and the boot list: the fifth
+migration's `--apply-live` put mdns on `/usr` for that boot only, with the durable copy in a
+*staged* deployment; an upgrade was staged on top on 2026-10-11; and at 20:17:05 on 2026-10-12 the
+machine suspended and never resumed, so finalization never ran and both were lost — the next boot,
+sixteen hours later, came up on the old deployment. That is the "observed instance" in
+[docs/user/ostree.md](../docs/user/ostree.md), and this was its package. The package's unit logged
+in that one live-applied boot and in none of the sixteen since. Uninstalling kdeconnect, on
+2026-10-14, came a day later and is not the cause. **A live apply is not an install until the
+machine has booted the staged deployment** — reboot in the same sitting.
+
+**Re-staged the same evening, 2026-10-19**: the same `waydroid-ext-mdns-1.0.0-1.noarch.rpm`
+(sha256 `e94c842d…`, `test-install.sh mdns` 7 of 7 again), by plain `rpm-ostree install` with no
+`--apply-live`, because the owner was rebooting straight after. The staged commit `84b9685a` adds
+that one package and nothing else, carries 26 local packages, and holds the reflector, its unit and
+its enable link. **Confirmed after the reboot (17:30):** booted `84b9685a`, nothing left staged,
+`rpm -q waydroid-ext-mdns` answers, the reflector unit ran at boot from `/usr/lib` with
+`Result=success`, and `waydroid-mdns-reflector --verify` exits 0 — `avahi-daemon.conf` agrees with
+`/etc/waydroid-mdns.conf` (still hash `49d456d8…`) and the source-port rule is live and permanent.
+And when the owner then logged in, avahi joined the new `waydroid0` by hotplug with no restart,
+which answers the fifth migration's last open question below ([docs/45](../docs/45-mdns-reflection.md)).
+The owner then printed a Mopria test page from Android to vidiot01's shared Canon queue, and
+vidiot01's cupsd logged the job from bigtab01 as `successful-ok` — the package's purpose, verified
+end to end after the reboot.
+
+**Recounted 2026-10-09: there are 27 `.mod` files, 26 of them shipped.** The 27th is
+`binder-policy`, added 2026-10-09. **It is built, linted and install-tested but NOT yet
+installed anywhere**, so there is no sixth migration section below and the "every shipped
+modification is installed on bigtab01" claim further down is now 25 of 26 rather than all of
+them. It lints to **2 errors and 2 warnings** — one better than the baseline every other
+package here hits, because it is the second host-kind mod to carry a `%check` (after `mdns`),
+so `no-%check-section` does not fire. `packaging/test-install.sh binder-policy` passes 6 of 6.
+
+It is also the first modification here that is **not host-specific at all**: noarch, nothing
+compiled, no value in it that names a machine. docs/53's "a general user cannot build and
+install" blocker is about the two compiled daemons and does not apply to this one.
+
+**Recounted 2026-10-06: there were 26 `.mod` files, 25 of them shipped.** `dexopt` is the one
 that declares `SHIPPED=no`. "22 and a 23rd" was an undercount on the day it was written — six
 `.mod` files were created on 2026-09-27 and the tally did not catch all of them — which is what
 a count maintained by hand does. `packaging/gen-spec.sh --list` is the answer that cannot go
@@ -155,7 +258,7 @@ plain — and asserts the harness reaches the right verdict on each.
 |---|---|---|---|---|
 | `camera-gbm` 1.0.1 | yes | yes | **yes** | yes, bar `no-signature` and `invalid-url Source0` |
 | `camera` (group) | yes | yes | **yes** | same, plus `no-%check-section` — a metapackage has nothing to check |
-| `wifid` 1.1.0 | yes | **yes** | **yes**, `--prebuilt` only | same, plus `no-%check-section`, `no-manual-page-for-binary` and `unstripped-binary-or-object` — the last is the `--prebuilt` arm declining to strip, so the shipped binary stays byte-identical to the one verified on the host |
+| `wifid` 1.1.2 | yes | **yes** | **yes**, `--prebuilt` only | same, plus `no-manual-page-for-binary` and `unstripped-binary-or-object` — the last is the `--prebuilt` arm declining to strip, so the shipped binary stays byte-identical to the one verified on the host. `no-%check-section` stopped firing when the mod declared its own `%check` on 2026-10-09 |
 | `pidguard` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` |
 | `restartd` | yes | yes | **yes** | same |
 | `btd` | yes | yes | **yes** | same |
@@ -178,6 +281,9 @@ plain — and asserts the harness reaches the right verdict on each.
 | `dexopt` | yes | yes | **yes** | plus `non-etc-or-var-file-marked-as-conffile` — **written, not shipped**, see below |
 | `appfuse` | yes | yes | **yes** | yes — the backlight baseline exactly: `no-signature`, `invalid-url Source0`, `no-%check-section`, `no-manual-page-for-binary` |
 | `mdns` | yes | yes | **yes** | same, plus `no-manual-page-for-binary` — and **without** `no-%check-section`, which it is the first host package here to clear |
+| `overlay-sync` 1.2.0 | yes | yes | **yes**, `%check` 19/19 | `no-manual-page-for-binary` only, past the usual `no-signature` |
+| `keystored` 1.0.1 | yes | yes | **yes**, `--prebuilt` only; `%check` 11 passed, 2 skipped (cross-file checks whose files are not in its tarball); 1.0.1's findings identical to 1.0.0's | the `wifid` baseline exactly: `no-manual-page-for-binary`, `unstripped-binary-or-object` |
+| `strongbox` 1.0.0 | yes | yes | **yes** | clean once added to the rc file's derive-row `only-non-binary-in-usr-lib` filter, beside `camera-hal` and `battery` |
 
 ### The seven host packages added 2026-09-27
 
@@ -339,6 +445,8 @@ built without SELinux, and every line ends `|| :` because no scriptlet may fail 
   is developed, so `sh -n wifi/build.sh` has never been a valid check on it.
 - `libgbinder-devel` is a Fedora package and this box is Debian 13, which packages neither
   libgbinder nor libglibutil. **So the source arm has still never been compiled anywhere.**
+  (It has since 2026-10-23, in CI, after a `libstdc++-static` build dependency it had always
+  needed: [docs/53](../docs/53-release-readiness.md), *It first ran*.)
   `--rpm` exits 1 with a message naming the missing pkg-config modules, the `dnf install` line,
   and the two routes that do work here. `wifid.mod` now carries the `%bcond_with prebuilt`
   two-arm build that `sensord.mod` has, with `PREBUILT_FILES="build/wifi/daemon/waydroid-wifid"`,
@@ -356,6 +464,34 @@ every autotools package.
 `no-signature` and `invalid-url Source0` are deliberately not filtered: both are real and both
 are release-time work. Everything else rpmlint said is filtered with a written reason in
 [waydroid-ext.rpmlintrc](waydroid-ext.rpmlintrc).
+
+## The keystore pair, and the keystone's insertion edit — 2026-10-23
+
+Two new modifications and a keystone bump, all built on the dev box and **installed on bigtab01 the
+same evening** in one transaction (`uninstall waydroid-ext-overlay-sync` plus three `--install`s),
+booted and verified: the auth test passed 32/32 against the packaged daemon. `keystored` 1.0.1
+followed that evening, replacing the layered 1.0.0 in one `uninstall` plus `--install` transaction.
+It moves the boot-time TPM check into the session wait, because swtpm's `Type=simple` unit let the
+daemon ask before swtpm listened. [docs/75](../docs/75-keystore-packaging.md) is the record.
+
+- **`keystored`** — `waydroid-keystored`, its unit (enabled, `unconfined_t`, `PrivateTmp`) and
+  `/etc/waydroid-keystored.conf` (`%config(noreplace)`, shipping `--accept-unsigned-auth-tokens`).
+  Host kind, x86_64, `ANDROID="13"`, the `wifid` shape including the `%bcond` and an offline
+  `keystore/hal/build.sh --rpm`. The daemon gained a `GetSession` gate first: ungated, it had
+  written 7,551 binder failure pairs to bigtab01's kernel log in two hours at the greeter.
+- **`strongbox`** — overlay kind, one derive row and no bytes: the image's VINTF manifest with two
+  lines inserted. Hard-requires `keystored`, which recommends it back, so the strongbox is never
+  declared with nothing installed to serve it.
+- **`overlay-sync` 1.2.0** — a derive row's edits may insert as well as replace
+  (`<hex offset>+<hex bytes>`), every offset into the stock file, applied highest first. Its first
+  `%check`. Every overlay component requires this package, so the bump touches the one contract
+  they share; the format is a strict superset, so no existing row changes meaning.
+
+`test-install.sh overlay-sync strongbox keystored`: **18 passed, 0 failed**, `keystored`'s edited
+conf kept as `.rpmsave`. `verify-units.sh`: `waydroid-keystored.service` verifies. The source arm
+of `keystored` was first built by CI's Fedora `rpm` job on 2026-10-23, and failed at the link
+until 1.0.1-2 added `libstdc++-static` ([docs/53](../docs/53-release-readiness.md), *It first
+ran*).
 
 ## The keystone bump — manifest format v2, 2026-09-26
 
@@ -898,7 +1034,8 @@ ships or runs chowns `/var`; every `chown` in the tree is scoped to one file ins
 or a BlueZ or PipeWire temp file. At boot the same complaints are non-fatal and the unit still
 reports `Finished`; it is rpm-ostree's own invocation that treats a non-zero result as an error.
 **The fix is `chown root:root /var` and it was deliberately not done here** — it is outside this
-migration and is the owner's call.
+migration and is the owner's call. **Done 2026-10-19 at the owner's direction**, in the sixth
+migration below — which also found that fixing it does not unblock `apply-live` by itself.
 
 **The consequence that does matter: `InterruptedLiveCommit`, not `LiveCommit`.** The section above
 gives `LiveCommit` equalling the pending `Commit` as the test for a consistent live apply. That is
@@ -965,6 +1102,39 @@ One thing that fell out of the greeter state and is worth collecting at the next
 joined `lo` and `wlp1s0` only, because `waydroid0` is created at session start. That is exactly
 [docs/45](../docs/45-mdns-reflection.md)'s last open question — whether avahi picks the bridge up by
 hotplug when it appears after the daemon — and the next session start answers it for free.
+
+### Sixth migration — swtpm, done 2026-10-19, and a reboot instead of `--apply-live`
+
+`waydroid-ext-swtpm` 1.0.0, goal 10's stage 0 ([docs/71](../docs/71-swtpm-host.md)). Built here
+(`build-mod.sh --lint swtpm`: 2 errors and 2 warnings, the `binder-policy` baseline — it carries a
+`%check` too), `test-install.sh swtpm` 6 of 6, `verify-units.sh` clean, and its `%check` runs the
+selftest's **live** half — a real swtpm through the wrapper, `waydroid-tpm-check`, a restart on
+the same state — with `WAYDROID_SWTPM_SELFTEST_LIVE=require`, so the CI `rpm` job cannot pass it by
+skipping. It is the first package here whose BuildRequires exist to make `%check` real.
+
+Before the transaction it was preflighted on bigtab01 itself, unprivileged: Fedora 44's swtpm,
+swtpm-libs and libtpms extracted into `/var/tmp`, run against the host's own tpm2-tools and
+tcti-swtpm, 15 of 15 and 19 of 19, then deleted. `rpm -K` on those RPMs says `SIGNATURES NOT OK`
+on this host and that is **`NOKEY`, not a bad signature** — an rpm-ostree rpmdb holds no
+`gpg-pubkey`; `rpm -Kv` says so, and a scratch keyring with
+`/etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-primary` verifies all three.
+
+The transaction, in order:
+
+| Step | Result |
+|---|---|
+| `chown root:root /var` | the fifth migration's fault, fixed at the owner's direction; `systemd-tmpfiles --dry-run --boot` then reports no unsafe transition |
+| `rpm-ostree install /var/tmp/waydroid-ext-swtpm-1.0.0-1.noarch.rpm` | exit 0; added the package, `swtpm`, `swtpm-libs`, `libtpms`, `swtpm-selinux`; carried the staged wifid 1.1.1 → 1.1.2; **and re-resolved `android-tools`, `vim-filesystem` and `xxd` to newer updates**, because a layered install recomposes against today's repo metadata |
+| `rpm-ostree apply-live --allow-replacement` | **refused**: *Previously interrupted while targeting commit 15e75a09…, cannot change target to 1d1fb43f…*. Nothing changed live |
+| reboot at the console | booted `1d1fb43f`; `InterruptedLiveCommit` gone; nothing staged |
+
+So the fifth migration's interrupted apply was what blocked this one, and fixing `/var` was
+necessary but not sufficient — [docs/user/ostree.md](../docs/user/ostree.md) now has the three ways
+out. Verified on the booted system: unit active from boot with `NRestarts=0` and
+`FragmentPath` under `/usr/lib` (no shadow), process in `unconfined_service_t`, labels and modes as
+designed, `semodule -l` listing swtpm's three modules, 15 of 15 and 19 of 19 across a restart, zero
+AVCs, and 11 journal lines for the whole boot with the per-connection spam filtered out. Full table
+in [docs/71](../docs/71-swtpm-host.md).
 
 ## What was deployed on bigtab01 before that — audited 2026-09-15
 

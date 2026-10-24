@@ -1,0 +1,33 @@
+* Fri Oct 09 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Grants binder IPC between spc_t and container_runtime_t in
+  both directions, which is what lets an Android image with APEX-packaged HALs
+  finish booting on a Fedora host instead of sitting in bootanim forever.
+- Proven by an A/B boot pair with the host Enforcing throughout: without the
+  module, no sys.boot_completed in 240 s and 657 denials, all of them
+  `denied { call } spc_t -> container_runtime_t`; with it, booted in 18 seconds
+  with zero binder denials and every service running.
+- A gap in Fedora's own policy rather than a Waydroid bug. selinux-policy's
+  `waydroid` module already grants these permissions to waydroid_t,
+  unconfined_t and unconfined_service_t, and not to spc_t, with nothing
+  dontaudit'ing the result. This package is the stopgap; the fix belongs
+  upstream, where it would make this redundant.
+- Hard-requires container-selinux, which is easy to miss: spc_t and
+  container_runtime_t are its types, so without it `semodule -i` does not
+  merely fail to help, it refuses to compile the module.
+- Loaded from a boot-time unit rather than only from %%post, because on an
+  rpm-ostree host a scriptlet runs against the compose and the policy never
+  reaches the booted system -- the lesson waydroid-ext-backlight learned on its
+  first real install. Here that failure mode costs a container that will not
+  start at all.
+- The loader verifies against the kernel rather than trusting semodule's exit
+  status: it reads the live access-vector decision from /sys/fs/selinux/access
+  and reports per direction whether call and transfer are really allowed. No
+  setools and no privilege needed. Both paths were exercised before release --
+  the real pair reports ok, and demanding an ungranted permission reports
+  REFUSED with the allowed vector and exits 3.
+- Two selinuxfs details that would otherwise bite silently are written into the
+  loader: /sys/fs/selinux/class/binder/perms/<p> holds a 1-based bit POSITION
+  and not a bitmask, so the mask is 1 << (pos - 1); and selinuxfs replies with
+  no trailing newline, so `read` returns 1 at EOF having assigned the variable
+  correctly -- branching on that status made the check report failure on a host
+  where the policy was demonstrably in force.

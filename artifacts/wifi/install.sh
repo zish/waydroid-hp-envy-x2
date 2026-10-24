@@ -62,6 +62,7 @@ WIFID_BIN=${WIFID_BIN:-$repo/build/wifi/daemon/waydroid-wifid}
 ALL_COMPONENTS="wifid wifi-sync"
 
 components=""
+# shellcheck disable=SC2048  # component names never contain spaces
 for c in ${*:-all}; do
 	case "$c" in
 	all)             components="$components $ALL_COMPONENTS" ;;

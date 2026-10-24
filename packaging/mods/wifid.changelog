@@ -1,3 +1,97 @@
+* Fri Oct 23 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.2-2
+- No code change. BuildRequires libstdc++-static, which the source build has
+  always needed: it links libstdc++ statically on purpose, and Fedora ships
+  libstdc++.a only in that package. CI's first Fedora build of the source arm
+  stopped at the link with "cannot find -lstdc++". The Debian dev box, where
+  the --prebuilt arm is built, never saw it, because Debian ships libstdc++.a
+  with the compiler. Reissued as a new release because the source package
+  changed, and two different artifacts must not share one NVR.
+
+* Fri Oct 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.2-1
+- Stop probing an empty binder after the session ends, which is the other half
+  of the leak 1.1.1 fixed at startup. 1.1.1 gated the first
+  gbinder_servicemanager_wait() on GetSession and left the gate one-shot, so
+  the daemon still paid the full cost at the other end of a session: when the
+  container goes, libgbinder arms its own presence-check timer, which probes
+  handle 0 on a delay that backs off from 100 ms to a 1 s ceiling and then
+  stays there, and every probe that lands on an unowned handle costs two kernel
+  log lines. Measured on bigtab01 on a boot that had reached the greeter with
+  zero binder lines to its name: one logout produced 360 of them in the next
+  3 minutes, 2 a second and still climbing when the sample ended, and 379 of
+  that boot's 428 binder lines were the daemon's own pid.
+- The daemon now notices and stops. A dead service manager arms a session
+  watch, which asks GetSession every 2 s, and a container manager that answers
+  with no sessions ends the pass: the service manager reference is dropped --
+  which is what actually stops the probing, since libgbinder's finalize()
+  removes that timer and its dispose() drops the device from the per-device
+  instance cache -- and the daemon returns to the 1.1.1 session gate to wait
+  for the next container, touching no binder while it waits.
+- A loop, NOT an exit, and that distinction is the design. Exiting and letting
+  Restart=always bring the daemon back would have been less code and would have
+  reversed the property the unit is built around -- the daemon outlives the
+  container, which is why it is deliberately not ordered after
+  waydroid-container.service -- and it would have broken docs/34's
+  start-it-by-hand mode outright, where nothing exists to restart it and the
+  first logout would have been the last.
+- Does not drop a registration Android is coming back for. A system_server
+  restart under a live session and a logout are indistinguishable at the moment
+  of death, and acting on the wrong one is docs/16's stale binder that
+  deadlocked Android's network stack for 38 minutes. GetSession separates them,
+  but not immediately: container_manager.stop() clears args.session AFTER
+  taking the container down, measured at about 6 s on this host, which is why
+  the watch polls instead of asking once. A service manager that reappears
+  cancels the watch and re-registers in place, exactly as before.
+- Fails towards staying up, in every direction: no system bus, a GetSession
+  that errors, or one that never answers at all leaves the daemon where it is.
+  After 60 s of no answer it stops asking and leaves the probe running, which
+  is the pre-1.1.2 behaviour and keeps a waydroid that does not offer
+  GetSession working.
+- No new runtime dependency, checked rather than assumed: libgio-2.0 and
+  libgobject-2.0 were already DT_NEEDED entries, because the 1.1.1 startup gate
+  already called g_bus_get_sync().
+- Fixes an exit status that was wrong on a path nothing had exercised: with one
+  pass per process, app.ret could be left RET_OK by a session that registered
+  successfully, so a later session whose wificond registration failed -- the
+  one failure this daemon treats as fatal -- would have exited 0. It is now set
+  per pass.
+
+* Fri Oct 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.1-2
+- No code change: the daemon's object code is identical to 1.1.1-1. This
+  rebuild corrects a comment in wifi/service.cpp that claimed the gate opens
+  "before the container's init runs". It does not -- container_manager.do_start
+  assigns args.session AFTER helpers.lxc.start() -- and the real margins were
+  measured rather than argued once that was noticed. Reissued rather than
+  rebuilt in place because 1.1.1-1 had already been installed, and two
+  different artifacts must not share one NVR.
+- Ships docs/69-wifid-binder-ping-spam.md, which is where the measurements and
+  the two open questions now live.
+
+* Fri Oct 16 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.1-1
+- Stop pinging an empty binder while no session exists. The daemon entered
+  gbinder_servicemanager_wait(sm, -1) at startup, which polls handle 0 at 1 Hz,
+  and every probe that lands while nothing owns handle 0 costs two kernel log
+  lines. On a tablet that boots to a greeter and waits, that is unbounded: one
+  53-hour logged-out stretch on bigtab01 produced 190,501 of them from this one
+  call -- 99.94% of that boot's binder lines -- and across all boots the spam
+  reached 29.3% of the journal, roughly 300 MB of 1 GB (docs/69).
+- Not only noise. binder's own rate limiter began dropping messages, 19
+  "callbacks suppressed" in a single boot, which discards unrelated binder
+  diagnostics on a host where binder evidence has been load-bearing (docs/16,
+  docs/40).
+- The probe is now gated on id.waydro.Container's GetSession, which answers an
+  empty a{ss} until a session exists and costs no binder traffic. Measured: 30 s
+  with no session adds 0 kernel lines where it previously added 60, and the
+  daemon never opens the binder device at all.
+- Registration is NOT delayed, which is the one thing this could not afford to
+  get wrong -- Android caches a failure to reach wifinl80211 (the 38-minute
+  deadlock in docs/16). Measured rather than argued: do_start assigns
+  args.session after helpers.lxc.start(), so the gate opens once the container
+  has been started, which timed at ~1.4 s before servicemanager appears and
+  6.7 s before Android's Wi-Fi framework makes its first call. A restart
+  against a live session registers both names 4 ms after opening the device.
+- Falls back to the old unguarded probe if GetSession never answers within 60 s,
+  so a waydroid that does not offer the method still gets a working daemon.
+
 * Thu Oct 01 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.1.0-1
 - Read the radio directly over nl80211 for the four things NetworkManager
   cannot answer, via a new Nl80211.cpp that talks raw AF_NETLINK and adds no

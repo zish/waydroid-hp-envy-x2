@@ -1,0 +1,119 @@
+// km_hidl_types.h -- the android.hardware.keymaster@4.0::IKeymasterDevice wire
+// surface, as GBinder-marshallable C structs and the method transaction codes.
+//
+// keymaster@4.0 is a public, frozen AOSP HIDL interface, so unlike IWificond
+// (docs/30) none of this is reverse-engineered: the method order is the
+// declaration order in IKeymasterDevice.hal, and the struct layouts are the
+// standard HIDL ones. Mirrors the shape of sensors/hybrisbindertypes.h.
+//
+// Enum numeric values match the .hal so KmError (keystore/engine.h) and these
+// are the same integers on the wire.
+#ifndef WAYDROID_KM_HIDL_TYPES_H
+#define WAYDROID_KM_HIDL_TYPES_H
+
+#include <gbinder.h>
+#include <stdint.h>
+
+#define KM_ALIGNED(x) __attribute__((aligned(x)))
+
+// android.hardware.keymaster@4.0::IKeymasterDevice, method order == .hal order.
+enum km_calls {
+    KM_GET_HARDWARE_INFO = GBINDER_FIRST_CALL_TRANSACTION, // 1
+    KM_GET_HMAC_SHARING_PARAMETERS,                        // 2
+    KM_COMPUTE_SHARED_HMAC,                                // 3
+    KM_VERIFY_AUTHORIZATION,                               // 4
+    KM_ADD_RNG_ENTROPY,                                    // 5
+    KM_GENERATE_KEY,                                       // 6
+    KM_IMPORT_KEY,                                         // 7
+    KM_IMPORT_WRAPPED_KEY,                                 // 8
+    KM_GET_KEY_CHARACTERISTICS,                            // 9
+    KM_EXPORT_KEY,                                         // 10
+    KM_ATTEST_KEY,                                         // 11
+    KM_UPGRADE_KEY,                                        // 12
+    KM_DELETE_KEY,                                         // 13
+    KM_DELETE_ALL_KEYS,                                    // 14
+    KM_DESTROY_ATTESTATION_IDS,                            // 15
+    KM_BEGIN,                                              // 16
+    KM_UPDATE,                                             // 17
+    KM_FINISH,                                             // 18
+    KM_ABORT,                                              // 19
+};
+
+// android.hardware.keymaster@4.0::SecurityLevel
+enum km_security_level {
+    KM_SECURITY_SOFTWARE = 0,
+    KM_SECURITY_TRUSTED_ENVIRONMENT = 1,
+    KM_SECURITY_STRONGBOX = 2,
+};
+
+// android.hardware.keymaster@4.0::KeyPurpose
+enum km_key_purpose {
+    KM_PURPOSE_ENCRYPT = 0,
+    KM_PURPOSE_DECRYPT = 1,
+    KM_PURPOSE_SIGN = 2,
+    KM_PURPOSE_VERIFY = 3,
+    KM_PURPOSE_WRAP_KEY = 5,
+};
+
+// HmacSharingParameters { vec<uint8_t> seed; uint8_t nonce[32]; }
+// GBinderHidlVec is the standard { const void* data.ptr; uint32_t count;
+// bool owns_buffer; } 16-byte descriptor; the seed bytes are a child buffer.
+struct km_hmac_sharing_parameters {
+    GBinderHidlVec seed KM_ALIGNED(8);
+    uint8_t nonce[32] KM_ALIGNED(1);
+} KM_ALIGNED(8);
+
+// KeyParameter { Tag tag; IntegerParams f; vec<uint8_t> blob; } -- 32 bytes.
+// IntegerParams is a plain union of the enums, bool, uint32, uint64 and
+// dateTime, so it is 8-byte aligned at offset 8; a uint32 value is its low four
+// bytes and a bool its first byte (little-endian). The sender does not clear the
+// bytes a narrower member leaves, so a reader must mask by the tag's type.
+struct km_key_parameter {
+    guint32 tag;
+    guint32 pad;
+    guint64 f;
+    GBinderHidlVec blob;
+} KM_ALIGNED(8);
+G_STATIC_ASSERT(sizeof(struct km_key_parameter) == 32);
+
+// KeyCharacteristics { vec<KeyParameter> softwareEnforced;
+//                      vec<KeyParameter> hardwareEnforced; }
+struct km_key_characteristics {
+    GBinderHidlVec softwareEnforced;
+    GBinderHidlVec hardwareEnforced;
+} KM_ALIGNED(8);
+G_STATIC_ASSERT(sizeof(struct km_key_characteristics) == 32);
+
+G_STATIC_ASSERT(sizeof(struct km_hmac_sharing_parameters) == 48);
+
+// VerificationToken { uint64_t challenge; Timestamp timestamp;
+//   vec<KeyParameter> parametersVerified; SecurityLevel securityLevel;
+//   vec<uint8_t> mac; }. keystore2 hands a StrongBox one on update/finish of an
+// auth-bound key; its children follow the struct in field order.
+struct km_verification_token {
+    guint64 challenge;
+    guint64 timestamp;
+    GBinderHidlVec parametersVerified;
+    guint32 securityLevel;
+    guint32 pad;
+    GBinderHidlVec mac;
+} KM_ALIGNED(8);
+G_STATIC_ASSERT(sizeof(struct km_verification_token) == 56);
+
+// HardwareAuthToken { uint64_t challenge; uint64_t userId;
+//   uint64_t authenticatorId; HardwareAuthenticatorType authenticatorType;
+//   Timestamp timestamp; vec<uint8_t> mac; } -- the last argument of begin, and
+// next to last of update/finish. An empty one has an empty mac.
+struct km_hardware_auth_token {
+    guint64 challenge;
+    guint64 userId;
+    guint64 authenticatorId;
+    guint32 authenticatorType;
+    guint32 pad;
+    guint64 timestamp;
+    GBinderHidlVec mac;
+} KM_ALIGNED(8);
+G_STATIC_ASSERT(sizeof(struct km_hardware_auth_token) == 56);
+G_STATIC_ASSERT(G_STRUCT_OFFSET(struct km_hardware_auth_token, mac) == 40);
+
+#endif

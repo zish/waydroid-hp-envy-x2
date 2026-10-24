@@ -74,7 +74,8 @@ class Profile(
             editor.apply()
         }
 
-        private fun parse(json: JSONObject, source: String): Profile {
+        // internal rather than private only so bt-app/test can reach it.
+        internal fun parse(json: JSONObject, source: String): Profile {
             val pin = json.optString("pin", "")
             return Profile(
                 json.optString("host", "192.168.240.1"),

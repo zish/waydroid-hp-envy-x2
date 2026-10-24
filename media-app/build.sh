@@ -96,6 +96,7 @@ echo "== aapt2 link"
 	"$OUT/res.zip"
 
 echo "== javac (R)"
+# shellcheck disable=SC2046  # exactly one R.java, and no spaces in $OUT
 javac -nowarn -source 17 -target 17 -classpath "$PLATFORM" \
 	-d "$OUT/classes" $(find "$OUT/gen" -name 'R.java')
 

@@ -1,0 +1,25 @@
+* Mon Oct 19 2026 Jeremy Melanson <1080872+zish@users.noreply.github.com> - 1.0.0-1
+- First package. Runs swtpm as a TPM 2.0 on a unix socket under systemd, as
+  waydroid-swtpm.service, for the host-side keystore backend of docs/65 on a
+  host with no usable hardware TPM. Stage 0 of that plan: nothing inside Android
+  can see it yet, and it buys no security property over the image's software
+  keymaster -- its state is a file on the same disk.
+- Ships waydroid-tpm-check, the same TPM 2.0 sequence through any TCTI: this
+  socket by default, /dev/tpmrm0 with --tcti. Transient objects only, no NV
+  writes, never clears.
+- The check flushes what it loads, because it has to: swtpm has no resource
+  manager and tpm2-tools leave every object they load behind, so the third
+  object fails TPM_RC_OBJECT_MEMORY and swtpm refuses everything until it
+  restarts. docs/65's own swtpm demonstration passed only because it stopped at
+  two objects.
+- swtpm runs as unconfined_service_t through a bin_t wrapper. Fedora's
+  swtpm-selinux confines it only for libvirt, and every direct route from
+  systemd is closed: no transition from init_t (which may not even execute it),
+  no init_t -> swtpm_t transition, and no entrypoint for unconfined_service_t.
+  Measured against the loaded policy on Fedora 43 and 44.
+- State and socket live under swtpm-waydroid, not waydroid-swtpm: Fedora's
+  waydroid policy labels /var/lib/waydroid(.*)? and /run/waydroid-(?!lxc).* by
+  prefix, and the TPM's seeds should not carry Waydroid's types.
+- Drops swtpm's "Data client disconnected" line with LogFilterPatterns=, since
+  tcti-swtpm reconnects per TPM command and three checks logged 543 of them;
+  swtpm's own --log level does not filter it.

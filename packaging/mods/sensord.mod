@@ -39,13 +39,20 @@
 # box matching a host it cannot install packages on, and wrong inside rpmbuild,
 # which must be offline and must bind to this buildroot's libraries.
 
-VERSION=1.0.1
-RELEASE=1
+VERSION=1.0.5
+RELEASE=2
 KIND=host
 
 # Compiled x86_64. NOT noarch, for the same reason camera-gbm is not: a noarch
 # package would install on an aarch64 host and fail there rather than on the shelf.
 ARCH=x86_64
+
+# Android 13 only, and this is a measured negative rather than an untried one.
+# The A16 vendor image contains NO HIDL sensors HAL and declares none in its
+# VINTF manifest -- the seam docs/14 is built on is gone image-side, and A16's
+# sensors HAL is AOSP's AIDL example in /vendor/apex. Porting is a rewrite, not
+# a re-measurement. docs/64.
+ANDROID="13"
 
 SUMMARY="Serve Android's sensors and lights HALs from the host's IIO sensor hub"
 
@@ -75,6 +82,7 @@ GLOBALS='%bcond_with prebuilt
 %endif'
 
 BUILDREQUIRES="gcc-c++
+libstdc++-static
 pkgconfig(libgbinder) >= 1.1.47
 pkgconfig(libglibutil) >= 1.0.82
 pkgconfig(glib-2.0)
@@ -94,6 +102,7 @@ glib2%{?_isa}"
 # those defaults a second home that can drift from the code. Copy it to
 # /etc/waydroid-sensors.conf only when something actually needs changing.
 DOCS="docs/14-sensors.md
+docs/70-sensord-pidof-selinux.md
 docs/18-sensor-axes.md
 docs/19-sensor-hub-suspend-wedge.md
 docs/37-brightness.md

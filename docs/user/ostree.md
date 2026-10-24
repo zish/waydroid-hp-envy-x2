@@ -40,7 +40,8 @@ only in memory.
 |---|---|
 | `systemctl reboot` | **Yes.** Shutdown finalizes it, next boot runs it. |
 | `systemctl poweroff`, then power on later | **Yes.** A clean poweroff finalizes it just like a reboot. |
-| Close the lid / suspend / hibernate, then resume | **No, and nothing is lost.** The system never shut down, so it is still staged and still pending. It applies at your next real reboot. |
+| Close the lid / suspend / hibernate, **and it resumes** | **Not yet, and nothing is lost.** The system never shut down, so it is still staged and still pending. It applies at your next real reboot. |
+| Suspend, and it **never comes back** — battery runs out, or the resume hangs and you force it off | **No, and the staged deployment is gone.** The suspend was not a shutdown, so finalization never ran. See below: on a laptop this is the usual way to lose one. |
 | Hard power-off, forced reset, battery pull, crash | **No, and the staged deployment is gone.** |
 | Power is lost *during* shutdown, before finalization | **No, and it is gone**, same as above. |
 
@@ -50,8 +51,94 @@ at the new deployment, and the `/run/ostree/` record that named it went away wit
 come back up on the old deployment, with no error and no warning. **Re-run the `rpm-ostree` command
 to stage it again.**
 
-> This follows from the unit definition above and from `/run` being tmpfs, both of which are
-> verified. It has not been confirmed by deliberately power-cutting a machine mid-stage.
+That re-run is cheaper than the first one: the fetched objects are still in the local repo and the
+remote ref already points at the new base, so only the layering is redone, not the download.
+
+**A suspend that never comes back is a hard power-off, and on a laptop it is the usual way to lose a
+deployment** — more likely than any of the dramatic rows above, because it needs nothing to go wrong
+except walking away. Observed on the reference machine: it suspended at 20:17:05 with an upgrade and
+a newly layered package staged, the journal ends there, and the next entry is a fresh boot sixteen
+hours later. Both were gone — same version running, same kernel, and the new package simply not
+installed. The package was `waydroid-ext-mdns`, applied with `--apply-live`, which is what made the
+loss easy to miss: it worked for the rest of that boot, and its `/etc` files — written live, into the
+real `/etc` — are still there, so the host *looks* configured while the package is gone. It went
+unnoticed for thirteen days, until an `rpm -q`. **Stage and reboot in one sitting, `--apply-live` or
+not.**
+
+The signature, if you suspect this is what happened to you:
+
+| Check | What a deployment lost this way looks like |
+|---|---|
+| `journalctl -b -1 -u ostree-finalize-staged` | only the `Finished` line from when it started at boot — no `Stopping`, no `Finalizing staged deployment`, so `ExecStop` never ran |
+| `journalctl --list-boots` | a gap between the end of the previous boot and the start of the next, rather than one running into the other |
+| `rpm-ostree status` | no staged entry at all, and the version you are running is the one you were running before |
+| `ls -d /ostree/deploy/*/deploy/*.0` | the orphaned deployment directory is **still there**, referenced by nothing — it got as far as being written, and only finalization was missed |
+
+> The unit definition and `/run` being tmpfs were already verified. The sequence above is now an
+> observed instance rather than an inference, though still an accidental one: no machine was
+> deliberately power-cut mid-stage to produce it.
+
+## A staged deployment's `/etc` looks empty of your files, and that is correct
+
+If you look inside a staged deployment before rebooting, your own `/etc` is not there:
+
+```console
+$ ls /ostree/deploy/fedora/deploy/<staged-commit>.0/etc/waydroid-extra
+ls: cannot access '.../etc/waydroid-extra': No such file or directory
+```
+
+Nothing is wrong. **ostree merges `/etc` during finalization, not when the deployment is staged.**
+Until `ExecStop` runs, a staged deployment's `/etc` is the new commit's *default* `/etc` and nothing
+more. That is deliberate: it means `/etc` edits you make *after* staging are still picked up, rather
+than frozen at install time.
+
+The quickest way to tell an unmerged `/etc` from a damaged one is to look for a file no machine could
+boot without:
+
+| In the staged deployment's `/etc` | Means |
+|---|---|
+| no `fstab` (and no `crypttab`, if you use one) | not merged yet — normal, you are looking at the commit's default `/etc` |
+| `fstab` present but your own files missing | something really is wrong |
+
+The merge itself is in the finalization log, and so is its cost:
+
+```
+Stopping ostree-finalize-staged.service...
+ostree[...]: Finalizing staged deployment
+ostree[...]: Copying /etc changes: 35 modified, 0 removed, 157 added
+ostree[...]: Refreshing SELinux policy
+ostree[...]: Refreshed SELinux policy in 9439 ms
+ostree[...]: Finalized deployment
+```
+
+On the reference machine that whole `ExecStop` took **23 seconds**: 2 s for the 157 added files, 9 s
+to refresh the SELinux policy, the rest bookkeeping and `syncfs`. Read it back after the fact with
+`journalctl -b -1 -u ostree-finalize-staged`.
+
+**Why this matters more on a Waydroid host than on a stock one.** Waydroid keeps the Android system
+and vendor images under `images_path`, which is `/etc/waydroid-extra/images` by default — so `/etc`
+holds multiple gigabytes that get merged at shutdown. On the reference machine that is **3.0 GB**
+(`system.img` 2.58 GB, `vendor.img` 582 MB), and it is carried into each new deployment: every
+finalized deployment's `/etc` reports the full 3.0 GB under `du`. Two consequences:
+
+- **There is a time budget.** `ostree-finalize-staged.service` ships `TimeoutStopSec=5min` rather
+  than the 45 s `DefaultTimeoutStopSec`, so there is real headroom. But the 2 s above was measured
+  with `/var` on **btrfs**, where the copy is nearly free. On a filesystem without reflink support
+  the same merge is a genuine multi-gigabyte byte copy, and five minutes is the whole budget.
+- **This is the worst possible moment to cut power.** A shutdown that appears to sit still shortly
+  after you asked for a reboot is finalization doing its job, not a hang. Interrupting it puts you
+  in the hard power-off row of [The scenarios](#the-scenarios), and the staged deployment is gone.
+
+One thing this explains away: a staged deployment that has *just* been superseded by another
+`rpm-ostree` command never had a merged `/etc` to lose, so nothing about its empty-looking `/etc`
+tells you whether your local packages survived. Read `rpm-ostree status` for that instead — the
+staged entry lists its own `LocalPackages`.
+
+> All of this is measured, the reflink included: two deployments' `system.img` have different inodes
+> but byte-identical physical extents, every one of which `filefrag -v` flags `shared`. So the
+> 3.0 GB that each deployment's `/etc` reports under `du` costs the disk almost nothing, and `du`
+> totals across deployments are not real consumption. Worth re-running that check if your `/var` is
+> not btrfs, where the copy is genuine.
 
 ## `--apply-live` can report failure after having already applied
 
@@ -77,9 +164,24 @@ happened"**, and do not re-run the install on that assumption; check first.
 | `LiveCommit: <hash>` equal to the pending deployment's `Commit` | the running filesystem is consistent with what the next boot lands on, and nothing is owed |
 | `InterruptedLiveCommit: <hash>` | the content applied, and rpm-ostree does not consider the sequence finished |
 
-With `InterruptedLiveCommit` set, expect a further `--apply-live` on that host to object until
-either the underlying fault is fixed or the machine is rebooted into the staged deployment. A
-reboot clears it.
+With `InterruptedLiveCommit` set, a further `--apply-live` on that host **will** object, and
+fixing the underlying fault is **not** enough to stop it — measured 2026-10-19, with `/var` already
+given back to `root` and `systemd-tmpfiles --dry-run` clean:
+
+```
+error: Previously interrupted while targeting commit 15e75a09…, cannot change target to 1d1fb43f…
+```
+
+An interrupted live apply pins the commit it was targeting, and any new `rpm-ostree install` stages
+a new commit, which is a different target. Three ways out, none of them automatic:
+
+| | What it does |
+|---|---|
+| `rpm-ostree apply-live --target=<the interrupted commit>` | finishes the old apply first; then a plain `apply-live` can move on to the new one |
+| `rpm-ostree apply-live --reset` | puts `/usr` back to the booted commit, briefly undoing whatever the old apply had already landed |
+| reboot into the staged deployment | clears it, and is what the owner chose that day |
+
+Fix the fault first in every case, or the retry fails the same way the original did.
 
 **One cause seen in practice, on a host that had been working for weeks:** `/var` owned by a
 regular user instead of `root`. systemd 259 refuses what it calls an unsafe path transition when a

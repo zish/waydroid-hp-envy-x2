@@ -194,6 +194,14 @@ There is still **no autostart**; packaging is Stage 5.
 
 ### Overlay files need the container *service* restarted, not `waydroid container restart`
 
+> **Corrected 2026-10-04 ([AGENTS.md](../AGENTS.md)).** The first half of this stands: the overlay
+> is one overlayfs mount, and files added after it is made are invisible. The second half does not.
+> The mount is made by `mount_rootfs()` when the Waydroid *session* starts, not by
+> `waydroid container start`, and `systemctl restart waydroid-container.service` ends the session,
+> leaves the rootfs unmounted, applies nothing and still reports success. The procedure below only
+> worked because of its second step, starting a session again. Restart the **session** — on
+> bigtab01, log out of the `waydroid-cage` session and back in.
+
 This is a correction to the method AGENTS.md documents for every overlay in this repo, and it cost
 a session to find. Dropping a file in `/var/lib/waydroid/overlay/{system,vendor}/` and running
 `waydroid container restart` **does nothing**. The overlay is an overlayfs mount whose lowerdir is

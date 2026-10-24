@@ -1,0 +1,59 @@
+#!/bin/sh
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# waydroid-swtpm -- run swtpm as a TPM 2.0 on a unix socket, for
+# waydroid-swtpm.service. docs/65-tpm-keystore.md, docs/71-swtpm-host.md.
+#
+# THIS FILE EXISTS FOR SELINUX, NOT FOR LOGIC.
+#
+# The unit cannot simply say ExecStart=/usr/bin/swtpm. Fedora's swtpm-selinux,
+# which swtpm pulls in on any targeted-policy host, gives /usr/bin/swtpm the type
+# swtpm_exec_t and confines it as swtpm_t -- but only for libvirt to launch. Asked
+# directly of the loaded policy on Fedora 43 and 44 (selinux_check_access, not
+# ausearch), every way systemd could start it is closed:
+#
+#   plain ExecStart        no type_transition from init_t, so it would stay init_t,
+#                          and init_t is denied execute on swtpm_exec_t: 203/EXEC
+#   SELinuxContext=swtpm_t init_t is denied the transition, and swtpm_t could not
+#                          write var_lib_t or var_run_t even if it got there
+#   SELinuxContext=        init_t may transition, but unconfined_service_t is
+#     unconfined_service_t denied entrypoint on swtpm_exec_t
+#
+# What is open: systemd runs a bin_t file -- this one -- as unconfined_service_t
+# by the base policy's own transition, and unconfined_service_t may execute
+# swtpm_exec_t without transitioning (execute_no_trans). So swtpm runs as
+# unconfined_service_t, entered through a file that is ours, with no policy
+# module, no boot-time loader, and nothing granted to any other domain. The
+# alternative -- a CIL module making swtpm_t an init daemon with private state
+# types -- is better confinement and was not done: it is an iterative AVC hunt for
+# every permission a systemd daemon needs, and a type_transition of ours would
+# collide at compile time the day swtpm-selinux grows its own.
+#
+# The state and the socket come from systemd's StateDirectory= and
+# RuntimeDirectory=, which is why this refuses to run without them.
+set -eu
+
+: "${STATE_DIRECTORY:?not set -- run me from waydroid-swtpm.service, which sets StateDirectory=}"
+: "${RUNTIME_DIRECTORY:?not set -- run me from waydroid-swtpm.service, which sets RuntimeDirectory=}"
+
+# One line per start naming the domain, so the journal answers "which domain is
+# swtpm in?" instead of leaving it to be inferred. exec below does not
+# transition, so this is swtpm's domain too; `ps -eZ` confirms it.
+if [ -r /proc/self/attr/current ]; then
+    echo "waydroid-swtpm: SELinux domain $(tr -d '\0' </proc/self/attr/current)"
+fi
+
+# not-need-init: usable without a CMD_INIT on the control channel, so a client
+# needs nothing but the TCTI. startup-clear: TPM2_Startup(CLEAR) on every start,
+# which is what a power-on does -- persistent objects, NV and the hierarchy seeds
+# survive it, transient objects and sessions do not.
+#
+# The control socket's name is not a choice: tcti-swtpm derives it by appending
+# ".ctrl" to the server path, and a mismatch fails as "Failed to set locality"
+# rather than as anything about sockets (docs/65).
+exec swtpm socket --tpm2 \
+    --tpmstate "dir=$STATE_DIRECTORY,mode=0600" \
+    --server "type=unixio,path=$RUNTIME_DIRECTORY/sock,mode=0660" \
+    --ctrl "type=unixio,path=$RUNTIME_DIRECTORY/sock.ctrl,mode=0660" \
+    --flags not-need-init,startup-clear

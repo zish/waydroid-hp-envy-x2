@@ -20,7 +20,82 @@ the thirteen host-side packages and voids most of the Android-side half. See
 [docs/63-second-host-and-android-16.md](docs/63-second-host-and-android-16.md), which also carries
 the next-attempt checklist. Nothing in it has been run on that machine yet.
 
-**App mode is a supported configuration from 2026-10-07, by the owner's decision.** On the Dell,
+**The ATV track moved to `vidiot01` on 2026-10-08, and that host is NOT expendable.** The owner
+deployed the WayDroid-ATV **Android 16 20260803** images to `/etc/waydroid-extra/images` there, so
+the Dell is no longer the target. Read
+[docs/64-vidiot01-atv-host.md](docs/64-vidiot01-atv-host.md) before touching it.
+`vidiot01` is Fedora **43 Workstation — traditional, not ostree** (so `dnf`, no reboot to install a
+package), i5-9300H, Intel UHD 630 **Gen9.5** *plus a nouveau GTX 1050*, 31 GiB, **GNOME on Wayland
+via GDM**, SELinux **Enforcing**, Waydroid `1.6.3-1.fc43`. Reach it with `ssh vidiot01` (key-based,
+user `jmelanson`); **`sudo` there needs a password**, so privileged steps go through the scoped
+`sudoers` drop-in described in docs/64.
+
+Three things about it that are easy to get wrong:
+
+- **It hosts this project's dev container *and* the `vidiot` AP.** The container runs on *host*
+  networking, so the container's `127.0.0.1` is the host's, and NetworkManager's **`Hotspot1`**
+  profile serves `10.42.0.1/24` to other live devices ([docs/45](docs/45-mdns-reflection.md)).
+  **Never touch NetworkManager on `vidiot01`** — one change can drop third-party devices off the
+  air and sever the only access path in the same action.
+- **Waydroid does its own host networking there, in a shell script, and you must read it first.**
+  `/usr/lib/waydroid/data/scripts/waydroid-net.sh` creates the `waydroid0` bridge itself (deleting
+  and recreating any existing one), sets `net.ipv4.ip_forward=1`, runs
+  `firewall-cmd --zone=trusted --add-interface=waydroid0`, installs nft `inet lxc` / `ip lxc`
+  tables with a MASQUERADE rule for `192.168.240.0/24`, and starts a dnsmasq on `192.168.240.1`.
+  Creating the bridge by hand beforehand is harmless but pointless. It **coexists** with
+  `Hotspot1` — verified across two boots: AP still beaconing, 5 stations associated, `wlp0s20f3`
+  still in `nm-shared` while `waydroid0` goes to `trusted`, and the nft tables disjoint
+  (`nm-shared-wlp0s20f3` versus `lxc`, and the script only ever flushes tables it named `lxc`).
+  But that is coexistence, not abstention. Do not repeat the mistake docs/64 records: a
+  `--include=*.py` grep concluded "Waydroid touches no networking", which is true of the Python
+  and false of the product.
+- **`waydroid upgrade` is refused there**, because `/etc/waydroid-extra/images` is a *preinstalled*
+  path. docs/63's claim that image upgrades would work on the second host was about the Dell and
+  **does not carry over**.
+
+**Android 16 BOOTS on `vidiot01` as of 2026-10-08, and
+[`artifacts/binder/waydroid_binder.cil`](artifacts/binder/waydroid_binder.cil) is what makes it
+boot.** A/B pair with the host Enforcing throughout: **bare** → no `sys.boot_completed` in 240 s,
+`bootanim` forever, six services `[restarting]`, **657** AVCs all
+`denied { call } spc_t → container_runtime_t`; **with the module** → booted in **18 seconds**,
+**zero** binder AVCs, every service running, setup wizard on screen
+([screencap](artifacts/binder/a16-boot-vidiot01.png)). **Fedora's own `waydroid` policy module
+(`selinux-policy-43.10-1.fc43`) grants those binder permissions to `waydroid_t`, `unconfined_t` and
+`unconfined_service_t` but NOT to `spc_t`** — so this is a distribution policy gap to send upstream,
+not a local workaround. Two traps worth carrying: **`ausearch` does not surface these denials**
+(no SYSCALL record to anchor to — it reported zero on a boot that produced 657, so grep
+`/var/log/audit/audit.log` instead), and **`waydroid-net.sh` does the host networking** — it creates
+the `waydroid0` bridge itself, sets `ip_forward=1`, runs `firewall-cmd --add-interface`, installs
+nft MASQUERADE rules and a dnsmasq. It coexists with `Hotspot1` (verified across two boots: AP still
+beaconing, 5 stations associated, nft tables disjoint), but read that script before assuming
+Waydroid leaves host networking alone — the Python does, the shell script does not.
+
+**The GUI also works on `vidiot01`, verified 2026-10-08.** The container's hwcomposer is itself the
+Wayland client: it connects to the bind-mounted `/run/xdg/wayland-0`, binds `xdg_wm_base`, and
+creates a real `xdg_toplevel` titled and app-id'd `Waydroid`, which Mutter configures
+**maximised at 1920x1048**. No `wl_display.error` anywhere in the stream. **The trap here is
+expensive and not Waydroid's fault**: `vidiot01` is a laptop whose only connected output is `eDP-1`,
+and GNOME blanks and locks it after 900 s. With the panel off, Mutter still configures the window and
+keeps firing frame callbacks, so every host-side signal looks healthy while
+`wp_presentation_feedback` reports **0 presented / 380 discarded** — awake it is **298 presented / 0
+discarded in 5 s**. Check `/sys/class/drm/card1-eDP-1/{status,enabled,dpms}` and
+`loginctl show-session 2 -p LockedHint` before debugging a GUI fault there. Two more traps: the
+hwcomposer **appears to log nothing** because libwayland's `wl_log` writes to stderr and Android
+`init` points that at `/dev/null`, and **host-side `ss -x` / `/proc/net/unix` cannot see the
+container's sockets** at all, since AF_UNIX is netns-scoped — use
+`nsenter -t <pid> -n`, or `strace -f` the container's `init`.
+
+**The two long-open A16 questions are answered, 2026-10-08, from the image rather than by booting:**
+**`wifid` is a re-measurement** (`SM_PROTOCOL` must go `aidl3`→`aidl6` at API 36, and the supplicant
+surface re-extracted against AIDL **v4**), while **`sensord` is a rewrite** — the A16 vendor image
+contains **no HIDL sensors HAL at all** and declares none, so the guest half of the seam
+[docs/14](docs/14-sensors.md) depends on is gone and an AIDL `ISensors` server would be needed.
+Of the three image-pinned packages, `camera-hal` is **re-derivable** (same binary, same path, new
+hash), `camera-gbm` is **relevant and needs a rebuild**, and `battery`'s target binary is **absent**
+— a re-find, not a re-derive. Details and hashes in docs/64.
+
+**App mode is a supported configuration from 2026-10-07, by the owner's decision.** On the ATV host
+(the Dell then, `vidiot01` now — both GNOME-on-Wayland, so this carries over unchanged),
 Waydroid runs **as an app inside a normal GNOME session**, not as the session. Keep that working:
 anything that only makes sense when Android *is* the session — `cage`, and the `kiosk` group
 around it — is opt-in, never assumed. Two consequences are already known and are in docs/63:
@@ -62,7 +137,10 @@ sudo waydroid shell -- sh -c "dumpsys media.camera | head -30"
 ```
 
 It prints a cosmetic `ERROR: [Errno 13] Permission denied: 1` after each command; output above
-that line is still valid.
+that line is still valid. It also appends `Use '--details-to-stdout' …` **on stdout, followed by the
+whole command line**, so a grep or `case` over its output can match the command's own text. Cut from
+`--details-to-stdout` on before matching anything ([docs/74](docs/74-keystore-stage5-auth.md),
+fault 3).
 
 ### Two constraints worth remembering
 
@@ -731,6 +809,259 @@ Password auth for `sudo` is temporarily disabled, so sudo commands will run unpr
    out of `vold`.
    See [docs/55-appfuse.md](docs/55-appfuse.md).
 
+10. **A TPM behind Android's keystore — swtpm on bigtab01, the real fTPM on vidiot01.** **Added
+    2026-10-10 at the owner's request as two items; scoped the same day as one component with two
+    backends, nothing built.** The request reads as "point Android at the TPM" and cannot be done
+    that way: **nothing in Android speaks TPM 2.0**, so the only consumer is the keystore HAL —
+    HIDL `IKeymasterDevice` 4.0 on A13, AIDL `IKeyMintDevice` plus `ISecureClock` and
+    `ISharedSecret` on A16, both measured running as software services in their images. Deploying
+    swtpm is an afternoon; **the HAL is the project.**
+    **The two machines are not symmetric, and the asymmetry is the whole assessment.** vidiot01 has
+    an **Intel PTT firmware TPM 2.0** (`TPM2_PT_MANUFACTURER` = `INTC`, revision 1.38) on
+    `/dev/tpm0` *and* `/dev/tpmrm0`, with `swtpm`, `tpm2-tools` and `tpm2-tss` already installed —
+    keys sealed there are genuinely unextractable from the machine. **bigtab01 has a TPM 1.2 that is
+    invisible to the OS**: the owner confirmed the hardware on 2026-10-10, and nothing is exposed —
+    no TPM device in any of its ten ACPI tables (no `MSFT0101` string, no `PNP0C31` EisaId in the
+    DSDT, the six static SSDTs or the three loaded at runtime), neither a `TCPA` nor a `TPM2` table,
+    nothing in `/sys/class/tpm/`, and `ima: No TPM chip found` in the journal. The DSDT *calls*
+    `\_SB.TPM.PTS` with no device declared behind it, which is what a device hidden in firmware
+    setup looks like. **So the first action is five minutes in that firmware, not code**, and the
+    outcome worth hoping for is a **1.2 → 2.0 mode switch** — HP shipped those on much of its
+    2015-era fleet — because that puts bigtab01 on vidiot01's single code path with real hardware.
+    **Can the 1.2 be used if that is all there is? Yes, for one job, and it still should not be the
+    backend.** `tpm2-tools` cannot speak to a 1.2 chip at all (the 1.2 stack is TrouSerS, still
+    built for F44 as `trousers-0.3.15-17.fc44`), and 1.2 is RSA-plus-SHA-1 with no ECC, AES or
+    HMAC-SHA256 — so it cannot run Android's crypto. It *can* do the only thing the recommended
+    hybrid design asks of a TPM, which is seal/unseal and wrap a key, exactly as ChromeOS's Chaps
+    did on TPM 1.x. The decision that follows is a design decision rather than a build one:
+    **write the backend contract narrowly — seal, unseal, wrap, unwrap, nothing else — so a 1.2
+    chip, a smartcard or the Yubikey already attached to that machine could satisfy it, and leave
+    the 1.2 implementation unwritten.** swtpm stays the rig because it keeps one TPM 2.0 code path
+    shared with vidiot01; what it does not do is buy any security property, the state being a file
+    on the same disk.
+    **Three things that change the plan, all measured.** It is fast enough: ECDSA create/load/sign
+    land at 0.18–0.21 s each and RSA-2048 keygen at 0.12–0.15 s over five runs, every number an
+    upper bound because it includes `sudo` and TSS startup. It is **already in use** — four
+    persistent handles and two NV indices are resident, in the layout a Windows install leaves, so
+    **nothing here should ever run `tpm2_clear`**; the owner hierarchy takes no password, so our
+    primary needs no clearing. And it has **three transient object slots**, which forces the design:
+    wrapped blobs on disk, load and flush per operation, a hard concurrency cap.
+    **The recommendation is a `strongbox` instance, not a replacement for `default`.** Both
+    interfaces are instanced; Android surfaces the second as `FEATURE_STRONGBOX_KEYSTORE` and apps
+    reach it only by asking. Failure is then contained to apps that opted in, the gate is one
+    overlay feature XML — the [docs/31](docs/31-wifi-stage2.md) stage-0 mechanism again — and no
+    stock service has to be stood down the `wificond.rc` way. Replacing `default` would put the
+    lockscreen and every app's keys behind our first draft at 0.2 s an operation. The honest cost is
+    that almost nothing asks for StrongBox, so the visible result is a feature flag and a probe APK.
+    **Attestation is an explicit non-goal and cannot be delivered.** `attestKey` needs a chain rooted
+    in a Google-signed key; a TPM can only self-sign, and its EK certificate attests to an Intel
+    fTPM rather than to an Android device. Key *protection* is achievable; hardware attestation is
+    not, on either machine, ever.
+    **Two traps are already paid for and one is new.** SELinux is **not** in the way — measured with
+    `selinux.selinux_check_access()` rather than waited for in `ausearch`, per
+    [docs/42](docs/42-backlight-selinux.md): `unconfined_service_t`, `unconfined_t` and
+    `container_runtime_t` all hold `read write open ioctl` on `tpm_device_t`, so no policy module is
+    needed. The daemon needs root or group `tss` for `/dev/tpmrm0` (0660 `root:tss`). And **A16 will
+    hit the binder `transfer` denial where A13 will not**: `IKeyMintDevice::begin()` returns an
+    `IKeyMintOperation` binder, which is exactly the `dontaudit`ed permission that cost
+    [docs/35](docs/35-wifi-stage5.md) a day and presents as a bare `DeadObjectException`.
+    **Where the firmware answer actually lives, and what cannot answer it.** SMBIOS cannot: the TPM
+    Device record is DMI **type 43**, added in SMBIOS 3.1, and bigtab01's Insyde **F.0F** firmware
+    (2016-05-30, *HP ENVY x2 Detachable PC 13*, SKU `J9M66UAR#ABA`) reports SMBIOS **2.7**, so there
+    is no record to read while the device is hidden. UEFI cannot either — **none** of its 73
+    `efivars` is a TCG, TPM or physical-presence variable. So it is setup, under **Security**
+    (*Security Device Support* / *TPM Device* / *Intel Platform Trust Technology*, then *TPM State*,
+    then a *TPM Version* or *TPM Device Mode* selector, which **is** the switch if it exists) — and
+    DMI type 24 says an **administrator password is set**, so that password is needed to get in. If
+    settings exist but no version selector, enable it and read
+    `/sys/class/tpm/tpm0/tpm_version_major`, which answers `1` or `2` definitively. If there is no
+    TPM entry at all — likely on a consumer Insyde BIOS, since HP's *TPM Configuration Utility* was
+    a commercial-line tool — one attended test remains: `tpm_tis` is built in
+    (`CONFIG_TCG_TIS=y`), so `rpm-ostree kargs --append-if-missing=tpm_tis.force=1` plus a reboot
+    probes the standard TIS window with no ACPI declaration needed. Do that with the machine in
+    front of you, since a reboot there means LUKS and starting `sshd` by hand.
+    **And swtpm does not depend on any of it — demonstrated 2026-10-10 in the dev container**, which
+    has no usable TPM at all. `libtss2-tcti-swtpm.so` ships in tpm2-tss on the dev box, F43 *and*
+    F44, so no custom TCTI is needed: a software TPM 2.0 (`IBM`/`SW`, 3 transient slots — the same
+    as the Intel PTT — 65 persistent, NV surviving across client connections) answered
+    `tpm2_createprimary` in **0.015 s** and an ECC key create in **0.014 s**, with no privilege. That
+    is ~12× the hardware's speed, which is a **warning**: timing claims belong to vidiot01, never to
+    the rig. Two gotchas: the TCTI appends `.ctrl` itself, so the control socket must be
+    `<server-path>.ctrl` or it fails with *Failed to set locality*; and swtpm rejects a long unixio
+    path outright. Prefer the unix-socket shape over `swtpm cuse` (a `/dev/vtpmX` whose SELinux label
+    would need dealing with) and over mssim-over-TCP (a port on the machine that serves the `vidiot`
+    AP) — and note swtpm's control channel is **not** the MS simulator protocol, so `tcti-mssim`
+    against it fails on `MS_SIM_NV_ON`.
+    **Before any of it, check bigtab01's firmware for PTT.** If a real TPM is hiding behind a
+    disabled setting, that machine joins vidiot01's story — and gets the thing a TPM is actually
+    worth there, which is not Android at all: [docs/02](docs/02-ssh-access.md)'s cold-boot LUKS
+    prompt could become a TPM-sealed unlock. swtpm cannot do that, because its state would live on
+    the disk it is unlocking.
+    Prior art to read first, closest match last: `divegeek/JavaCardKeymaster` and
+    `ThalesGroup/javacard-keymint-hal` for the StrongBox-instance shape,
+    `Infineon/optiga-tpm-aosp` for tpm2-tss inside AOSP against a simulator, and ChromeOS's
+    **`arc-keymaster`** — a host daemon serving Android's keymaster HAL backed by the host TPM
+    through Chaps and cryptohome, which is this project's own daemon architecture already shipping
+    for this exact interface.
+    **Stage 0 is done, 2026-10-19: `waydroid-ext-swtpm` 1.0.0 is installed and verified on
+    bigtab01** — swtpm under systemd on `/run/swtpm-waydroid/sock`, 15/15 and then 19/19 across a
+    restart, zero AVCs — and **Android still sees nothing, by design**: the owner chose to stop at
+    stage 0, and the keystore HAL (stages 1–5) is the part that would change that. Four findings
+    shaped it. **systemd cannot start Fedora's swtpm directly**: swtpm-selinux confines it for
+    libvirt only, so a plain unit would stay `init_t` and be denied `execute`, and neither
+    `SELinuxContext=swtpm_t` nor `=unconfined_service_t` is permitted — a `bin_t` wrapper entered
+    as `unconfined_service_t` is the one open route, with no policy module. **Anything named
+    `waydroid-*` under `/run` or `/var/lib` inherits Waydroid's SELinux types** by prefix, so the
+    directories are `swtpm-waydroid`; check `matchpathcon` before naming any future one.
+    **tpm2-tools leak every object into swtpm**, which has no resource manager, so the third object
+    exhausts its three transient slots and swtpm refuses everything until restarted — the check
+    flushes what it loads, and the backend must own the connection. And **swtpm logs a line per
+    TPM command**, filtered with `LogFilterPatterns=`. The owner enabled **Secure Boot** first; it
+    does not enable the TPM 1.2 (still no device, no `TCPA`/`TPM2` table), and no OS-side command
+    can read this firmware's settings — `hp-bioscfg` exists but enumerates nothing useful. Secure
+    Boot also put the kernel in `lockdown=integrity`, which **refuses hibernation** (measured) and
+    blocks `/dev/port`, goal 2's last vibration avenue. See
+    [docs/71-swtpm-host.md](docs/71-swtpm-host.md).
+    **Stage 1 is done, 2026-10-21 — [docs/73](docs/73-keystore-stage1-engine.md):** the TPM-backed
+    keyblob engine ([keystore/](keystore)), 15/15 on the dev box and bigtab01, EC P-256 and AES keys
+    as native TPM objects with tag enforcement, behind a `TpmBackend` seam (tpm2-tools-exec now,
+    ESAPI — the one that ships — next). No binder, nothing Android can see yet. **Stage 2 answered
+    itself from a clean boot, 2026-10-22, with no overlay armed:** `keystore2` reaches for a StrongBox
+    KeyMint through its km_compat *Legacy wrapper* every boot and fails `-68`
+    (`HARDWARE_TYPE_UNAVAILABLE`) **without wedging** — the lockscreen stays up — so OQ4's absent case
+    is safe and OQ3 is yes: the discovery path is live and wants a *served*
+    `keymaster@4.0::IKeymasterDevice/strongbox`, not just the feature XML. **Stage 3a bound it**
+    (keystore2 tolerates our empty `computeSharedHmac`, so OQ4 is safe) **and stage 4 works from an
+    app, 2026-10-22: [keystore-probe/](keystore-probe), an ordinary app, passed 20/20** — EC P-256
+    keys at security level STRONGBOX that sign (verified in software), AES-GCM at 37 B and 100 KB and
+    AES-CBC round-tripping, all through `waydroid-keystored` ([keystore/hal/](keystore/hal)) and
+    swtpm. Four findings, each in [docs/73](docs/73-keystore-stage1-engine.md): stage 1 had **two
+    wrong constants its selftest could not see** (`PURPOSE` is `ENUM_REP`; `INVALID_KEY_BLOB` is −33,
+    not −24); **libhwbinder never registers an empty vector's buffer with the kernel**, so libgbinder's
+    reader stalls on every empty child — measured as 412 bytes of data and 16 of offsets, two objects
+    where nine were written; **`tpm2_encryptdecrypt` takes ≤ 65 535 bytes a run**; and **host
+    processes cannot binder-call each other here** (`unconfined_t`↔`unconfined_t` is denied), so the
+    bench client runs as `container_runtime_t`. Each daemon build costs a logout, because keystore2
+    binds once a session; `km-bench` against a second `strongbox-bench` instance tests a build over
+    real binder without one. **This image's default keymaster is SOFTWARE-level**, so the StrongBox is
+    the only key store here whose keys are not files.
+    **Stage 5 works in Android, 2026-10-23 — [docs/74](docs/74-keystore-stage5-auth.md).** The
+    StrongBox now takes part in keystore2's shared-secret negotiation for real: two participants, with
+    H matching the TEE's, because this image's pre-shared key is AOSP's 32 zero bytes. A StrongBox key
+    bound to the lockscreen signed **1 s after the owner's real pattern unlock**, and refused both
+    before it and 18 s after. **This image's gatekeeper signs nothing**: every auth token carries a MAC
+    of 32 zero bytes. So the daemon runs `--accept-unsigned-auth-tokens` and reports the auth tags at
+    KEYSTORE level, rather than claim a binding it cannot verify. keystore2 is the real gate, and in
+    both refusals it was keystore2 that refused, before the StrongBox was asked. **Android here has the
+    owner's Pattern lock**, so `bin/keystore-auth-test.sh` uses the owner's unlock and never sets,
+    enters or clears the credential. The feature XML is still **not deployed**, and that is now a
+    policy question for the owner rather than a missing piece.
+    [artifacts/keystore/hand-deploy.sh](artifacts/keystore/hand-deploy.sh) was the way to put a build
+    in front of keystore2 before the packages; it refuses on a host that has them, where a drop-in on
+    the unit does the same job between sessions.
+    **Packaged and installed on bigtab01 2026-10-23 — [docs/75](docs/75-keystore-packaging.md):**
+    `waydroid-ext-keystored` (the daemon as a unit from boot, wifid's shape) and
+    `waydroid-ext-strongbox` (the manifest as a derive row, hard-requiring the daemon), on
+    `waydroid-ext-overlay-sync` 1.2.0, whose derive rows can now **insert** bytes. Two findings
+    shaped it. **The stage-5 daemon could not ship as it was**: ungated, it wrote 7,551 binder
+    failure pairs to the kernel log in two hours at the greeter, docs/69's fault, so it now waits on
+    `GetSession` first. And **open question 4 is still open**: docs/73's "answered safe" came from a
+    boot with the strongbox *undeclared*, so a declared strongbox with nothing serving it has never
+    been booted, and the packages are shaped to keep it unreachable.
+    **Installed the same evening and verified through a real boot**: the packaged daemon runs as
+    `unconfined_t`, was silent at the greeter, registered 64 ms before keystore2 asked for it, and the
+    auth test passed **32/32** against it. One defect, fixed in **`keystored` 1.0.1** that evening
+    and verified by another boot and another 32/32: the unit's `After=waydroid-swtpm` waits only for
+    a `Type=simple` fork, so 1.0.0's boot-time TPM check ran before swtpm listened and logged a false
+    `TPM not ready`. 1.0.1 checks from inside the session wait. **Checking after the gate was the
+    obvious fix, and it was the wrong one**: it would put a TPM exec between the session appearing and
+    the strongbox registering, and keystore2 asked 64 ms after the gate opened.
+    See [docs/65-tpm-keystore.md](docs/65-tpm-keystore.md).
+11. **A fingerprint HAL fed by libfprint — Chipsailing on bigtab01, Goodix on vidiot01.** **Added
+    2026-10-10 at the owner's request as two items; scoped the same day as one, nothing built.**
+    libfprint is already the abstraction over the two readers, so the Android side cannot tell
+    `2541:0236` from `27c6:538d` and must not be written twice, the way `NmBackend` is one
+    implementation of [docs/29](docs/29-wifi-plan.md)'s contract. That seam is what lets the reader
+    be chosen per host rather than per Android version — which is what the hardware turned out to
+    require.
+    **The Android side starts from the best position this project has had.** On **both** images the
+    biometric framework is present, running and serving **zero sensors**: `biometric`, `auth` and
+    `lock_settings` are all registered, `android.software.secure_lock_screen` is declared, and
+    `dumpsys biometric` reports an empty `Sensors:` list. Neither image declares
+    `android.hardware.fingerprint` (of 76 features on A13, 85 on A16), neither has a fingerprint
+    feature XML among 22+24 and 19+26 permission files, and neither carries a fingerprint HAL binary
+    or AIDL library at all. That is [docs/31](docs/31-wifi-stage2.md)'s stage 0 exactly — one overlay
+    XML wakes a dormant framework and the failure after it is informative. Both images carry the
+    AIDL *and* HIDL framework paths, measured from their own dex; **write AIDL**, which serves both.
+    **The shortcut does not exist**: AOSP's property-driven virtual fingerprint HAL is in neither
+    image, so there is nothing to drive from the host for free.
+    **The host side holds two surprises, one in each direction.** Stock **libfprint 1.94.100** — the
+    same version on both hosts — **knows neither reader**: a scan of the library's own device tables
+    finds zero hits for `2541:0236` and zero for `27c6:538d`, against exactly one hit each for two
+    control devices, and the library carries no Chipsailing string of any kind. But the owner's work
+    on it, at `../libfprint-goodix-538d-redhat`, is an **RPM packaging project with CI** rather than
+    a bare checkout: two separate forks pinned in `upstreams.json` (`syshlted/libfprint-goodix-538d`
+    on base v1.94.100, `syshlted/libfprint-Chipsailing-CS9711` on base v1.94.10), the **Goodix one
+    already building, linting and running upstream's test suite in `%check`**, the CS9711 pinned and
+    runnable through a rootless-podman dev rig (`scripts/fprint-dev.sh`) but **not yet given a
+    spec**. So "deploy the owner's libfprint" is an install, not a project — and the one real
+    constraint is that both specs are `Name: libfprint`, so **one host gets one reader** until the
+    two drivers ever share a tree.
+    **One false lead, recorded because it reads as proof:**
+    `/usr/lib/udev/hwdb.d/60-autosuspend-fingerprint-reader.hwdb` lists both readers by exact ID on
+    both hosts, and that file belongs to **`systemd-udev`**, not to libfprint. It is an autosuspend
+    quirk list, not a support claim.
+    **The readers are not where the two items put them, and that improves the plan.** Neither is
+    attached to either Waydroid host today (bigtab01 has a Yubikey, a webcam and Bluetooth; vidiot01
+    a webcam, Bluetooth and two USB disks, with no fingerprint device on either root hub), and the
+    owner placed them on 2026-10-10: **the Goodix is integrated in a personal laptop** and cannot
+    move, while **the Chipsailing is external USB** and can. Since the Android side cannot tell the
+    readers apart, **the CS9711 is the reader for both Waydroid hosts and the A16 half needs no
+    Goodix at all** — which removes the only hard hardware blocker here. The Goodix stays a
+    libfprint-side concern, already packaged, unless Waydroid ever runs on the laptop that has it.
+    Measured too: the **CS9711 is an image sensor matched in software** (its fork pins SIGFM, plain
+    C, OpenCV dropped) while the **Goodix is match-on-chip**, so the authoritative template store is
+    in a different place for each — and the CS9711's matching runs on bigtab01's two-core Broadwell,
+    which is where its timing has to be measured rather than on the laptop it was developed on.
+    **Four decisions before code, and one of them defers the hard problem.** `getSensorProps`
+    declares the sensor CONVENIENCE, WEAK or STRONG, and only STRONG needs a verifiable
+    `HardwareAuthToken` — so **start at CONVENIENCE**, get unlock working, and promote after goal
+    10 makes `computeSharedHmac` ours. The prediction to test rather than believe: unlock will work
+    with an unverifiable token and `setUserAuthenticationRequired(true)` keys will not. Then: whether
+    `fprintd` or we own the reader (taking it directly costs the host's own login fingerprint auth,
+    which matters on vidiot01 and may not on bigtab01's kiosk); and that the Goodix family is
+    match-on-chip with finite slots, which Android's enrolment UI knows nothing about.
+    **The binder `transfer` trap applies here on both images**, and earlier than anywhere else:
+    `createSession()` takes an `ISessionCallback` binder *and* returns an `ISession` binder, so
+    binders cross both ways on the first useful call. Also: enrolling anything requires a lockscreen
+    credential first, which changes how bigtab01's kiosk comes back from sleep — decide that with
+    the owner at the machine, see [docs/52](docs/52-launcher-lock-and-wake.md).
+    See [docs/66-fingerprint-hal.md](docs/66-fingerprint-hal.md).
+
+12. **Direct hardware passthrough — optional "pick-and-choose" control of host devices.**
+    **Added 2026-10-21 at the owner's request as a roadmap item; scoping-only, and explicitly
+    gated on a design discussion before anything is built.** The vision is a family of opt-in RPMs
+    (`waydroid-direct-usb` as the foundation, then `-fingerprint`, `-bt`, `-net`, `-audio`,
+    `-boot-kiosk`, `-direct-input`) that let a user hand Waydroid *direct* ownership of USB devices,
+    a network interface, Bluetooth, removable storage and USB/BT audio — skipping NetworkManager,
+    BlueZ, SDDM and parts of systemd where that can be done reliably, up to booting straight into
+    Waydroid. **This does not replace anything already built; it is a parallel set of options.**
+    The load-bearing fact is that Waydroid is **LXC, not a VM**: there is no IOMMU/VFIO passthrough,
+    the host kernel's drivers always run host-side, and "give Android a device" means moving it into
+    a namespace (net) or allowing it in the container's cgroup device filter and bind-mounting the
+    node (USB/char), plus masking whatever host userspace owns it. VT-x/VT-d are therefore
+    irrelevant here, and SELinux cannot be "containerized" — inside the container it is effectively
+    Disabled, so the only choices are host-Enforcing with targeted CIL or host-Permissive globally.
+    **The single-radio hard constraint stands**: bigtab01's only NIC is its Wi-Fi, so handing the
+    radio to Android strands the host — the direct-`-net`/`-bt` options are unsafe on bigtab01 and
+    are for multi-radio hosts only. Ground-truthed 2026-10-21: `lxc-device add`/`del` is present
+    (lxc 6.0.6, container at `/var/lib/waydroid/lxc/waydroid`) and is the runtime bind/unbind
+    primitive, but on this host's unified cgroup **v2** the device filter is an eBPF program, so
+    clean *detach*/revoke is the fiddly half and a live keyboard toggle is better done with
+    `EVIOCGRAB` than by repeated cgroup attach/detach. **Nothing here is scoped for build** until the
+    owner and I have talked it through. Full feasibility, per-subsystem verdicts and the open
+    questions are in [docs/72-direct-hardware-options.md](docs/72-direct-hardware-options.md).
+
 **Screen brightness — DONE, and not on the list above.** Added at the owner's request on
 2026-09-09, between Wi-Fi Stage 5 and removable media. Android's brightness slider now drives the real
 panel backlight. The machine has **no ambient light sensor** — the ITE8350 declares only five
@@ -931,6 +1262,18 @@ shipped in a package, and it came from the host rather than from a third party.
 and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-binaries.md).
 
 - `docs/` — numbered investigation notes, one per topic
+- `tests/` — the offline tests: `tests/run.sh` runs stdlib `unittest` over the daemons' decision
+  logic, the C++ tests in `tests/cpp/`, each Kotlin app's `<app>/test/Tests.kt`, the
+  `artifacts/*/selftest.sh` scripts, the C++ tests again under ASan/UBSan, the lint gate
+  (shellcheck, ruff, actionlint, zizmor, gitleaks over all history) and `tests/policy.py` — every
+  tracked binary hash-pinned in `tests/binary-allowlist`, every relative doc link resolving, every
+  XML file parsing. Same script in lefthook's `pre-push` and in
+  [.github/workflows/ci.yml](.github/workflows/ci.yml), whose `rpm` job also builds every
+  shipped `.mod` from source on Fedora. **CI first ran on 2026-10-23, when the workflow was first
+  pushed, and was green on the fourth run.** None of the four faults it found could be seen from the
+  dev box: a missing `libstdc++-static`, a PyGObject shim, symlinks in `-debuginfo` packages, and a
+  man page in a nodocs container. Distinct from `bin/*-test.sh`, which need the live host.
+  See [docs/53](docs/53-release-readiness.md)
 - `bin/` — helper scripts for working with the host, incl. stdlib-only V4L2 probes
   (`v4l2-formats.py`, `v4l2-curfmt.py`, `v4l2-grab.py`) written because `v4l-utils` is not
   installed and layering a package on an Atomic host costs a reboot, plus the sensor tools
@@ -992,6 +1335,17 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   DocumentsUI a `content://` URI — even its status screen lists what it was *told*, never what is on
   disk. Same no-Gradle build as `sensor-app/`, except it does generate `R` (the notification needs a
   real drawable id, and `getIdentifier()` would trade a compile error for a silent runtime null)
+- `keystore/` — the TPM keyblob engine for goal 10 (`keystore-engine selftest` runs it against a
+  throwaway swtpm, checked against outside references), and in `keystore/hal/` `waydroid-keystored`,
+  the keymaster@4.0 StrongBox it serves over hwbinder, plus `km-bench`, which drives a second daemon
+  instance over real binder so a build can be tested without a logout. Read
+  [docs/73](docs/73-keystore-stage1-engine.md) before touching the HIDL reader: libhwbinder's empty
+  children are not kernel objects
+- `keystore-probe/` — "Keystore Probe", a dependency-free Kotlin app that asks AndroidKeyStore for
+  StrongBox keys the way any app would and checks every result against something else: signatures in
+  the software provider, the certificate against its own key, `KeyInfo.getSecurityLevel()` for where
+  the key really is. Same no-Gradle build as `sensor-app/`; `--install` deploys, runs and prints the
+  report. Unlock Android once after a boot first, or it reports nothing
 - `bt-app/` — "Bluetooth", a dependency-free Kotlin app that manages the *host's* BlueZ through
   `waydroid-btd`. It declares only `INTERNET`: it never touches Android's Bluetooth APIs, because
   this image has none, and the radio it drives is on the other side of a socket. It holds no state
@@ -1039,7 +1393,11 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   `artifacts/pidguard/` caps the container's PID namespace below the 32-bit bionic cliff, with
   `waydroid-pid-reset` for a container already past it; read its README for why the guard
   reconciles on a timer rather than hooking an event, and why it refuses to run on a pre-6.14
-  kernel where `pid_max` is still global
+  kernel where `pid_max` is still global.
+  `artifacts/swtpm/` is `waydroid-swtpm`, a software TPM 2.0 on a unix socket for goal 10's
+  keystore backend, and `waydroid-tpm-check`, which runs one TPM sequence through any TCTI; read
+  the wrapper's header before "simplifying" `ExecStart=` to `/usr/bin/swtpm` — under Fedora's
+  swtpm-selinux that unit cannot start
 - `packaging/` — RPM specs and build drivers. The current design is **one source package per
   modification**, generated from `packaging/mods/*.mod` by `gen-spec.sh` and built by
   `build-mod.sh` ([docs/47-package-split.md](docs/47-package-split.md)); the four hand-written
@@ -1047,12 +1405,23 @@ and the migration are in [docs/54-no-vendored-binaries.md](docs/54-no-vendored-b
   can build. `packaging/README.md` records what has actually been through `rpmbuild`.
   **Read it before assuming anything is packaged**, and get the count from
   `packaging/gen-spec.sh --list` rather than from prose — it marks the unshipped ones and cannot
-  go stale. **26 `.mod` files as of 2026-10-06, 25 shipped, and all 25 installed on bigtab01** —
-  `mdns` was the last and closed that gap; `dexopt` is the only one absent and declares
-  `SHIPPED=no`. Two caveats behind the headline: `media` runs 1.0.0 against a `.mod` declaring
-  1.1.0 that was never built, and the fifth migration left `InterruptedLiveCommit` set from a
-  pre-existing `/var` ownership fault (`packaging/README.md`, *Fifth migration*;
-  [docs/user/ostree.md](docs/user/ostree.md) has the general case). The newest is `mdns`, which is also
+  go stale. **28 `.mod` files as of 2026-10-19, 27 shipped; 26 of them installed on bigtab01**,
+  counted from that day's `rpm-ostree status` rather than carried forward. **30 as of 2026-10-23**:
+  `keystored` and `strongbox` were added, built, install-tested on the dev box, and installed on
+  bigtab01 the same evening, which makes **28 installed there**, counted from that evening's
+  `rpm-ostree status` ([docs/75](docs/75-keystore-packaging.md)). The one shipped and not
+  installed is `binder-policy`, built and tested but not installed anywhere. **`mdns` was found
+  missing the same day although this file said it was installed**: its package, reconciler and
+  unit were absent while the avahi config it manages stayed in force. It had been lost with its
+  staged deployment when a 2026-10-12 suspend never resumed — its live apply was never followed by
+  a boot into it, and **a live apply is not an install until that reboot happens**. Reinstalled
+  and verified the same evening (`--verify` exits 0). `dexopt` is the only one absent and declares
+  `SHIPPED=no`. One caveat behind the headline: `media` runs 1.0.0 against a `.mod` declaring
+  1.1.0 that was never built. The fifth migration's `InterruptedLiveCommit` is **gone** since the
+  2026-10-19 reboot, and `/var` is `root:root` again at the owner's direction — but fixing `/var`
+  did **not** unblock `apply-live`, which pins an interrupted target
+  ([docs/71](docs/71-swtpm-host.md); [docs/user/ostree.md](docs/user/ostree.md) has the general
+  case). The newest is `swtpm` ([docs/71](docs/71-swtpm-host.md)). `mdns` was
   the first host modification to declare a `CHECK` (its `%check` reproduces the verified
   `avahi-daemon.conf` from the stock one byte for byte, and `gen-spec.sh` needed a one-line fix
   before a host `.mod` could declare one at all). Revised 2026-09-24, there were 14 `.mod`

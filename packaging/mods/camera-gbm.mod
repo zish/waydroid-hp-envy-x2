@@ -14,6 +14,12 @@ KIND=overlay
 # happily on an aarch64 host and break Android there instead of on the shelf.
 ARCH=x86_64
 
+# Android 13 only, and on A16 it is not merely untested but inapplicable: the
+# running container there reports ro.hardware.gralloc=minigbm, and init rejects
+# the gbm_mesa allocator as a duplicate interface, so libgbm_mesa_wrapper.so is
+# never loaded and the docs/08 bug cannot be live. docs/64.
+ANDROID="13"
+
 SUMMARY="Waydroid minigbm wrapper rebuilt so camera buffer imports get a real width"
 
 # minigbm is Apache-2.0 (AOSP external/minigbm, via waydroid/android_external_minigbm);

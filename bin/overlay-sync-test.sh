@@ -100,7 +100,6 @@ mke2fs -q -t ext2 -b 1024 -d "$T/imgsrc" "$T/images/vendor.img" 8192 2>/dev/null
 # itself worth exercising rather than working around.
 PLAIN_SRC='artifacts/dexopt/dexopt.prop'
 [ -f "$repo/$PLAIN_SRC" ] || { echo "fixture input missing: $repo/$PLAIN_SRC" >&2; exit 1; }
-PLAIN_SHA=$(sha "$repo/$PLAIN_SRC")
 
 mkdir -p "$T/var/lib/waydroid"
 cat >"$T/var/lib/waydroid/waydroid.cfg" <<EOF

@@ -29,6 +29,13 @@ Wants=NetworkManager.service
 # its startup to the container would throw that away and make a container
 # restart able to take the daemon with it.
 #
+# That wait is gated on id.waydro.Container's GetSession rather than entered
+# cold -- the binder poll behind it costs two kernel log lines per second for
+# as long as no session exists, which on a tablet left at the greeter reached
+# 29% of this host's journal (docs/69-wifid-binder-ping-spam.md).  The gate is
+# a D-Bus call, not a dependency: it changes what the daemon does while it
+# waits, and nothing about when systemd starts it.
+#
 # This is also why ExecStart names /dev/binderfs/binder rather than the
 # daemon's own default of /dev/binder: /dev/binder is a symlink created by
 # waydroid-container.service's ExecStartPre, so using it would smuggle the

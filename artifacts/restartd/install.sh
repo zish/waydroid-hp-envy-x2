@@ -12,7 +12,7 @@ PREFIX=${PREFIX:-/usr/local}
 BINDIR=${BINDIR:-$PREFIX/bin}
 UNITDIR=${UNITDIR:-/etc/systemd/system}
 
-src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+src=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd)
 
 install -D -m 0755 "$src/waydroid-restartd" "$DESTDIR$BINDIR/waydroid-restartd"
 sed "s|@BINDIR@|$BINDIR|g" "$src/waydroid-restartd.service" \

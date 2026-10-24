@@ -144,6 +144,7 @@ CXXFLAGS=(
 # shellcheck disable=SC2206
 CXXFLAGS+=($GLIB_CFLAGS)
 
+# shellcheck disable=SC2054  # -Wl,<opt> is one linker flag, not a list
 LDFLAGS=(
 	-L"$OUT/sysroot/lib"
 	-Wl,--gc-sections

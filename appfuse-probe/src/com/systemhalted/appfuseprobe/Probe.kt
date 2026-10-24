@@ -25,7 +25,10 @@ import java.util.Random
  * on another. Recording it here means the same probe that proves the mount works also
  * says what this container's transfer granularity is.
  */
-private class PatternCallback(private val fileSize: Long) : ProxyFileDescriptorCallback() {
+private class PatternCallback(
+    private val fileSize: Long,
+    private val salt: Int = 0,
+) : ProxyFileDescriptorCallback() {
 
     @Volatile var reads = 0
     @Volatile var maxRead = 0
@@ -36,14 +39,56 @@ private class PatternCallback(private val fileSize: Long) : ProxyFileDescriptorC
     override fun onRead(offset: Long, size: Int, data: ByteArray): Int {
         reads++
         if (size > maxRead) maxRead = size
-        val available = (fileSize - offset).coerceIn(0L, size.toLong()).toInt()
-        Pattern.fill(data, 0, offset, available)
-        return available
+        return servePattern(fileSize, offset, size, data, salt)
     }
 
     override fun onRelease() {
         released = true
     }
+}
+
+/**
+ * What `onRead` does with a request, without the `ProxyFileDescriptorCallback` around
+ * it: clamp [size] to the bytes left before [fileSize] -- zero at or past EOF, never
+ * negative -- fill that many bytes of [data] from [Pattern] as if read at [offset], and
+ * return the count. A short count is how a FUSE read reports EOF; an error here would
+ * turn the probe's "a read spanning EOF is short" check into a failure of the probe.
+ */
+// internal rather than private only so appfuse-probe/test can reach it.
+internal fun servePattern(fileSize: Long, offset: Long, size: Int, data: ByteArray, salt: Int = 0): Int {
+    val available = (fileSize - offset).coerceIn(0L, size.toLong()).toInt()
+    Pattern.fill(data, 0, offset, available, salt)
+    return available
+}
+
+/**
+ * One pseudorandom read: a length in 1..[maxLength] and an offset at which a read of
+ * that length ends at or before [fileSize]. The draws are taken in this order --
+ * `nextInt` then `nextDouble` -- so a fixed seed names the same reads on every run.
+ */
+// internal rather than private only so appfuse-probe/test can reach it.
+internal fun spot(random: Random, maxLength: Int, fileSize: Long): Pair<Long, Int> {
+    val length = 1 + random.nextInt(maxLength)
+    val offset = (random.nextDouble() * (fileSize - length)).toLong()
+    return offset to length
+}
+
+/**
+ * The report lines for a throwable and everything under it, at most eight deep -- the
+ * message alone is rarely enough, and a cause cycle must not loop forever.
+ */
+// internal rather than private only so appfuse-probe/test can reach it.
+internal fun failureLines(what: String, t: Throwable): List<String> {
+    val lines = mutableListOf("  $what FAILED")
+    var e: Throwable? = t
+    var depth = 0
+    while (e != null && depth < 8) {
+        val prefix = if (depth == 0) "    throw " else "    cause " + "  ".repeat(depth)
+        lines += "$prefix${e.javaClass.name}: ${e.message}"
+        e = e.cause
+        depth++
+    }
+    return lines
 }
 
 /**
@@ -83,15 +128,7 @@ class Probe(private val context: Context) {
 
     /** Prints a throwable and everything under it -- the message alone is rarely enough. */
     private fun fail(what: String, t: Throwable) {
-        emit("  $what FAILED")
-        var e: Throwable? = t
-        var depth = 0
-        while (e != null && depth < 8) {
-            val prefix = if (depth == 0) "    throw " else "    cause " + "  ".repeat(depth)
-            emit("$prefix${e.javaClass.name}: ${e.message}")
-            e = e.cause
-            depth++
-        }
+        failureLines(what, t).forEach(::emit)
     }
 
     fun run(): String {
@@ -235,8 +272,7 @@ class Probe(private val context: Context) {
             val random = Random(SEED)
             val buf = ByteArray(MAX_SPOT)
             repeat(200) {
-                val length = 1 + random.nextInt(MAX_SPOT)
-                val offset = (random.nextDouble() * (FILE_SIZE - length)).toLong()
+                val (offset, length) = spot(random, MAX_SPOT, FILE_SIZE)
                 val got = Os.pread(fd, buf, 0, length, offset)
                 if (got != length) return@check "pread($offset, $length) returned $got"
                 val bad = Pattern.firstMismatch(buf, got, offset)
@@ -311,8 +347,7 @@ class Probe(private val context: Context) {
                 val random = Random(SEED + 1)
                 val buf = ByteArray(4096)
                 repeat(50) {
-                    val length = 1 + random.nextInt(buf.size)
-                    val offset = (random.nextDouble() * (FILE_SIZE - length)).toLong()
+                    val (offset, length) = spot(random, buf.size, FILE_SIZE)
                     val got = Os.pread(fd.fileDescriptor, buf, 0, length, offset)
                     if (got != length) return "cold pread($offset, $length) returned $got"
                     val bad = Pattern.firstMismatch(buf, got, offset)
@@ -335,38 +370,42 @@ class Probe(private val context: Context) {
      * 512 on real hardware. The question here is narrower: each proxy fd is a separate
      * AppFuse *mount* keyed by mount id, so if the fix works for one and not for the
      * second the mount path is only half right.
+     *
+     * Each fd serves its own salt of [Pattern] and is checked against that salt, so a
+     * read answered by the wrong mount fails instead of passing on identical bytes.
      */
     private fun concurrency() {
         rule("simultaneous fds")
         val storage = context.getSystemService(StorageManager::class.java) ?: return
         val thread = HandlerThread("appfuse-probe-multi").apply { start() }
         val handler = Handler(thread.looper)
-        val open = mutableListOf<ParcelFileDescriptor>()
+        // Each fd with the salt it serves, which is not its list index if one failed.
+        val opened = mutableListOf<Pair<Int, ParcelFileDescriptor>>()
         try {
             repeat(8) { i ->
                 try {
-                    open += storage.openProxyFileDescriptor(
-                        ParcelFileDescriptor.MODE_READ_ONLY, PatternCallback(FILE_SIZE), handler,
+                    opened += i to storage.openProxyFileDescriptor(
+                        ParcelFileDescriptor.MODE_READ_ONLY, PatternCallback(FILE_SIZE, salt = i), handler,
                     )
                 } catch (t: Throwable) {
                     emit("  fd #$i failed: ${t.javaClass.simpleName}: ${t.message}")
                     return@repeat
                 }
             }
-            emit("  opened ${open.size} of 8 concurrently")
+            emit("  opened ${opened.size} of 8 concurrently")
             var verified = 0
             val buf = ByteArray(64)
-            for (p in open) {
+            for ((salt, p) in opened) {
                 val offset = 1024L
                 if (Os.pread(p.fileDescriptor, buf, 0, buf.size, offset) == buf.size &&
-                    Pattern.firstMismatch(buf, buf.size, offset) < 0
+                    Pattern.firstMismatch(buf, buf.size, offset, salt) < 0
                 ) verified++
             }
-            emit("  ${if (verified == open.size) "PASS" else "FAIL"}  $verified of ${open.size} served correct bytes")
+            emit("  ${if (verified == opened.size) "PASS" else "FAIL"}  $verified of ${opened.size} served their own bytes")
         } catch (t: Throwable) {
             fail("simultaneous fds", t)
         } finally {
-            open.forEach { runCatching { it.close() } }
+            opened.forEach { runCatching { it.second.close() } }
             thread.quitSafely()
         }
     }
@@ -375,11 +414,14 @@ class Probe(private val context: Context) {
         const val TAG = "APPFUSE"
 
         /** 1 MiB: enough to make AppFuse chop the read up, small enough to run in a second. */
-        private const val FILE_SIZE = 1L shl 20
+        // internal rather than private only so appfuse-probe/test can reach it.
+        internal const val FILE_SIZE = 1L shl 20
 
         /** Fixed, so two runs compare directly and a failing offset can be re-tried. */
-        private const val SEED = 20260925L
+        // internal rather than private only so appfuse-probe/test can reach it.
+        internal const val SEED = 20260925L
 
-        private const val MAX_SPOT = 8192
+        // internal rather than private only so appfuse-probe/test can reach it.
+        internal const val MAX_SPOT = 8192
     }
 }

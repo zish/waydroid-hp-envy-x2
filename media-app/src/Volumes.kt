@@ -63,8 +63,7 @@ object Volumes {
      * "primary:Removable/FOO".
      */
     fun openIntent(label: String): Intent {
-        val docId = "primary:$SUBDIR/$label"
-        val uri: Uri = DocumentsContract.buildDocumentUri(AUTHORITY, docId)
+        val uri: Uri = DocumentsContract.buildDocumentUri(AUTHORITY, documentId(label))
         return Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
             addFlags(
@@ -74,6 +73,13 @@ object Volumes {
             )
         }
     }
+
+    /**
+     * ExternalStorageProvider's document id for a volume: "<root>:<relative
+     * path>", so /sdcard/Removable/FOO is "primary:Removable/FOO".
+     */
+    // internal rather than private only so media-app/test can reach it.
+    internal fun documentId(label: String): String = "primary:$SUBDIR/$label"
 
     /** The tap target, falling back to our own status screen if nothing handles it. */
     private fun tapIntent(ctx: Context, label: String): Intent {
@@ -98,12 +104,39 @@ object Volumes {
         return nm
     }
 
-    /** Stable per label, so a re-mount replaces its notification instead of stacking. */
-    private fun notificationId(label: String): Int = label.hashCode() or 1
+    /**
+     * Stable per label, so a re-mount replaces its notification instead of
+     * stacking.
+     *
+     * Only a hash of exactly 0 is moved, to 1. This was once `hashCode() or 1`,
+     * which forced bit 0 on and so merged every pair of labels whose hashes
+     * differ only there -- and waydroid-mediad's target_for() names duplicates
+     * "<name>_2", "<name>_3", ..., whose last characters differ by one, so
+     * USB_Drive_2/_3 and SD_Card_3/_4 shared one notification. String hashes
+     * can still collide in general, which is why ejectAction() does not rely on
+     * this id to keep two volumes' Eject buttons apart.
+     */
+    // internal rather than private only so media-app/test can reach it.
+    internal fun notificationId(label: String): Int = label.hashCode().let { if (it == 0) 1 else it }
+
+    /**
+     * Gives each volume's eject intent its own identity. PendingIntent matches
+     * by Intent.filterEquals(), which ignores extras, so two volumes whose
+     * intents differ only in the "label" extra would share one PendingIntent
+     * and FLAG_UPDATE_CURRENT would rewrite the first one's label to the
+     * second's -- Eject on one notification would unmount the other volume.
+     * A per-label data URI makes them unequal whatever the request code is.
+     * EjectReceiver is reached by component, so the URI routes nothing.
+     */
+    // internal rather than private only so media-app/test can reach it.
+    internal fun ejectUriParts(label: String): Pair<String, String> = "volume" to label
 
     /** The Eject button, which asks the host daemon to unmount this volume. */
     private fun ejectAction(ctx: Context, label: String): Notification.Action {
-        val intent = Intent(ctx, EjectReceiver::class.java).putExtra("label", label)
+        val (scheme, ssp) = ejectUriParts(label)
+        val intent = Intent(ctx, EjectReceiver::class.java)
+            .setData(Uri.fromParts(scheme, ssp, null))
+            .putExtra("label", label)
         val pending = PendingIntent.getBroadcast(
             ctx, notificationId(label), intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -136,8 +169,13 @@ object Volumes {
         nm.notify(notificationId(label), builder.build())
     }
 
+    /** The notification's body text: where the volume is, and what it is if known. */
+    // internal rather than private only so media-app/test can reach it.
+    internal fun detail(path: String, fstype: String): String =
+        if (fstype.isEmpty()) path else "$path  ($fstype)"
+
     fun show(ctx: Context, label: String, path: String, fstype: String) {
-        val detail = if (fstype.isEmpty()) path else "$path  ($fstype)"
+        val detail = detail(path, fstype)
         post(ctx, label, detail, ejecting = false)
         remember(ctx, label, detail)
     }

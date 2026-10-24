@@ -90,9 +90,10 @@ addFilter("no-dependency-on locales-hal")
 # libselinux-utils is where selinuxenabled lives. rpmlint reads any lib* name as
 # a shared library that the automatic dependency generator should have found,
 # but this is a dependency on a COMMAND used by a scriptlet, which nothing can
-# infer from the payload. Scoped to the packages that need it -- both of the
-# SELinux ones, whose loaders call selinuxenabled before touching policy.
-addFilter("waydroid-ext-(backlight|appfuse).*explicit-lib-dependency libselinux-utils")
+# infer from the payload. Scoped to the packages that need it -- all three of
+# the SELinux ones, whose loaders call selinuxenabled before touching policy.
+# binder-policy joined them on 2026-10-09 for exactly that reason and no other.
+addFilter("waydroid-ext-(backlight|appfuse|binder-policy).*explicit-lib-dependency libselinux-utils")
 
 # ------------------------------------------------- udev rules and nothing else
 #
@@ -114,7 +115,11 @@ addFilter("waydroid-ext-backlight.*only-non-binary-in-usr-lib")
 # used to be 400 KB of somebody else's ELF is a manifest and nothing else
 # (docs/54-no-vendored-binaries.md). An empty-looking package is exactly right
 # here, and the check has no way to know that.
-addFilter("waydroid-ext-(brightness-overlay|wifi-framework|wifi-hostd|camera-hal|battery).*only-non-binary-in-usr-lib")
+#
+# strongbox joined on 2026-10-23 for the derive-row reason: it carries two
+# insertions into the image's own VINTF manifest and no bytes of the manifest
+# (docs/75).
+addFilter("waydroid-ext-(brightness-overlay|wifi-framework|wifi-hostd|camera-hal|battery|strongbox).*only-non-binary-in-usr-lib")
 
 # ------------------------------------ a package that is a patch, not a binary
 #
@@ -130,16 +135,37 @@ addFilter("waydroid-ext-(brightness-overlay|wifi-framework|wifi-hostd|camera-hal
 # deploy anything -- but failing before installation beats failing at boot.
 addFilter("waydroid-ext-(camera-hal|battery).*no-binary")
 
+# --------------------------------------- the Android-version capability token
+#
+# A .mod that declares ANDROID= renders one `Provides: waydroid-ext-android(N)`
+# per entry, so a host can ask `rpm -q --whatprovides 'waydroid-ext-android(16)'`
+# rather than reading twenty-seven spec files. rpmlint wants an explicit Provides
+# to carry a version, which is right for a provide that stands in for a package
+# and wrong for a capability token: the version is the thing INSIDE the
+# parentheses, exactly as it is for config(), bundled() and mimehandler().
+#
+# Scoped to the token name and not to a package list, deliberately. Every mod
+# that classifies itself will trip this and none of them is a new decision, but
+# any OTHER unversioned explicit Provides anywhere in the repository still shows
+# up and still has to be looked at.
+# (The trailing "(" is left out of the pattern on purpose: rpmlint takes these
+# as raw regexes, so a backslash here is a literal backslash and "\\(" opens an
+# unterminated group that aborts the whole lint run. The token name alone is
+# already as narrow as the paren would make it.)
+addFilter("unversioned-explicit-provides waydroid-ext-android")
+
 # ------------------------------------------- rm of our own state on uninstall
 #
-# Both SELinux packages' %postun remove /var/lib/waydroid-<name>/policy.sha256,
+# All three SELinux packages' %postun remove /var/lib/waydroid-<name>/policy.sha256,
 # the stamp recording which CIL the loader last installed. The check is right to
 # be suspicious of rm in a scriptlet -- it is how a package deletes somebody
 # else's data -- but this path is written by that package's own loader, is a
 # fixed literal with no variable in it, and is meaningless once the module is
 # gone. Leaving it behind would make a later reinstall believe the policy was
-# already current and skip the load.
-addFilter("waydroid-ext-(backlight|appfuse).*dangerous-command-in-%postun rm")
+# already current and skip the load. Checked rather than inherited when
+# binder-policy was added on 2026-10-09: its path is the same shape and the
+# same fixed literal, /var/lib/waydroid-binder/policy.sha256.
+addFilter("waydroid-ext-(backlight|appfuse|binder-policy).*dangerous-command-in-%postun rm")
 
 # ------------------------------------------------------------------- spelling
 #

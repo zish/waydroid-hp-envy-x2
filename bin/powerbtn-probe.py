@@ -89,7 +89,7 @@ def main():
         os.fsync(log.fileno())
 
     emit("--- probe start ---")
-    for fd, (path, name) in fds.items():
+    for _fd, (path, name) in fds.items():
         emit(f"watching {path}  [{name}]")
     emit("press the power button; Ctrl-C to stop")
 

@@ -204,7 +204,11 @@ def await_reply(want, limit=8):
 
 send({"id": 1, "cmd": "graph"})
 first = read(time.time() + 5)
-print("GATED" if first and not first.get("ok") else "UNGATED")
+# NOREPLY is its own answer: folded into UNGATED, silence read as "auth is
+# not enforced". And the shell tests UNGATED before GATED, which is a
+# substring of it -- the other order reported an unauthenticated daemon as
+# refusing unauthenticated commands.
+print("NOREPLY" if not first else "UNGATED" if first.get("ok") else "GATED")
 
 send({"id": 2, "cmd": "auth", "token": token})
 auth = await_reply(2)
@@ -383,15 +387,15 @@ PY
     # That is exactly what the env-var overflow produced before it was fixed.
     PROBE_RAN=no
     case "$RESULT" in
-    *GATED*|*UNGATED*|*CONNECT-FAIL*) PROBE_RAN=yes ;;
+    *GATED*|*NOREPLY*|*CONNECT-FAIL*) PROBE_RAN=yes ;;   # GATED matches UNGATED too
     esac
 fi
 if [ -n "$ADDR" ] && [ "$PROBE_RAN" = no ]; then
     no "the protocol probe did not run: $(printf '%s' "$RESULT" | tr '\n' ' ' | cut -c1-110)"
 elif [ -n "$ADDR" ]; then
     case "$RESULT" in
-    *GATED*)   ok "an unauthenticated command is refused" ;;
     *UNGATED*) na "auth is not enforced (--no-auth)" ;;
+    *GATED*)   ok "an unauthenticated command is refused" ;;
     *)         no "no reply to the first command" ;;
     esac
     case "$RESULT" in
@@ -401,6 +405,7 @@ elif [ -n "$ADDR" ]; then
     esac
     echo "$RESULT" | sed -n 's/^POLICY /        policy: /p'
 
+    # shellcheck disable=SC2046  # split on purpose, one field per parameter
     set -- $(echo "$RESULT" | sed -n 's/^FIDELITY //p')
     if [ $# -eq 3 ]; then
         if [ "$3" -eq 0 ]; then

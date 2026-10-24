@@ -167,20 +167,52 @@ else
 fi
 
 # --- magnetometer: raw x 1e-4 = uT.  in_magn_scale says 1.0 and is wrong.
+#
+# This one is compared against a BRACKET of host reads rather than a single one,
+# which is what the section header above always claimed to do.
+#
+# Android's newest event is as old as the poll period, and since
+# waydroid-sensord began honouring ISensors::batch() that period is whatever the
+# subscriber asked for rather than a flat 50 ms. The only client that usually
+# holds this sensor is a bot-detection SDK asking for 200 ms.
+#
+# Measured on bigtab01, |delta| between two magnetometer reads taken that far
+# apart (60 pairs each):
+#
+#     50 ms    median 0.78  p90 1.61  max  4.30 uT   0.0% over 5 uT
+#    200 ms    median 0.39  p90 4.70  max 11.01 uT   8.3% over 5 uT
+#
+# So at the rate the sensor is actually served, a single-sample comparison fails
+# by chance about one run in twelve -- which is exactly what it did. The sensor
+# is mostly still and occasionally steps a long way; it is the tail that breaks.
+#
+# The tolerance stays at 5 uT rather than being widened, because the faults this
+# check exists to catch are nowhere near it: a wrong in_magn_scale is off by a
+# factor of 1e4, and a swapped or negated axis puts the vector tens of uT away
+# in a direction no recent sample matches. Asking "is this a value the host
+# produced in the last quarter second" tests the pipeline without encoding one
+# particular poll rate. docs/67-sensor-poll-cost.md.
 M=$(android_last "ITE8350 3-axis Magnetometer")
 if [ -n "$M" ]; then
   P=$(iio_path magn_3d)
-  HX=$(cat "$P/in_magn_x_raw"); HY=$(cat "$P/in_magn_y_raw"); HZ=$(cat "$P/in_magn_z_raw")
-  read -r RES < <(awk -v a="$M" -v hx="$HX" -v hy="$HY" -v hz="$HZ" 'BEGIN {
-      split(a, v, " "); k = 1e-4
-      dx = v[1] - hx*k; dy = v[2] - hy*k; dz = v[3] - hz*k
-      printf "%.3f|%.2f %.2f %.2f|%.2f %.2f %.2f",
-             sqrt(dx*dx+dy*dy+dz*dz), v[1], v[2], v[3], hx*k, hy*k, hz*k }')
+  BRACKET=$(for _ in 1 2 3 4 5 6; do
+      echo "$(cat "$P/in_magn_x_raw") $(cat "$P/in_magn_y_raw") $(cat "$P/in_magn_z_raw")"
+      sleep 0.05
+    done)
+  read -r RES < <(echo "$BRACKET" | awk -v a="$M" '
+      BEGIN { split(a, v, " "); k = 1e-4; best = 1e9 }
+      {
+        dx = v[1] - $1*k; dy = v[2] - $2*k; dz = v[3] - $3*k
+        d = sqrt(dx*dx + dy*dy + dz*dz)
+        if (d < best) { best = d; bx = $1*k; by = $2*k; bz = $3*k }
+      }
+      END { printf "%.3f|%.2f %.2f %.2f|%.2f %.2f %.2f",
+                   best, v[1], v[2], v[3], bx, by, bz }')
   D=${RES%%|*}; REST=${RES#*|}; AV=${REST%%|*}; HV=${REST##*|}
-  echo "        android [$AV]  host [$HV]  |diff| = $D uT"
+  echo "        android [$AV]  nearest of 6 host reads over 250 ms [$HV]  |diff| = $D uT"
   awk -v d="$D" 'BEGIN { exit !(d < 5.0) }' \
-    && pass "magnetometer agrees (tolerance 5 uT)" \
-    || fail "magnetometer differs by $D uT"
+    && pass "magnetometer agrees (tolerance 5 uT, bracketed)" \
+    || fail "magnetometer differs by $D uT from every host read in 250 ms"
   TESTED=$((TESTED+1))
 else
   note "magnetometer: no recent events -- no app is subscribed, not compared"

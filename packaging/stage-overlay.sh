@@ -26,7 +26,10 @@
 # extracts, verifies, patches, verifies again and installs. This exists because
 # a one-byte patch of a vendor binary is still a redistribution of that vendor
 # binary, and every user who can run these packages already has the input on
-# their own disk. The patch list is <hex offset>:<old>:<new>, comma-separated.
+# their own disk. The patch list is comma-separated edits, each either
+# <hex offset>:<old>:<new> (replace one byte) or <hex offset>+<hex bytes> (insert
+# bytes before that offset; waydroid-overlay-sync 1.2.0 and later), with every
+# offset into the stock file.
 #
 # A LINK ROW ships a symlink. It carries no mode -- a symlink's own mode is
 # meaningless on Linux -- and no hash, because there are no contents to hash.
@@ -100,13 +103,24 @@ while IFS= read -r row; do
 		for p in $patch; do
 			IFS=$oldifs
 			[ -n "$p" ] || continue
-			off=${p%%:*}
-			rest=${p#*:}
-			old=${rest%%:*}
-			new=${rest#*:}
+			case "$p" in
+			*+*)
+				# An insertion: whole bytes, at least one, and nothing else.
+				off=${p%%+*}
+				ins=${p#*+}
+				case "$ins" in '' | *[!0-9a-fA-F]*) die "inserted bytes must be hex: $p" ;; esac
+				[ $((${#ins} % 2)) -eq 0 ] || die "inserted bytes must be whole bytes (an even number of hex digits): $p"
+				;;
+			*)
+				off=${p%%:*}
+				rest=${p#*:}
+				old=${rest%%:*}
+				new=${rest#*:}
+				[ "${#old}" -eq 2 ] && [ "${#new}" -eq 2 ] || die "patch bytes must be two hex digits: $p"
+				case "$old$new" in *[!0-9a-fA-F]*) die "patch bytes must be hex: $p" ;; esac
+				;;
+			esac
 			case "$off" in '' | *[!0-9a-fA-F]*) die "bad patch offset: $p" ;; esac
-			[ "${#old}" -eq 2 ] && [ "${#new}" -eq 2 ] || die "patch bytes must be two hex digits: $p"
-			case "$old$new" in *[!0-9a-fA-F]*) die "patch bytes must be hex: $p" ;; esac
 			IFS=,
 		done
 		IFS=$oldifs

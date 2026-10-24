@@ -6,7 +6,6 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
-import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
 
@@ -32,15 +31,13 @@ class TouchView(context: Context) : View(context) {
     /** Invoked when the ABOUT target is tapped. See [aboutRect]. */
     var onAbout: (() -> Unit)? = null
 
-    var maxConcurrent = 0
-        private set
-    var eventCount = 0
-        private set
+    val maxConcurrent get() = ledger.maxConcurrent
+    val eventCount get() = ledger.eventCount
     var deviceLabel = "-"
         private set
     var sourceLabel = "-"
         private set
-    val toolTypesSeen = LinkedHashSet<String>()
+    val toolTypesSeen: Set<String> get() = ledger.toolTypesSeen
 
     private class Contact(val id: Int) {
         var x = 0f
@@ -58,7 +55,10 @@ class TouchView(context: Context) : View(context) {
     /** A lifted contact's trail, kept briefly so a finished gesture stays visible. */
     private class Ghost(val trail: Path, val colour: Int, val bornNanos: Long)
 
-    private val contacts = LinkedHashMap<Int, Contact>()
+    // The pointer bookkeeping lives in Pointers.kt so touch-probe/test can
+    // reach it without a MotionEvent; this view only unpacks events into it.
+    private val ledger = PointerLedger { id -> Contact(id) }
+    private val contacts get() = ledger.live
     private val ghosts = ArrayList<Ghost>()
     private var buttonState = 0
 
@@ -108,6 +108,7 @@ class TouchView(context: Context) : View(context) {
     // measurement this app exists to make. A canvas target is consumed in
     // onTouchEvent, on the same terms as RESET, where the rule is written down.
     private val aboutRect = RectF()
+    private val buttonGestures = ButtonGestures()
     private val tmpRect = RectF()
 
     init {
@@ -118,67 +119,27 @@ class TouchView(context: Context) : View(context) {
 
     private fun colourFor(id: Int) = palette[((id % palette.size) + palette.size) % palette.size]
 
-    private fun toolName(t: Int) = when (t) {
-        MotionEvent.TOOL_TYPE_FINGER -> "FINGER"
-        MotionEvent.TOOL_TYPE_STYLUS -> "STYLUS"
-        MotionEvent.TOOL_TYPE_ERASER -> "ERASER"
-        MotionEvent.TOOL_TYPE_MOUSE -> "MOUSE"
-        MotionEvent.TOOL_TYPE_UNKNOWN -> "UNKNOWN"
-        else -> "tool$t"
-    }
-
-    private fun sourceName(s: Int): String {
-        val parts = ArrayList<String>()
-        if (s and InputDevice.SOURCE_TOUCHSCREEN == InputDevice.SOURCE_TOUCHSCREEN) parts += "TOUCHSCREEN"
-        if (s and InputDevice.SOURCE_STYLUS == InputDevice.SOURCE_STYLUS) parts += "STYLUS"
-        if (s and InputDevice.SOURCE_MOUSE == InputDevice.SOURCE_MOUSE) parts += "MOUSE"
-        if (s and InputDevice.SOURCE_TOUCHPAD == InputDevice.SOURCE_TOUCHPAD) parts += "TOUCHPAD"
-        if (parts.isEmpty()) parts += "0x%08x".format(s)
-        return parts.joinToString("|")
-    }
-
-    private fun buttonNames(b: Int): String {
-        if (b == 0) return "none"
-        val parts = ArrayList<String>()
-        if (b and MotionEvent.BUTTON_PRIMARY != 0) parts += "PRIMARY"
-        if (b and MotionEvent.BUTTON_SECONDARY != 0) parts += "SECONDARY"
-        if (b and MotionEvent.BUTTON_TERTIARY != 0) parts += "TERTIARY"
-        if (b and MotionEvent.BUTTON_STYLUS_PRIMARY != 0) parts += "STYLUS_PRIMARY"
-        if (b and MotionEvent.BUTTON_STYLUS_SECONDARY != 0) parts += "STYLUS_SECONDARY"
-        return if (parts.isEmpty()) "0x%x".format(b) else parts.joinToString("|")
-    }
+    private fun toolName(t: Int) = Names.tool(t)
 
     /** Clears trails and the max counter. */
     fun reset() {
-        contacts.clear()
+        ledger.reset()
         ghosts.clear()
-        maxConcurrent = 0
-        eventCount = 0
-        toolTypesSeen.clear()
         invalidate()
     }
 
     /** A one-shot textual summary, for the report file. */
-    fun summary(): String = buildString {
-        appendLine("max concurrent pointers : $maxConcurrent")
-        appendLine("motion events seen      : $eventCount")
-        appendLine("device                  : $deviceLabel")
-        appendLine("source                  : $sourceLabel")
-        appendLine("tool types seen         : ${if (toolTypesSeen.isEmpty()) "-" else toolTypesSeen.joinToString(", ")}")
-        appendLine("view size               : ${width}x${height}")
-    }
+    fun summary(): String =
+        summaryText(maxConcurrent, eventCount, deviceLabel, sourceLabel, toolTypesSeen, width, height)
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.actionMasked == MotionEvent.ACTION_DOWN &&
-            resetRect.contains(event.x, event.y)
-        ) {
-            reset()
-            return true
-        }
-        if (event.actionMasked == MotionEvent.ACTION_DOWN &&
-            aboutRect.contains(event.x, event.y)
-        ) {
-            onAbout?.invoke()
+        val down = event.actionMasked == MotionEvent.ACTION_DOWN
+        val onReset = down && resetRect.contains(event.x, event.y)
+        val onAboutButton = down && aboutRect.contains(event.x, event.y)
+        // The whole gesture, not just its DOWN -- see ButtonGestures.
+        if (buttonGestures.swallow(event.actionMasked, onReset || onAboutButton)) {
+            if (onReset) reset()
+            if (onAboutButton) onAbout?.invoke()
             return true
         }
         ingest(event, hover = false)
@@ -198,16 +159,13 @@ class TouchView(context: Context) : View(context) {
     }
 
     private fun ingest(event: MotionEvent, hover: Boolean) {
-        eventCount++
+        val action = event.actionMasked
+        val going = ledger.begin(action, ::ghost)
         buttonState = event.buttonState
         deviceLabel = event.device?.name ?: "id=${event.deviceId}"
-        sourceLabel = sourceName(event.source)
+        sourceLabel = Names.source(event.source)
 
-        val action = event.actionMasked
-        if (action == MotionEvent.ACTION_HOVER_EXIT ||
-            action == MotionEvent.ACTION_CANCEL
-        ) {
-            if (action == MotionEvent.ACTION_CANCEL) retireAll() else contacts.clear()
+        if (!going) {
             invalidate()
             return
         }
@@ -228,23 +186,20 @@ class TouchView(context: Context) : View(context) {
             c.tilt = event.getAxisValue(MotionEvent.AXIS_TILT, i)
             c.distance = event.getAxisValue(MotionEvent.AXIS_DISTANCE, i)
             c.hovering = hover
-            toolTypesSeen += toolName(c.toolType)
+            ledger.sawTool(c.toolType)
         }
 
-        // Count before removing the lifted pointer -- it was concurrent.
-        if (!hover && contacts.size > maxConcurrent) {
-            maxConcurrent = contacts.size
-            onNewMax?.invoke(maxConcurrent)
-        }
-
-        if (action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_UP) {
-            retire(event.getPointerId(event.actionIndex))
-        }
+        // Count before removing the lifted pointer -- PointerLedger.end().
+        // actionIndex is only meaningful for the UP actions, which are the
+        // only ones end() reads it for.
+        val lifted = action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_UP
+        ledger.end(action, hover, if (lifted) event.getPointerId(event.actionIndex) else -1,
+            onNewMax = { onNewMax?.invoke(it) }, onRetire = ::ghost)
         invalidate()
     }
 
     private fun track(id: Int, x: Float, y: Float): Contact {
-        val c = contacts.getOrPut(id) { Contact(id) }
+        val c = ledger.track(id)
         c.x = x
         c.y = y
         if (!c.trailStarted) {
@@ -255,14 +210,10 @@ class TouchView(context: Context) : View(context) {
         return c
     }
 
-    private fun retire(id: Int) {
-        val c = contacts.remove(id) ?: return
+    /** A retired contact leaves its trail behind, briefly. */
+    private fun ghost(c: Contact) {
         if (c.trailStarted) ghosts += Ghost(c.trail, colourFor(c.id), System.nanoTime())
         if (ghosts.size > 40) ghosts.removeAt(0)
-    }
-
-    private fun retireAll() {
-        for (id in contacts.keys.toList()) retire(id)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -335,15 +286,11 @@ class TouchView(context: Context) : View(context) {
         val lines = ArrayList<String>()
         lines += "device  : $deviceLabel"
         lines += "source  : $sourceLabel"
-        lines += "buttons : ${buttonNames(buttonState)}"
+        lines += "buttons : ${Names.buttons(buttonState)}"
         lines += "tools   : ${if (toolTypesSeen.isEmpty()) "-" else toolTypesSeen.joinToString(",")}"
         lines += "events  : $eventCount"
         for (c in contacts.values) {
-            lines += "#%d %-7s x=%-7.1f y=%-7.1f p=%.3f%s%s".format(
-                c.id, toolName(c.toolType), c.x, c.y, c.pressure,
-                if (c.tilt.isNaN() || c.tilt == 0f) "" else " tilt=%.2f".format(c.tilt),
-                if (c.distance.isNaN() || c.distance == 0f) "" else " d=%.2f".format(c.distance)
-            )
+            lines += Names.contactLine(c.id, c.toolType, c.x, c.y, c.pressure, c.tilt, c.distance)
         }
 
         val bigH = 34f * d

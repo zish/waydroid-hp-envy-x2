@@ -168,8 +168,14 @@ class Sample(
         /* String.format allocates a Formatter per call and is clearly visible
          * in a 20 Hz loop with 30 columns; this does the same job by rounding
          * through an int. Empty for NaN so a missing sensor stays distinct
-         * from a genuine zero. */
+         * from a genuine zero.
+         *
+         * Rounded through a Long in Double, not an Int in Float: Math.round
+         * (Float) saturates at Int.MAX_VALUE, so an age column (scale 10) froze
+         * at 214748364.7 ms once a sensor had been silent ~59.65 hours -- a
+         * stall that stopped rising, which is the one thing the column is for.
+         * Double also keeps every digit of a value past Float's 2^24. */
         fun fmt(v: Float, scale: Float): String =
-            if (v.isNaN()) "" else (Math.round(v * scale) / scale).toString()
+            if (v.isNaN()) "" else (Math.round(v.toDouble() * scale) / scale.toDouble()).toString()
     }
 }

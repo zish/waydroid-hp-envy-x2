@@ -46,6 +46,10 @@ typedef struct SensorDevice {
     pthread_mutex_t lock;
     GMainLoop *loop;
     bool waiting_for_data;
+    /* The poll timeout, and the period it was armed with.  Zero means no
+     * timer: an idle daemon should not be waking up at all. */
+    guint poll_source;
+    int poll_tick_ms;
 } SensorDevice;
 
 struct Sensors {
@@ -53,12 +57,19 @@ struct Sensors {
 
     std::vector<sensor_t> getSensorsList();
     int activate(int32_t handle, bool enabled);
+    int batch(int32_t handle, int64_t samplingPeriodNs,
+              int64_t maxReportLatencyNs);
     std::vector<sensors_event_t> poll(int32_t maxCount, int *err_out);
     int flush(int32_t handle);
     void killLoops();
 
     /* Exposed so service.cpp can run --selftest without binder. */
     SensorIIO *iio() { return mSensorDevice->mIioDevice; }
+
+    /* Poll-timer state, for --idle-probe: whether a GSource exists at all,
+     * and the period it was armed with. */
+    bool pollTimerArmed() const { return mSensorDevice->poll_source != 0; }
+    int pollTickMs() const { return mSensorDevice->poll_tick_ms; }
 
 private:
     static constexpr int32_t kPollMaxBufferSize = 128;

@@ -16,7 +16,7 @@ are ahead of the code in several places and reading them alone gives the wrong a
 
 | Question | Answer |
 |---|---|
-| Is every change available as an RPM? | **Not yet, but most of the way: 26 `.mod` files as of 2026-10-06, 25 of them shipped** — `packaging/gen-spec.sh --list` is the count that cannot go stale. Said 22 of ~38 on 2026-09-27, which was itself an undercount; was 7 of ~36 with 4 installable when this was written |
+| Is every change available as an RPM? | **Not yet, but most of the way: 27 `.mod` files as of 2026-10-09, 26 of them shipped** — `packaging/gen-spec.sh --list` is the count that cannot go stale. `binder-policy` is the one added on 2026-10-09, and it is the first here that is not host-specific at all. Said 22 of ~38 on 2026-09-27, which was itself an undercount; was 7 of ~36 with 4 installable when this was written |
 | Could a general user build and install? | **No** — the two compiled daemons cannot be built off this dev box at all |
 | Are repository paths portable? | **Nearly** — 5 exceptions, all named below; git history is no worse than HEAD |
 | Anything genuinely un-RPM-able? | **Four things**, all small, none of them blocking |
@@ -270,6 +270,166 @@ binder-facing C++), **Trivy or Grype plus a `syft` SBOM** (the real exposure her
 prebuilt Android `.so` blobs), and `rpm -K` after signing. Do not put scanners in pre-commit:
 Trivy's database alone is 50–200 MB.
 
+### Unit tests and the first workflow — added 2026-10-17
+
+**`tests/run.sh` is the one entry point**, run by lefthook's `pre-push` and by
+[.github/workflows/ci.yml](../.github/workflows/ci.yml) alike. It has seven suites, and none needs a
+host, a container or privilege:
+
+- **python** — stdlib `unittest` over the daemons' decision logic, loaded straight out of
+  `artifacts/` (they are extensionless executables, so `tests/_scripts.py` imports them by path).
+  `waydroid-mediad`'s disk selection — mostly its *refusals*, since the failure mode is mounting the
+  system disk into Android — `waydroid-restartd`'s choice of what to signal, `waydroid-btd`'s API
+  negotiation and certificate pin, and **`waydroid-wifi-sync`'s bash UUIDv5 against Python's
+  `uuid.uuid5`**, because ownership of NM profiles is *by* that UUID (docs/59).
+- **cpp** — `tests/cpp/test_nm_mapping.cpp`, one `g++` line against glib only. To make it possible
+  the four pure NM→Android translations moved out of `NmBackend.cpp` into
+  [wifi/NmMapping.h](../wifi/NmMapping.h), with no behaviour change. It checks docs/59's claim
+  whole — all 61 representable dBm values survive the round trip through NM's own forward function
+  — and was **mutation-checked**: putting back the old `q/2 - 100` fails 66 of its 91 checks.
+  `tests/cpp/test_beacon_ies.cpp` does the same for the synthesised 802.11 elements, split out of
+  `NativeScanResult.cpp` into [wifi/BeaconIes.cpp](../wifi/BeaconIes.cpp) so they compile without
+  gbinder. Its goldens are the bytes Stage 3 recorded in
+  `artifacts/wifi/stage3/ie-synthesis-check.txt`, decoded through the AOSP-parser mirror and
+  confirmed on device — not today's output pasted back. Marking transition mode MFP-*required*
+  fails it.
+  `tests/cpp/test_sensor_iio.cpp` runs `SensorIIO` end to end against a fake IIO sysfs tree:
+  docs/18's three recorded poses must come out as +Z, +Y and +X, and docs/14's hub quaternion as
+  azimuth 102.93° and pitch −62.24°. Putting docs/18's sign bug back fails 7 of its 59 checks. It
+  is a unity build behind a compile-time `IIO_ROOT` guard — the shipped daemon cannot be
+  redirected — with `tests/cpp/shim/` standing in for the gbinder and gutil headers.
+- **sanitize** — the same three C++ tests rebuilt with `-fsanitize=address,undefined
+  -fno-sanitize-recover=all`, from 2026-10-17. All pass. A planted one-past-the-end read passes the
+  plain `cpp` suite and fails this one with `heap-buffer-overflow`, which is the case for having
+  both: the beacon-element code builds and decodes bytes by hand.
+- **selftest** — the three `artifacts/*/selftest.sh` `%check` scripts.
+- **kotlin** — `<app>/test/Tests.kt` per app, compiled in one `kotlinc` pass with every app's
+  `src/` against `android.jar` and run on the JVM by a forty-line harness
+  ([tests/kotlin/Harness.kt](../tests/kotlin/Harness.kt)) — no Gradle, no JUnit. `android.jar` is
+  stubs that throw, so only logic that needs no `Context` is reachable, which is also the right
+  shape for it; a real `org.json` goes ahead of the stubs, fetched by
+  `tests/kotlin/fetch-deps.sh` into `build/test-deps` and SHA-256 checked, never committed.
+  Android's `org.json` is a different implementation of the same API, so tests stick to shared
+  behaviour. A private member made `internal` for a test says so in a comment.
+- **lint** — `shellcheck`, `ruff`, `actionlint`, `zizmor` and `gitleaks`. Shellcheck started at
+  `-S error` and **was raised to `-S warning` on 2026-10-17** once its 31 warnings were worked off;
+  ruff went from `F` to `F,B` the same day, ignoring B904 (every hit re-raises with a clearer
+  message on purpose) and B905 (`zip(a, a[1:])` is meant to be uneven). `E` is style and is not
+  gated. **The warnings held one real bug**, the same one in `bin/bluetooth-test.sh` and
+  `bin/pipewire-test.sh`: the auth probe printed `UNGATED` for a daemon that does not enforce its
+  token, and the `case` tested `*GATED*` first — which matches `UNGATED` — so an unauthenticated
+  daemon was reported as *"an unauthenticated command is refused"*, a pass. No reply was folded
+  into `UNGATED` as well. Both are fixed: `NOREPLY` is its own answer and `*UNGATED*` is tested
+  first. The rest were idioms given a directive, three dead variables removed (`power-ab.sh`'s
+  endpoint backlight reads had been superseded by a min/max over every sample, and
+  `pw-quantum-bisect.sh`'s `BOUNDED` was set on every path and read on none), and unused loop
+  names. Two shipped runtime files gained a directive comment, so `hw-ite8350` is 1.0.2 and
+  `overlay-sync` 1.1.1, both "no behaviour change"; the six packages whose `install.sh` changed
+  were rebuilt before and after and their payloads are digest-for-digest identical, so they keep
+  their versions. None of this is installed anywhere yet.
+- **policy** — [tests/policy.py](../tests/policy.py), stdlib only, for the repository's own rules.
+  **binaries**: every tracked binary must be in
+  [tests/binary-allowlist](../tests/binary-allowlist) *with its sha256*, so a new vendor `.so` fails
+  CI instead of relying on review, and an allowed path cannot quietly take on other bytes. The 23
+  files it lists are docs/54's inventory, the non-compliant ones marked as grandfathered. Adopting
+  it found `bin/__pycache__/magn-calibrate.cpython-313.pyc` still tracked, which docs/54 had said to
+  delete; it is gone.
+  **links**: every relative link in the 95 Markdown files names a tracked file, and every
+  `#anchor` into a Markdown file names a heading there, by GitHub's slug rules — 1,057 links, 29 of
+  them anchored, all resolving at adoption. External URLs are not fetched.
+  **xml**: every tracked XML file parses — the app manifests and resources and the overlay's
+  feature and VINTF files, 31 in all, with the stdlib parser rather than `xmllint`. A malformed
+  feature file fails nowhere visible: the feature is simply absent. **Adopting it found one**:
+  `android.hardware.wifi.xml`, the Stage 0 file, had `--` inside a comment, which XML forbids.
+  Android 13's parser tolerated it, so nothing changed on bigtab01; the comment is fixed and
+  `wifi-framework` is 1.0.1, not installed anywhere yet.
+
+**Every Kotlin app has tests as of 2026-10-17**, 217 in all: appfuse-probe 26, bt-app 20,
+drm-probe 18, media-app 12, pw-app 42, quat-monitor 38, sensor-app 33, touch-probe 28. Every
+production change made *for* them is a verbatim extraction or a `private` → `internal`, each
+reviewed against the original, every APK still builds, and every suite was mutation-checked.
+Goldens come from the daemons' own source and the docs, not from the code under test.
+
+**Writing them found real bugs, and all are fixed as of 2026-10-17**, one signed commit per app,
+each with a test that fails when the fix is reverted. **None of the fixed APKs is installed
+anywhere yet.**
+
+| App | Finding | Fix |
+|---|---|---|
+| media-app | `notificationId = hashCode() or 1` collides for labels differing only in bit 0, which is how `waydroid-mediad` names duplicates — `USB_Drive_2`/`_3`, `SD_Card_3`/`_4`. Merged notifications, and since `filterEquals()` ignores extras, Eject could carry the other volume's label | Only a hash of 0 is moved; each eject intent carries a per-label `volume:` URI (`aba755e`) |
+| quat-monitor | A service stopped mid-hour leaves that hour's CSV uncompressed, and pruning matches only `.gz` — each such stop leaks an 8–18 MB file outside retention. Age columns saturate after ~59.65 h | First hour of a run sweeps plain hours into `.gz` keeping their mtime, pruning matches both; `fmt` rounds through Long/Double (`035da7a`) |
+| pw-app | `Graph.setting()` can show the string "null" (the docs/56 bug class); locale-formatted control values fail their own re-parse in a decimal-comma locale; the profile dialog silently drops TLS | Through `Graph.text`; the dialog fills in `Locale.ROOT` and accepts a comma; TLS checkbox and pin field as in bt-app (`0f96187`) |
+| touch-probe | A tap on RESET leaks its MOVE/UP into the counter, so the peak reads 1 before anyone touches the glass | `ButtonGestures` drops a whole gesture begun on a HUD button (`92542b5`) |
+| sensor-app | Heading reference flips at exactly 90° of roll; a NaN azimuth reads "N"; locale decimal separators | Reference choice has hysteresis (`REF_HYSTERESIS` 0.1); NaN reads "?"; cards in `Locale.ROOT` (`234bda2`) |
+| appfuse-probe | Not a bug: its 8-fd check reads identical files at one offset, so it cannot detect crossed mounts | Each fd serves and is checked against its own salt of `Pattern`; salt 0 is unchanged (`ecd3d9f`) |
+
+A suite whose toolchain is missing is skipped locally but **fails under `CI=true`**, so the runner
+cannot quietly stop testing something. Neither shellcheck nor ruff is installed on the dev box, so
+locally `lint` skips.
+
+**The `rpm` job is the build this box cannot do**: every shipped `.mod` from source on Fedora 44,
+`sensord` and `wifid` included, then `test-install.sh --all`. Rehearsed here with `TOP` in a
+scratch directory: 24 of 26 build and test-install passes 133 checks; `sensord` and `wifid` fail
+on `gbinder.h`, which is exactly what the Fedora container's `dnf builddep` supplies. **The Fedora
+job itself has not run yet** — there is no container runtime here — so its first run on GitHub is
+the verification.
+
+**It first ran on 2026-10-23, the first time the workflow was pushed, and was green on the fourth
+run** ([40046241533](https://github.com/zish/waydroid-hp-envy-x2/actions/runs/40046241533)). Each
+run failed one stage further on than the last. None of the four faults could be seen from this box,
+which is the case for having the job at all:
+
+| Run | Failed at | Cause | Fix |
+|---|---|---|---|
+| 1 | `rpm`, the build, at `keystored` | the C++ daemons link `-static-libstdc++` on purpose, and Fedora ships `libstdc++.a` only in `libstdc++-static`, which no `.mod` listed. Debian ships it with the compiler. `wifid` and `sensord` had the same gap; the job builds in name order and stopped before reaching them | `ce3e315`: BuildRequires in all three, reissued as `keystored` 1.0.1-2, `wifid` 1.1.2-2, `sensord` 1.0.5-2 |
+| 1 | `tests`, `test_btd` | `waydroid-btd`'s PyGObject shim caught only `ImportError`. Ubuntu 24.04's `GLibUnix` exists without `signal_add`, which raises `AttributeError`. This box has no PyGObject, and the test stub's `GLibUnix` always had `signal_add` | `7419b1d`: `btd` 1.1.1, and a test of all three shapes that fails on the old shim |
+| 2 | `rpm`, the install test, 3 of 192 | `[ -e ]` follows symlinks, and the `-debuginfo` subpackages, built for the first time with the source arms, carry build-id links to binaries outside their test root | `c18116f`: `-e` or `-L`; a fixture that fails on the old check; CI now runs `--selftest --all` |
+| 3 | `rpm`, `verify-units.sh` | `systemd-analyze verify` looked up `man:swtpm(8)` in a container installed without documentation, which says nothing about any host | `d26c1cc`: `--man=no`, reproduced here with a `man` that always fails |
+
+Run 4 in numbers: 35 packages built, **the source arms of `keystored`, `wifid` and `sensord`
+compiled for the first time anywhere**; `test-install.sh` 196 passed with its 4 selftest
+expectations; `verify-units.sh` 20 of 20. Two things it does not show. `keystored`'s `%check`
+there ran the engine 84 passed, 2 skipped, because the build root has no `openssl` command for
+the two outside-reference checks (`keystore/main.cpp`'s `skip()`), so in CI the engine is checked
+against swtpm but not against openssl. And GitHub annotates every job with a Node.js 20
+deprecation, for the pinned `actions/checkout` and `actions/cache`; those are warnings, and
+Dependabot proposes the bumps.
+
+**Every shipped systemd unit is verified, from 2026-10-17**:
+[packaging/verify-units.sh](../packaging/verify-units.sh), the last step of the `rpm` job, extracts
+the newest build of each package with `rpm2cpio` and runs `systemd-analyze verify` on the units as
+packaged — the source units carry `@BINDIR@`, so verifying `artifacts/` reports every one broken.
+`dev-binderfs.mount` and `waydroid-container.service` are stubbed for the `waydroid` package, the
+second so `binder-nice`'s drop-in gets parsed at all. 18 of 18 pass against this box's builds, and
+five planted faults — an unknown key, a surviving `@BINDIR@`, a missing `Requires=` unit, a bad
+value in the drop-in, a missing binary — each fail exactly the unit they are in.
+`systemd-analyze security` was tried and left out: every daemon here is a root service that mounts
+or labels by design, so all score 9.4 UNSAFE, which is noise.
+
+**The workflow is linted and its actions pinned, from 2026-10-17.** Every `uses:` names a commit
+SHA with the release in a comment (`checkout` v4.4.0, `cache` v4.3.0, `upload-artifact` v4.6.2,
+all lightweight tags resolved with `git ls-remote`), because a tag can be moved to other code after
+review. [.github/dependabot.yml](../.github/dependabot.yml) proposes the bumps, grouped monthly and
+holding back releases younger than 14 days. `actionlint` and `zizmor --offline` run in the `lint`
+suite; zizmor's first pass found the five unpinned actions and three checkouts leaving the token in
+`.git/config` (`persist-credentials: false` now, as no job pushes). A planted unpinned action and a
+PR title expanded into `run:` both fail it. Left alone: the `fedora:44` container is not pinned by
+digest (auditor persona only, and Dependabot cannot bump it there).
+
+**Secrets are scanned on every push, from 2026-10-17**: `gitleaks git` over every commit on every
+branch, in the `lint` suite — so lefthook runs it before each push, including the first public
+one, when all of history goes out at once. First pass: **339 commits, no findings.** The two PEM
+blocks in `bt-app` and `pw-app`'s tests are public certificates and correctly do not trip it; a
+planted private key and GitHub token both do. CI fetches the v8.30.1 tarball and checks its sha256
+against the release's checksums file, since gitleaks is packaged for neither Ubuntu nor PyPI.
+
+**The signed-commit gate runs in CI as well, from 2026-10-17** — the `signatures` job, against
+only the keys in [.github/commit-signers.asc](../.github/commit-signers.asc) (on a pull request,
+the base branch's copy, so a PR cannot vouch for itself by adding a key). It had been local only
+because `%G?` needs the signer's public key; committing that key was all it took. Rehearsed in an
+empty `GNUPGHOME`: all 225 commits then in the branch verify with that one file imported, and the gate fails with
+nothing imported.
+
 ### One blocker for the F-Droid half
 
 Every APK build script auto-generates a **debug keystore with the password `android`** if one is
@@ -441,6 +601,8 @@ string Android reports through the sensors HAL, so changing it changes observabl
      that will compile it, and the LDFLAGS defect found during review — the builder's `CXXFLAGS`
      were on the compile line only, silently discarding `-flto=auto` and half of annobin's
      instrumentation — is the kind of thing only that build will confirm is now right.
+     **It has been compiled since 2026-10-23**, by CI's first green run, once the source arm
+     gained the `libstdc++-static` build dependency it had always needed (above, *It first ran*).
 2. **Move the APKs into their own GitHub repositories**, one per app, each with its own CI/CD,
    pulled back in here as **git submodules**. Added at the owner's request 2026-09-22; the shape
    was settled 2026-09-29.

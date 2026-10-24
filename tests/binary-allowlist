@@ -1,0 +1,45 @@
+# Every binary file this repository may track, with the sha256 its bytes must
+# have. Checked by tests/policy.py (the `policy` suite of tests/run.sh), so a
+# binary that is not here, or one whose bytes moved, fails CI.
+#
+# Format is sha256sum's: "<sha256>  <path>". Regenerate a line with
+#     sha256sum <path>
+# and say in the commit why the bytes changed. Do it on a signed commit: for
+# our own build output that signature IS the provenance record (AGENTS.md,
+# "What we built ourselves is not external").
+#
+# Do not add a third-party binary here. The policy is AGENTS.md's and the
+# inventory is docs/54; this file only makes the inventory executable.
+
+# --- ours: NDK r27c build of phase2/ (docs/08), shipped by camera-gbm ---------
+ccf61a8e56691251f23342fb45d4f177a1f38c9a94d6a4ab63db9a94c57467e5  artifacts/phase2/libgbm_mesa_wrapper-fixed-32.so
+d74e5de03be83fa065a1f7daa64f9e8dd5aa2b28689e2532992df3ad3964d626  artifacts/phase2/libgbm_mesa_wrapper-fixed-64.so
+
+# --- evidence: dumped from bigtab01's own firmware and devices, never shipped -
+35d6bac70d6fdbedded895d8c6aab8526f02496921592db082ff755fa87ff05a  artifacts/acpi/DSDT.aml
+924fd061afc0a6177c9051d07438907d53fdd3ff97a6e95331980a54f70b9753  artifacts/acpi/SSDT1.aml
+6e79028723bf5371bd6d672de706325d8bc52f4c938661a13bbc2c42ea8c32d1  artifacts/acpi/SSDT2.aml
+b1ab3d1a04b45e2fb4d3f40248e60f1fe31f59478bfc936581b29b6300b4f1a3  artifacts/acpi/SSDT3.aml
+51103e675ceb76bfa10935fc27637646a8acf601e0f241a1f7dd5b28e5f26376  artifacts/acpi/SSDT4.aml
+ea7970a169db0214cdd65201ad851822448d132a7f16d847a441d850fd2f5164  artifacts/acpi/SSDT5.aml
+bd52681acf9b2135ff5f4e1480605c14dfbc0d952ad6b9963d6c9ef60c61de59  artifacts/acpi/SSDT6.aml
+d2d0b0736797e4346599cd76777872339c63c85748bb8b9d2ba64b24627a4790  artifacts/hid/ite8350-sensorhub.rd
+ff06d6ff0d4fac425211c60cd7400763ff40e8f79dade47c54520d300732d133  artifacts/hid/syna7500-touch.rd
+
+# --- evidence: screenshots ----------------------------------------------------
+4d85ef53a4d87e5a3f2bb1cd6f0ae563da8080ec619753b734e6f80c8f40e5d5  artifacts/binder/a16-boot-vidiot01.png
+
+# --- GRANDFATHERED: third-party, non-compliant, migrating out per docs/54 -----
+# Each of these is a violation already on record. Delete the line in the same
+# commit that deletes the file; never add one.
+7028e057f21fb7b7cbb3e4cfce88a29f7ff35a3304107f4c1d1849193343a017  artifacts/camera/camera.device@3.4-external-impl.so.back
+5cefb4c4823483730e9add4953d4d6954200957679aaba8aaaa3e4f20d25498c  artifacts/camera/camera.device@3.4-external-impl.so.front
+95b1b3e4ff6d17ce7cd56086626b6cbc0db7c70fd49760b57414f8128c91dd69  artifacts/camera/camera.device@3.4-external-impl.so.orig
+a8401c142f4f1f42d854f558fade2207915b2f40ff6df306cb4c02bc3027c40a  artifacts/health/android.hardware.health@2.0-service.waydroid
+de3cf6bc2565079893dbc3db5c52791c30b168df9c3684e4b4857db4a483a79b  artifacts/health/android.hardware.health@2.0-service.waydroid.orig
+2b8b0d322a60dd89c05d278c8583cc3e2c0496de740b237ec5f1600a830717e0  artifacts/lib/android-libgbm_mesa-32.so
+ca64248e9daa9b30a957e0903b1d2419c388e493e40ac6b09b5c0e4c835ccaf6  artifacts/lib/android-libgbm_mesa.so
+55eee0b43fc4abad29aa746eb734676691357614a5d8f75418baa162faf9422e  artifacts/lib/libgbm_mesa_wrapper-32.so
+03dc230bf87ff1a5f59c521e2ddbd6b04bb8ab692d2fe057caf7b57c65d78620  artifacts/lib/libgbm_mesa_wrapper.so
+b2fd9fd91514ae9564fb6a29f9a133372ab9f1d2e89f6929848919fb15515a6a  artifacts/widevine/vendor/bin/hw/android.hardware.drm-service-lazy.widevine
+d619374fb942ab386a4e8a9fa8f022c24e0647e241d31a1edb68f5d257f89db7  artifacts/widevine/vendor/lib64/libwvaidl.so

@@ -521,14 +521,27 @@ and `waydroid status` is what answers.
 - **Printing works via Mopria** (test page, 2026-09-11). `com.android.bips` discovers the Canon
   but has not had a job put through it specifically. Near-certain to work, since it is the same
   IPP-to-CUPS path, but not tested.
-- The rich rule is permanent but has **not been watched across a reboot** -- neither has the
-  avahi reflector (below). One reboot settles both, and it is now the same reboot that would
-  exercise `waydroid-mdns-reflector.service` and the two restart paths the dev box cannot reach.
+- ~~The rich rule is permanent but has **not been watched across a reboot**~~ -- **watched
+  2026-10-19**: after a reboot `waydroid-mdns-reflector --verify` reports the rule live *and*
+  permanent, `waydroid-mdns-reflector.service` ran at boot with `Result=success`, and
+  `avahi-daemon.conf` came through unchanged (`49d456d8…`). The two restart paths were **not**
+  exercised: the config already agreed, so the reconciler had nothing to restart.
 - ~~The firewalld rule is captured in `artifacts/mdns/` but not packaged~~ -- **packaged
   2026-10-06**, and not as a file: `firewall-cmd --add-rich-rule` is additive and removable by
   name, so firewalld's zone file stays firewalld's. See above.
 - Is the shade-holds-focus state persistent or a one-off? Worth knowing generally -- it would
   block any future UI-dependent test, not just this one.
-- Does the reflector survive a reboot cleanly, with `waydroid0` appearing after avahi starts?
-  avahi handles interface hotplug, and the startup log shows it enumerating and joining
-  `waydroid0` -- but this has **not** been watched across an actual reboot.
+- ~~Does the reflector survive a reboot cleanly, with `waydroid0` appearing after avahi starts?~~
+  -- **yes, by hotplug, measured 2026-10-19.** avahi started at 17:30:23 and joined `lo` and
+  `wlp1s0`; the owner logged in at the greeter later, and at 17:36:49 -- the same second the kernel
+  attached the container's veth to the new bridge -- avahi logged *Joining mDNS multicast group on
+  interface waydroid0.IPv4* and `.IPv6`, with no restart. 22 seconds later, as Android's Wi-Fi stack
+  re-associated the host radio, `wlp1s0` left and re-joined with a new IPv6 link-local address,
+  and avahi followed that too. **And end to end, the same session:** the owner searched for
+  printers in Mopria, which found `Canon-MF642C-643C-644C-UFR-II @ vidiot01` -- the CUPS queue
+  vidiot01 shares, which bigtab01's avahi sees on `wlp1s0` as `vidiot01.local` at `10.42.0.1:631` --
+  and printed a test page. vidiot01's cupsd logged it as **job 194** at 17:41:28: `Print-Job
+  successful-ok` from `10.42.0.137`, user `WayDroid x86_64 Device`, `MopriaTestPage.pdf`, completed
+  17:41:32. A trap in checking that: `lpstat -W completed -o` on vidiot01 put jobs from May at the
+  end of its list, so `tail` showed nothing from today; `journalctl -u cups` and `lpstat -W all -o`
+  are what show the job.

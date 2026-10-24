@@ -30,7 +30,7 @@
 #
 # The file is verbatim in form from AOSP frameworks/native/data/etc.
 
-VERSION=1.0.0
+VERSION=1.0.1
 RELEASE=1
 KIND=overlay
 ARCH=noarch

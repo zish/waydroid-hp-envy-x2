@@ -246,7 +246,6 @@ if [ "$AUTO" = 0 ]; then
 fi
 
 LAST_GOOD=$CFG
-BOUNDED=0        # 1 only once a step has actually FAILED, or the ladder ran out
 ABORT=""         # set when the measurement broke down rather than the host
 for q in $CANDIDATES; do
     ms=$(python3 -c "print('%.2f' % ($q * 1000.0 / $RATE))")
@@ -272,7 +271,7 @@ for q in $CANDIDATES; do
         done
         inf "PipeWire resamples across that gap. This is what sounds wrong, and it"
         inf "does NOT show up as an xrun. $q is below this host's usable floor."
-        BOUNDED=1; break
+        break
     fi
     ok "every client is getting the quantum it asked for"
     inf "sampling xruns for ${SAMPLE}s (secondary signal)"
@@ -283,7 +282,7 @@ for q in $CANDIDATES; do
     fi
     if [ "$delta" -gt "$TOLERANCE" ]; then
         bad "$delta xruns in ${SAMPLE}s -- deadline misses on top of it. $q is too low."
-        BOUNDED=1; break
+        break
     fi
     ok "$delta xruns in ${SAMPLE}s"
     if [ "$AUTO" = 1 ]; then
@@ -297,10 +296,9 @@ for q in $CANDIDATES; do
         q|Q) ABORT="stopped at the operator's request"; break ;;
         *)   bad "audible at $q frames with ERR flat -- that is drift, not load"
              inf "worth recording separately: the counters said this step was fine."
-             BOUNDED=1; break ;;
+             break ;;
     esac
 done
-[ -n "$ABORT" ] || BOUNDED=1
 
 head_ "Result"
 if [ -n "$ABORT" ]; then

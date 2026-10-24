@@ -51,6 +51,12 @@ KIND=overlay
 # x86_64 Android ELF. Not noarch, for the reason camera-gbm gives.
 ARCH=x86_64
 
+# Android 13 only. The pinned target does not exist on A16: there is no
+# /vendor/bin/hw/android.hardware.health@2.0-service.waydroid at all, because
+# A16 ships an AIDL health-service.example instead. The fix has to be found
+# afresh in a different binary -- a re-find, not a re-derive. docs/64.
+ANDROID="13"
+
 SUMMARY="Health HAL patched so Android sees the real battery, and keeps seeing it"
 
 # android.hardware.health@2.0-service and healthd are AOSP; this is Waydroid's

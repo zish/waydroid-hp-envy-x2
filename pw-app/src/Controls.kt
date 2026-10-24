@@ -5,6 +5,7 @@
 package com.systemhalted.patchbay
 
 import org.json.JSONObject
+import java.util.Locale
 
 /**
  * A filter graph's control ports, as the daemon projects them.
@@ -15,6 +16,20 @@ import org.json.JSONObject
  * readonly. See docs/56 and waydroid-pwd's Graph._controls.
  */
 object Controls {
+
+    /**
+     * A control value as the "Set…" dialog pre-fills it, and the parse that
+     * reads it back.
+     *
+     * Locale.ROOT, not the device locale: "%.4f" in a decimal-comma locale
+     * writes "0,5000", which toDoubleOrNull() rejects, so pressing Set on the
+     * untouched pre-filled value said "not a number". The parse also takes a
+     * comma, because that is the key a decimal-comma user reaches for. The
+     * readouts stay in the device locale; they are only ever read by people.
+     */
+    fun editText(value: Double): String = String.format(Locale.ROOT, "%.4f", value)
+
+    fun parseEntry(text: String): Double? = text.trim().replace(',', '.').toDoubleOrNull()
 
     class Control(
         val key: String,

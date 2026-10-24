@@ -1,0 +1,254 @@
+#!/bin/sh
+# Copyright 2026 Jeremy Melanson
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# waydroid-binder-policy -- load the waydroid_binder SELinux module, so that
+# Android's APEX-packaged HALs can reach the rest of the container over binder
+# and the container boots at all. See docs/64-vidiot01-atv-host.md.
+#
+# WHY THIS EXISTS RATHER THAN A %post SCRIPTLET
+#
+# On an rpm-ostree host a scriptlet runs against the compose, not against the
+# booted system, so `semodule -i` from %post never reaches the running machine's
+# policy store. That was found the hard way for waydroid_backlight on
+# 2026-09-24: the package was installed, its policy was absent from the
+# deployment's pristine /usr/etc, and nothing reported a problem. The package
+# looked correct and did nothing. This one would fail the same way, and here the
+# symptom is an Android that never boots.
+#
+# So the load happens at boot, from waydroid-binder-policy.service. That works
+# on an ordinary host too; there is no ostree-specific branch here.
+#
+# IDEMPOTENT BY HASH, NOT BY NAME
+#
+# `semodule -l` answers whether a module called waydroid_binder is loaded, never
+# whether it is THIS one, so an upgrade carrying a changed policy would look
+# already-done and be skipped. The stamp records the hash of the CIL actually
+# loaded, and a mismatch is what triggers the reinstall. That matters for cost
+# as well as correctness: `semodule -i` rebuilds the whole policy store and
+# takes seconds, which is not a thing to do on every boot for nothing.
+#
+# WHY IT ASKS THE KERNEL FOR THE DECISION, NOT setools, AND NOT semodule's
+# EXIT STATUS
+#
+# `semodule -i` exiting 0 says the CIL compiled and was stored. It does not say
+# the resulting decision is what we wanted -- a later module at a higher
+# priority, a boolean, or a future Fedora policy that renames a type could all
+# leave the module loaded and the permission still refused. The whole symptom
+# this fixes is a container that will not boot, which is an expensive way to
+# find that out.
+#
+# So the check asks the kernel directly, through selinuxfs:
+#
+#   /sys/fs/selinux/access is the security_compute_av interface. Write
+#   "scon tcon class requested" to an fd opened read-write, read the reply back
+#   from the SAME fd, and the first field is the allowed vector for that triple.
+#   The node is mode 0666, so this needs no privilege, and no setools -- which
+#   is the same reason waydroid-appfuse-policy writes to /sys/fs/selinux/context
+#   instead of shelling out to sesearch.
+#
+# ONE SURPRISE, WRITTEN DOWN BECAUSE IT COST TIME TO ESTABLISH
+#
+#   /sys/fs/selinux/class/binder/perms/<p> holds the permission's 1-BASED BIT
+#   POSITION, not its bitmask. On Fedora 43 the binder class reads
+#   impersonate=1, call=2, set_context_mgr=3, transfer=4 -- which are plainly
+#   indices and not the 1/2/4/8 a mask would give. The mask is 1 << (pos - 1).
+#   Verified against a live decision: with this module loaded the kernel returns
+#   allowed=0xa for spc_t -> container_runtime_t, and 0xa is exactly
+#   (1<<1)|(1<<3) = call|transfer, with impersonate and set_context_mgr clear.
+#   Reading those files as masks would silently test the wrong bits.
+#
+# Usage:
+#   waydroid-binder-policy            load if the loaded policy is not this one
+#   waydroid-binder-policy --verify   report, change nothing (exit 3 on drift)
+#   waydroid-binder-policy --unload   remove the module and the stamp
+#   waydroid-binder-policy --force    reload even if the stamp already matches
+#
+# Env: CIL, STATE_DIR
+set -eu
+
+MODULE=waydroid_binder
+STATE_DIR=${STATE_DIR:-/var/lib/waydroid-binder}
+STAMP="$STATE_DIR/policy.sha256"
+
+CLASS=binder
+PERMS='call transfer'
+# The two directions the container needs, as the .cil grants them. Hardcoded
+# rather than parsed out of the CIL on purpose: these are what Android's boot
+# demands, so they are the thing to test against, and a CIL that stopped
+# producing them is exactly the regression this check should catch.
+PAIRS='system_u:system_r:spc_t:s0|system_u:system_r:container_runtime_t:s0
+system_u:system_r:container_runtime_t:s0|system_u:system_r:spc_t:s0'
+
+# /usr/local first so a hand-staged CIL beats a packaged one on an immutable
+# host -- the same precedence waydroid-appfuse-policy and waydroid-overlay-sync
+# use.
+PACKAGED=/usr/share/waydroid-binder/waydroid_binder.cil
+if [ -z "${CIL:-}" ]; then
+	for c in /usr/local/share/waydroid-binder/waydroid_binder.cil \
+	         "$PACKAGED"; do
+		[ -f "$c" ] && CIL="$c" && break
+	done
+fi
+
+# An explicit usage block rather than the `sed -n 'N,Mp' "$0"` idiom the older
+# loaders here use: that prints whatever happens to be on those lines, so it
+# goes quietly wrong the first time somebody edits the header above it.
+usage() {
+	cat <<'EOF'
+waydroid-binder-policy            load if the loaded policy is not this one
+waydroid-binder-policy --verify   report, change nothing (exit 3 on drift)
+waydroid-binder-policy --unload   remove the module and the stamp
+waydroid-binder-policy --force    reload even if the stamp already matches
+EOF
+}
+
+VERIFY=0
+UNLOAD=0
+FORCE=0
+QUIET=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--verify|-n|--dry-run) VERIFY=1; shift ;;
+	--unload)              UNLOAD=1; shift ;;
+	--force)               FORCE=1; shift ;;
+	--quiet|-q)            QUIET=1; shift ;;
+	-h|--help) usage; exit 0 ;;
+	*) echo "unknown argument: $1" >&2; exit 2 ;;
+	esac
+done
+
+say()  { [ "$QUIET" = 1 ] || echo "$@"; }
+warn() { echo "$@" >&2; }
+
+# Build the bitmask for $PERMS. See the header: these files hold bit POSITIONS.
+perm_mask() {
+	_m=0
+	for _p in $PERMS; do
+		_pos=$(cat "/sys/fs/selinux/class/$CLASS/perms/$_p" 2>/dev/null) || return 1
+		[ -n "$_pos" ] || return 1
+		_m=$(( _m | (1 << (_pos - 1)) ))
+	done
+	printf '%s' "$_m"
+}
+
+# Ask the kernel for the allowed vector for one (scon, tcon, class) triple.
+# Echoes it in hex, or fails. The write and the read must be on the SAME fd:
+# selinuxfs treats the pair as one transaction.
+av_allowed() {
+	_cls=$(cat "/sys/fs/selinux/class/$CLASS/index" 2>/dev/null) || return 1
+	[ -n "$_cls" ] || return 1
+	exec 3<>/sys/fs/selinux/access || return 1
+	# A context naming a type this policy does not have is rejected here, with
+	# EINVAL on the write -- which is a real answer and not an error to hide.
+	if ! printf '%s %s %s 1' "$1" "$2" "$_cls" >&3 2>/dev/null; then
+		exec 3>&- ; return 1
+	fi
+	# DO NOT TEST read's EXIT STATUS HERE. selinuxfs replies WITHOUT a trailing
+	# newline -- `od -c` on the reply ends at the last digit -- so read hits EOF
+	# before a delimiter and returns 1 while having assigned the variables
+	# perfectly well (measured: rc=1, _allowed=a). Branching on that status
+	# makes this check fail on every healthy host, which would turn a working
+	# install into a loud "Android will not boot" warning. The emptiness of the
+	# variable is the real test.
+	_allowed=''
+	read -r _allowed _rest <&3 || :
+	exec 3>&-
+	[ -n "$_allowed" ] || return 1
+	printf '%s' "$_allowed"
+}
+
+# Not an error. A host built without SELinux is one where this module would be
+# meaningless rather than wrong, and the unit must not fail on it. It is also
+# the one case where the container needs no help: with no policy there is
+# nothing to deny the binder transactions.
+if ! command -v selinuxenabled >/dev/null 2>&1 || ! selinuxenabled 2>/dev/null; then
+	say "SELinux is not enabled -- nothing to load, and binder is not denied"
+	exit 0
+fi
+
+if [ "$UNLOAD" = 1 ]; then
+	semodule -r "$MODULE" 2>/dev/null || :
+	rm -f "$STAMP"
+	say "removed $MODULE -- Android will stop booting if its HALs are APEX-packaged"
+	exit 0
+fi
+
+if [ -z "${CIL:-}" ] || [ ! -f "$CIL" ]; then
+	warn "no policy to load: waydroid_binder.cil is not installed"
+	exit 1
+fi
+
+# Shadowing a package is a legitimate thing to do deliberately and a miserable
+# thing to do by accident. waydroid_backlight lost a day to exactly this on
+# 2026-09-24, when an unowned /usr/local CIL left over from a by-hand install
+# shadowed the fixed packaged one and the stamp matched, so the loader reported
+# "already loaded and current" while the old policy was the one in force.
+if [ -f "$PACKAGED" ] && [ "$CIL" != "$PACKAGED" ]; then
+	warn "note: using $CIL, which shadows the packaged $PACKAGED"
+	if ! cmp -s "$CIL" "$PACKAGED"; then
+		warn "      and they DIFFER -- the packaged policy is not the one in force."
+		warn "      Remove the first to go back to the packaged one."
+	fi
+fi
+
+want=$(sha256sum "$CIL" | cut -d' ' -f1)
+have=""
+if semodule -l 2>/dev/null | grep -qx "$MODULE"; then
+	have=$(cat "$STAMP" 2>/dev/null || echo "unknown")
+fi
+
+if [ "$want" = "$have" ] && [ "$FORCE" != 1 ]; then
+	say "$MODULE already loaded and current"
+else
+	if [ "$VERIFY" = 1 ]; then
+		if [ -z "$have" ]; then say "not loaded: $MODULE"
+		else say "differs: $MODULE (loaded $have, packaged $want)"; fi
+		exit 3
+	fi
+	say "loading $MODULE from $CIL"
+	semodule -i "$CIL"
+	mkdir -p "$STATE_DIR"
+	printf '%s\n' "$want" >"$STAMP"
+fi
+
+# The check that actually matters: is the permission in force RIGHT NOW, as the
+# kernel sees it? A loaded module that does not produce these decisions leaves
+# Android unable to boot, and the only other evidence is 600-odd AVCs and a
+# 240-second wait.
+mask=$(perm_mask) || {
+	warn "warning: the kernel has no '$CLASS' class, or no $PERMS in it."
+	warn "         Cannot verify; the module is loaded but unchecked."
+	exit 3
+}
+
+bad=0
+for pair in $PAIRS; do
+	scon=${pair%%|*}
+	tcon=${pair#*|}
+	if a=$(av_allowed "$scon" "$tcon") && [ -n "$a" ]; then
+		dec=$(( 0x$a ))
+		if [ $(( dec & mask )) -eq "$mask" ]; then
+			say "  ok       $PERMS: ${scon#*:*:} -> ${tcon#*:*:}"
+		else
+			warn "  REFUSED  $PERMS: ${scon#*:*:} -> ${tcon#*:*:} (allowed=0x$a)"
+			bad=1
+		fi
+	else
+		# Almost always a type this policy does not define -- container-selinux
+		# absent, or a Fedora release that renamed one.
+		warn "  UNKNOWN  cannot compute $scon -> $tcon (is container-selinux installed?)"
+		bad=1
+	fi
+done
+
+if [ "$bad" != 0 ]; then
+	warn "warning: binder is still refused between the container's domains --"
+	warn "         Android will not finish booting. Look for"
+	warn "           denied { call } ... scontext=...spc_t tcontext=...container_runtime_t"
+	warn "         in /var/log/audit/audit.log. NOTE: ausearch does NOT surface"
+	warn "         these -- there is no SYSCALL record to anchor them to, so it"
+	warn "         reports zero on a boot that produced hundreds. grep the file."
+	exit 3
+fi
+exit 0
