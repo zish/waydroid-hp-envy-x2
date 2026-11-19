@@ -837,11 +837,13 @@ world-accessible is the only reason the camera works today.
 
 **Built, measured, and then deliberately kept off master -- 2026-10-06.** Everything above
 this paragraph is the original scoping, and it is now out of date: goal 5 went a long way
-past "nothing built". It is on branch **`goal5-audio-alsa`** (tip `a72c6b2`, seven commits
-on top of master's current head), and bigtab01 was **reverted to the stock arrangement**
-afterwards, so master and the machine both describe Waydroid's default audio again. Read
-[44-audio-alsa-backend.md](44-audio-alsa-backend.md) **on that branch**: master's copy is
-the pre-build scoping document and stops before anything was measured.
+past "nothing built". It is on branch **`goal5-audio-alsa`** (tip `9f73b2a`, nine commits
+on top of `b67760e`, master as of 2026-10-05; the last two fix the revert paths that taking the
+arm back off bigtab01 exercised), and bigtab01 was **reverted to the stock arrangement**
+afterwards, so master and the machine both describe Waydroid's default audio again. The branch
+has been on GitHub since 2026-11-19; until then it existed only in the dev box's clone. Read
+[44-audio-alsa-backend.md **on that branch**](https://github.com/zish/waydroid-hp-envy-x2/blob/goal5-audio-alsa/docs/44-audio-alsa-backend.md):
+master's copy is the pre-build scoping document and stops before anything was measured.
 
 What is on the branch, all of it runtime-verified:
 
